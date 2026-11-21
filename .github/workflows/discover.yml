@@ -1,4 +1,4 @@
-name: Discover Live Azure and Octopus State
+name: Discover Live Azure and Octopus Capabilities
 
 on:
   push:
@@ -14,7 +14,7 @@ jobs:
   discover:
     runs-on: ubuntu-24.04
     steps:
-      - name: Login to Azure and inspect permissions, stacks, and resources
+      - name: Check Azure capabilities and SQL/ACR/EventGrid
         env:
           ARM_CLIENT_ID: ${{ secrets.AZURE_CLIENT_ID }}
           ARM_CLIENT_SECRET: ${{ secrets.AZURE_CLIENT_SECRET }}
@@ -22,57 +22,27 @@ jobs:
           ARM_SUBSCRIPTION_ID: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
         run: |
           set -euo pipefail
-          mkdir -p out/azure out/octopus
+          mkdir -p out
           az login --service-principal -u "$ARM_CLIENT_ID" -p "$ARM_CLIENT_SECRET" --tenant "$ARM_TENANT_ID" --output none
           az account set --subscription "$ARM_SUBSCRIPTION_ID"
 
-          az account show --query '{id:id,name:name,tenantId:tenantId,userType:user.type}' -o json > out/azure/account.json
-          az provider list --query "[?namespace=='Microsoft.EventGrid' || namespace=='Microsoft.App' || namespace=='Microsoft.Sql' || namespace=='Microsoft.Storage' || namespace=='Microsoft.ContainerRegistry' || namespace=='Microsoft.ResourceGraph' || namespace=='Microsoft.OperationalInsights' || namespace=='Microsoft.Insights'].{namespace:namespace,state:registrationState}" -o json > out/azure/providers.json
+          # 1. Test Microsoft.EventGrid provider registration permission
+          set +e
+          az provider register --namespace Microsoft.EventGrid -o json > out/eventgrid-register.txt 2>&1
+          echo "eventgrid_register_exit=$?" >> out/eventgrid-register.txt
+          az provider show --namespace Microsoft.EventGrid --query '{namespace:namespace,registrationState:registrationState}' -o json > out/eventgrid-provider.json 2>&1
 
-          # Check role assignments for our SP
-          SP_OID=$(az ad sp show --id "$ARM_CLIENT_ID" --query id -o tsv 2>/dev/null || echo "")
-          echo "{\"spObjectId\":\"$SP_OID\"}" > out/azure/sp.json
-          az role assignment list --assignee "$ARM_CLIENT_ID" --all --query '[].{scope:scope,roleDefinitionName:roleDefinitionName}' -o json > out/azure/roles.json || echo '[]' > out/azure/roles.json
+          # 2. Check ACR permissions (check token/admin capabilities without mutating yet)
+          az acr show -n acrcmdemo1chu4gq -g rg-cmdemo1-nonprod -o json > out/acr-detail.json 2>&1
+          az acr repository show-tags -n acrcmdemo1chu4gq --repository cmdemo1/ui --top 10 --orderby time_desc -o json > out/acr-ui-tags.json 2>&1
 
-          # Deployment stacks & deny assignments in both RGs
-          for rg in rg-cmdemo1-nonprod rg-cmdemo1-prod; do
-            az stack group list --resource-group "$rg" -o json > "out/azure/stacks-$rg.json" 2>&1 || true
-            az rest --method get --url "https://management.azure.com/subscriptions/$ARM_SUBSCRIPTION_ID/resourceGroups/$rg/providers/Microsoft.Authorization/denyAssignments?api-version=2022-04-01" -o json > "out/azure/deny-$rg.json" 2>&1 || true
-            az eventgrid system-topic list --resource-group "$rg" -o json > "out/azure/eventgrid-topics-$rg.json" 2>&1 || true
-          done
-
-          # Resource Graph: resources & resourcechanges (sanitized)
+          # 3. Check Resource Graph subscription-wide counts (to see SQL free limit / ManagedEnvironments count)
           az rest --method post --url "https://management.azure.com/providers/Microsoft.ResourceGraph/resources?api-version=2022-10-01" \
-            --body '{"subscriptions":["'"$ARM_SUBSCRIPTION_ID"'"],"query":"resources | where resourceGroup in~ (\"rg-cmdemo1-nonprod\", \"rg-cmdemo1-prod\") | project id, name, type, resourceGroup, location, tags, kind, sku, provisioningState = tostring(properties.provisioningState) | order by resourceGroup asc, type asc, name asc"}' \
-            -o json > out/azure/arg-resources.json 2>&1 || true
+            --body '{"subscriptions":["'"$ARM_SUBSCRIPTION_ID"'"],"query":"resources | where type in~ (\"microsoft.app/managedenvironments\", \"microsoft.sql/servers/databases\") | project name, resourceGroup, location, type, sku, freeLimit = tostring(properties.useFreeLimit)"}' \
+            -o json > out/arg-sub-quotas.json 2>&1
+          set -e
 
-          az rest --method post --url "https://management.azure.com/providers/Microsoft.ResourceGraph/resources?api-version=2022-10-01" \
-            --body '{"subscriptions":["'"$ARM_SUBSCRIPTION_ID"'"],"query":"resourcechanges | where resourceGroup in~ (\"rg-cmdemo1-nonprod\", \"rg-cmdemo1-prod\") | project id, targetResourceId = tostring(properties.targetResourceId), targetResourceType = tostring(properties.targetResourceType), changeType = tostring(properties.changeType), timestamp = tostring(properties.changeAttributes.timestamp), changedBy = tostring(properties.changeAttributes.changedBy), changedByType = tostring(properties.changeAttributes.changedByType), clientType = tostring(properties.changeAttributes.clientType), operation = tostring(properties.changeAttributes.operation) | order by timestamp desc | take 50"}' \
-            -o json > out/azure/arg-changes.json 2>&1 || true
-
-          # Container Apps environments & apps & revisions (no secrets/env values)
-          az containerapp env list -g rg-cmdemo1-nonprod -o json | jq '[.[] | {name, id, location, defaultDomain: .properties.defaultDomain, workloadProfiles: .properties.workloadProfiles, appLogsDestination: .properties.appLogsConfiguration.destination, provisioningState: .properties.provisioningState}]' > out/azure/cae-nonprod.json 2>&1 || true
-          az containerapp env list -g rg-cmdemo1-prod -o json | jq '[.[] | {name, id, location, defaultDomain: .properties.defaultDomain, workloadProfiles: .properties.workloadProfiles, appLogsDestination: .properties.appLogsConfiguration.destination, provisioningState: .properties.provisioningState}]' > out/azure/cae-prod.json 2>&1 || true
-
-          for rg in rg-cmdemo1-nonprod rg-cmdemo1-prod; do
-            az containerapp list -g "$rg" -o json | jq '[.[] | {name, id, environmentId: .properties.environmentId, fqdn: .properties.configuration.ingress.fqdn, activeRevisionsMode: .properties.configuration.activeRevisionsMode, latestRevisionName: .properties.latestRevisionName, latestReadyRevisionName: .properties.latestReadyRevisionName, runningStatus: .properties.runningStatus, provisioningState: .properties.provisioningState, image: .properties.template.containers[0].image, scale: .properties.template.scale}]' > "out/azure/ca-$rg.json" 2>&1 || true
-          done
-          for app in ca-cmdemo1-tdd-ui ca-cmdemo1-uat-ui-fccv; do
-            az containerapp revision list -n "$app" -g rg-cmdemo1-nonprod -o json | jq '[.[] | {name, active: .properties.active, createdTime: .properties.createdTime, trafficWeight: .properties.trafficWeight, provisioningState: .properties.provisioningState, runningState: .properties.runningState, healthState: .properties.healthState, replicas: .properties.replicas, image: .properties.template.containers[0].image}]' > "out/azure/revisions-$app.json" 2>&1 || true
-          done
-          az containerapp revision list -n ca-cmdemo1-prod-ui-bhj5 -g rg-cmdemo1-prod -o json | jq '[.[] | {name, active: .properties.active, createdTime: .properties.createdTime, trafficWeight: .properties.trafficWeight, provisioningState: .properties.provisioningState, runningState: .properties.runningState, healthState: .properties.healthState, replicas: .properties.replicas, image: .properties.template.containers[0].image}]' > "out/azure/revisions-ca-cmdemo1-prod-ui-bhj5.json" 2>&1 || true
-
-          # SQL servers & databases & ACR
-          az sql server list -g rg-cmdemo1-nonprod -o json | jq '[.[] | {name, id, location, fqdn: .fullyQualifiedDomainName, version, state, publicNetworkAccess}]' > out/azure/sql-nonprod.json 2>&1 || true
-          az sql db list -g rg-cmdemo1-nonprod -s sql-cmdemo1-tdd-5tu77 -o json | jq '[.[] | {name, status, sku: .currentSku, maxSizeBytes, useFreeLimit: .useFreeLimit}]' > out/azure/sqldb-tdd.json 2>&1 || true
-          az sql db list -g rg-cmdemo1-nonprod -s sql-cmdemo1-uat-72l7x -o json | jq '[.[] | {name, status, sku: .currentSku, maxSizeBytes, useFreeLimit: .useFreeLimit}]' > out/azure/sqldb-uat.json 2>&1 || true
-          az acr show -n acrcmdemo1chu4gq -g rg-cmdemo1-nonprod -o json | jq '{name, loginServer, adminUserEnabled, sku, provisioningState}' > out/azure/acr.json 2>&1 || true
-          az acr repository list -n acrcmdemo1chu4gq -o json > out/azure/acr-repos.json 2>&1 || true
-
-          # Check test deployment capability (what-if / permission check on storage or containerapp in rg-cmdemo1-nonprod)
-          az group show -n rg-cmdemo1-nonprod --query '{name:name,location:location,managedBy:managedBy}' -o json > out/azure/rg-nonprod.json
-
-      - name: Inspect Octopus Deploy Spaces-355
+      - name: Check Octopus additional endpoints
         env:
           OCTOPUS_URL: ${{ secrets.OCTOPUS_URL }}
           OCTOPUS_API_KEY: ${{ secrets.OCTOPUS_API_KEY }}
@@ -80,38 +50,18 @@ jobs:
           set -euo pipefail
           mkdir -p out/octopus
           BASE="${OCTOPUS_URL%/}"
-          get_octo() {
-            curl -fsS -H "X-Octopus-ApiKey: $OCTOPUS_API_KEY" "$BASE$1"
-          }
-          get_octo "/api" | jq '{Version, ApiVersion, InstallationId}' > out/octopus/server.json
-          get_octo "/api/events/categories" > out/octopus/event-categories.json
-          get_octo "/api/events/groups" > out/octopus/event-groups.json
-          get_octo "/api/Spaces-355" | jq '{Id, Name, Slug, IsDefault}' > out/octopus/space.json
-          get_octo "/api/Spaces-355/projects?take=100" | jq '[.Items[] | {Id, Name, Slug, IsDisabled, LifecycleId, ProjectGroupId, PersistenceSettings}]' > out/octopus/projects.json
-          get_octo "/api/Spaces-355/environments?take=100" | jq '[.Items[] | {Id, Name, Slug, SortOrder, Type, AllowDynamicInfrastructure}]' > out/octopus/environments.json
-          get_octo "/api/Spaces-355/lifecycles?take=100" | jq '[.Items[] | {Id, Name, Phases}]' > out/octopus/lifecycles.json
-          get_octo "/api/Spaces-355/subscriptions?take=100" | jq '[.Items[] | {Id, Name, Type, IsDisabled, EventNotificationSubscription: {Filter: .EventNotificationSubscription.Filter, WebhookURI: .EventNotificationSubscription.WebhookURI, WebhookTimeout: .EventNotificationSubscription.WebhookTimeout, WebhookHeaderKey: .EventNotificationSubscription.WebhookHeaderKey, WebhookHeaderValue: (if .EventNotificationSubscription.WebhookHeaderValue then "[REDACTED]" else null end), WebhookTeams: .EventNotificationSubscription.WebhookTeams}}]' > out/octopus/subscriptions.json
-          get_octo "/api/Spaces-355/events?take=30" | jq '[.Items[] | {Id, Category, Message, Occurred, UserId, Username, RelatedDocumentIds}]' > out/octopus/recent-events.json
-          get_octo "/api/Spaces-355/tasks?take=30" | jq '[.Items[] | {Id, Name, Description, State, Completed, QueueTime, StartTime, CompletedTime, Duration, HasPendingInterruptions, HasWarningsOrErrors, FinishedSuccessfully, SpaceId, Arguments}]' > out/octopus/recent-tasks.json
-          get_octo "/api/Spaces-355/interruptions?take=20" | jq '[.Items[] | {Id, Title, Type, Created, IsPending, RelatedDocumentIds, ResponsibleTeamIds, ResponsibleUserId}]' > out/octopus/recent-interruptions.json
-          get_octo "/api/Spaces-355/deployments?take=20" | jq '[.Items[] | {Id, Name, ProjectId, EnvironmentId, ReleaseId, ChannelId, TaskId, Created, DeployedBy}]' > out/octopus/recent-deployments.json
-          get_octo "/api/Spaces-355/releases?take=20" | jq '[.Items[] | {Id, Version, ProjectId, ChannelId, Assembled, ReleaseNotes}]' > out/octopus/recent-releases.json
-          get_octo "/api/deploymentfreezes?skip=0&take=50" > out/octopus/freezes.json 2>&1 || true
-          # Inspect Subscription model schema from Swagger if available
-          curl -fsS "$BASE/swaggerui/swagger.json" | jq '.components.schemas.SubscriptionResource, .components.schemas.EventNotificationSubscription' > out/octopus/subscription-schema.json 2>&1 || true
+          get_octo() { curl -fsS -H "X-Octopus-ApiKey: $OCTOPUS_API_KEY" "$BASE$1"; }
+          get_octo "/api/Spaces-355/subscriptions/Subscriptions-1" | jq 'del(.EventNotificationSubscription.WebhookHeaderValue)' > out/octopus/sub1.json
+          get_octo "/api/Spaces-355/runbooks?take=100" | jq '[.Items[] | {Id, Name, ProjectId, EnvironmentScope, Environments, PublishedRunbookSnapshotId}]' > out/octopus/runbooks.json
+          get_octo "/api/Spaces-355/runbookRuns?take=20" | jq '[.Items[] | {Id, Name, RunbookId, ProjectId, EnvironmentId, TaskId, Created}]' > out/octopus/runbook-runs.json
+          get_octo "/api/Spaces-355/build-information?take=10" | jq '[.Items[] | {Id, PackageId, Version, Branch, BuildEnvironment, VcsCommitNumber, BuildUrl, Created}]' > out/octopus/build-info.json
+          get_octo "/api/Spaces-355/packages?take=10" | jq '[.Items[] | {Id, PackageId, Version, Published, FileExtension}]' > out/octopus/packages.json
+          get_octo "/api/Spaces-355/channels?take=50" | jq '[.Items[] | {Id, Name, ProjectId, LifecycleId, Type, IsDefault}]' > out/octopus/channels.json
+          get_octo "/api/Spaces-355/machines?take=50" | jq '[.Items[] | {Id, Name, Status, HealthStatus, EnvironmentIds, Roles}]' > out/octopus/machines.json
 
-      - name: Check GH_PAT token scopes and org/project access
-        env:
-          GH_PAT: ${{ secrets.GH_PAT }}
-        run: |
-          set -euo pipefail
-          mkdir -p out/github
-          curl -fsSI -H "Authorization: Bearer $GH_PAT" https://api.github.com/user | grep -iE '^(x-oauth-scopes|x-accepted-oauth-scopes):' > out/github/pat-scopes.txt || true
-          echo "Check done" >> out/github/pat-scopes.txt
-
-      - name: Upload sanitized discovery artifacts
+      - name: Upload capabilities artifact
         uses: actions/upload-artifact@v4
         with:
-          name: cmdemo1-discovery
+          name: cmdemo1-capabilities
           path: out/
           retention-days: 1
