@@ -104,7 +104,7 @@ done
 
 echo "=== 2. Registering Octopus Subscription '${SUB_NAME}' in ${OCTO_SPACE} -> ${TWIN_URL}/hooks/octopus ==="
 CATEGORIES_JSON=$(curl -fsSL -H "X-Octopus-ApiKey: ${OCTOPUS_API_KEY}" "${OCTO_BASE}/api/events/categories")
-CATEGORIES_ARRAY=$(echo "$CATEGORIES_JSON" | jq '[.[].Id]')
+CATEGORIES_ARRAY=$(echo "$CATEGORIES_JSON" | jq '[.[].Id | select((startswith("Login") or startswith("License") or startswith("UsageDeclaration") or startswith("ApiKey") or startswith("Certificate") or startswith("SigningKey") or startswith("McpOAuth")) | not)]')
 
 SUBS_JSON=$(curl -fsSL -H "X-Octopus-ApiKey: ${OCTOPUS_API_KEY}" "${OCTO_BASE}/api/${OCTO_SPACE}/subscriptions?take=100")
 EXISTING_SUB_ID=$(echo "$SUBS_JSON" | jq -r --arg name "$SUB_NAME" '[.Items[] | select(.Name == $name)][0].Id // empty')

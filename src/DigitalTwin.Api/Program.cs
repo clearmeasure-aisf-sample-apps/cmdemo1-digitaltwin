@@ -1,3 +1,4 @@
+using System.Text.Json.Serialization;
 using DigitalTwin.Api.Auth;
 using DigitalTwin.Api.Endpoints;
 using DigitalTwin.Api.Mcp;
@@ -11,7 +12,16 @@ using Microsoft.Extensions.Options;
 
 var builder = WebApplication.CreateBuilder(args);
 
-builder.Services.AddSignalR();
+builder.Services.ConfigureHttpJsonOptions(opts =>
+{
+    opts.SerializerOptions.Converters.Add(new JsonStringEnumConverter());
+});
+
+builder.Services.AddSignalR()
+    .AddJsonProtocol(opts =>
+    {
+        opts.PayloadSerializerOptions.Converters.Add(new JsonStringEnumConverter());
+    });
 builder.Services.AddSingleton<RealtimeEventPublisher>();
 builder.Services.AddSingleton<IRealtimeEventPublisher>(sp => sp.GetRequiredService<RealtimeEventPublisher>());
 

@@ -1,5 +1,6 @@
 using System.Collections.Concurrent;
 using System.Text.Json;
+using System.Text.Json.Serialization;
 using System.Threading.Channels;
 using DigitalTwin.Application.Abstractions;
 using DigitalTwin.Domain.Observation;
@@ -15,7 +16,10 @@ public sealed record SseEnvelope(string EventName, string PayloadJson);
 
 public sealed class RealtimeEventPublisher(IHubContext<TwinHub> hubContext) : IRealtimeEventPublisher
 {
-    private static readonly JsonSerializerOptions JsonOptions = new(JsonSerializerDefaults.Web);
+    private static readonly JsonSerializerOptions JsonOptions = new(JsonSerializerDefaults.Web)
+    {
+        Converters = { new JsonStringEnumConverter() }
+    };
     private readonly ConcurrentDictionary<Guid, Channel<SseEnvelope>> _sseSubscribers = new();
 
     public async Task PublishEventAsync(ObservedEvent observedEvent, CancellationToken ct)
