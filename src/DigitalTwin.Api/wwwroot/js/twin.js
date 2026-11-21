@@ -25,6 +25,7 @@
     liveLabel: document.getElementById('live-label'),
     utcClock: document.getElementById('utc-clock'),
     swimLanes: document.getElementById('swim-lanes'),
+    flowCanvasWrap: document.getElementById('flow-canvas-wrap'),
     flowSvg: document.getElementById('flow-svg'),
     envCards: document.getElementById('env-cards'),
     driftList: document.getElementById('drift-list'),
@@ -223,6 +224,11 @@
           Commit: latest.headSha,
           Updated: latest.updatedAt
         }, latest.url);
+      } else if (def.id === 'measurement-scorecard') {
+        main = 'nightly';
+        sub = pipeSummary.repository?.latestCommitMessage || 'space-scorecard';
+        status = 'healthy';
+        onClick = () => openPipelineInspector(pipeSummary);
       } else {
         main = 'no runs';
         sub = def.repository;

@@ -95,7 +95,7 @@ public static partial class WebhookEndpoints
         var normalized = OctopusEventNormalizer.NormalizeSubscriptionPayload(rawJson, null, null, now);
         if (normalized is null)
         {
-            return Results.BadRequest(new { error = "Unrecognized Octopus subscription payload." });
+            return Results.Ok(new { accepted = false, skipped = "filtered_or_unrecognized" });
         }
 
         var accepted = await ingestion.IngestAsync(normalized, ct);

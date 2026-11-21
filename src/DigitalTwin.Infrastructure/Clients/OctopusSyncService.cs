@@ -62,8 +62,9 @@ public sealed partial class OctopusSyncService(
             var envsJson = await GetRequiredAsync(client, $"/api/{space}/environments?take=100", ct);
             var channelsJson = await GetRequiredAsync(client, $"/api/{space}/channels?take=100", ct);
             var releasesJson = await GetRequiredAsync(client, $"/api/{space}/releases?take={(fullBackfill ? 100 : 50)}", ct);
-            var deploymentsJson = await GetRequiredAsync(client, $"/api/{space}/deployments?take={(fullBackfill ? 100 : 50)}", ct);
-            var tasksJson = await GetRequiredAsync(client, $"/api/{space}/tasks?take={(fullBackfill ? 100 : 60)}", ct);
+            var deploymentsJson = await GetRequiredAsync(client, $"/api/{space}/deployments?take={(fullBackfill ? 100 : 60)}", ct);
+            var deployTasksJson = await GetRequiredAsync(client, $"/api/{space}/tasks?name=Deploy&take=100", ct);
+            var runbookTasksJson = await GetOptionalAsync(client, $"/api/{space}/tasks?name=RunbookRun&take=60", ct);
             var interruptionsJson = await GetRequiredAsync(client, $"/api/{space}/interruptions?take=50", ct);
             var eventsJson = await GetRequiredAsync(client, $"/api/{space}/events?take={(fullBackfill ? 100 : 50)}", ct);
             var runbooksJson = await GetOptionalAsync(client, $"/api/{space}/runbooks?take=50", ct);
@@ -142,14 +143,23 @@ public sealed partial class OctopusSyncService(
             }
             await store.UpsertReleasesAsync(releaseMap.Values.ToList(), ct);
 
-            // Tasks + Interruptions
+            // Tasks (Deploy + RunbookRun) + Interruptions
             var taskById = new Dictionary<string, JsonElement>(StringComparer.OrdinalIgnoreCase);
-            var tasksDoc = JsonDocument.Parse(tasksJson);
-            foreach (var t in tasksDoc.RootElement.GetProperty("Items").EnumerateArray())
+            using (var tasksDoc = JsonDocument.Parse(deployTasksJson))
             {
-                taskById[t.GetProperty("Id").GetString()!] = t.Clone();
+                foreach (var t in tasksDoc.RootElement.GetProperty("Items").EnumerateArray())
+                {
+                    taskById[t.GetProperty("Id").GetString()!] = t.Clone();
+                }
             }
-            tasksDoc.Dispose();
+            if (!string.IsNullOrWhiteSpace(runbookTasksJson))
+            {
+                using var rbTasksDoc = JsonDocument.Parse(runbookTasksJson);
+                foreach (var t in rbTasksDoc.RootElement.GetProperty("Items").EnumerateArray())
+                {
+                    taskById[t.GetProperty("Id").GetString()!] = t.Clone();
+                }
+            }
 
             var interruptionByTask = new Dictionary<string, List<JsonElement>>(StringComparer.OrdinalIgnoreCase);
             using (var iDoc = JsonDocument.Parse(interruptionsJson))
@@ -413,6 +423,12 @@ public sealed partial class OctopusSyncService(
             {
                 foreach (var ev in evDoc.RootElement.GetProperty("Items").EnumerateArray())
                 {
+                    var cat = ev.TryGetProperty("Category", out var cEl) ? cEl.GetString() : null;
+                    var msg = ev.TryGetProperty("Message", out var mEl) ? mEl.GetString() : null;
+                    if (OctopusEventNormalizer.IsNoiseAuditEvent(cat, msg))
+                    {
+                        continue;
+                    }
                     var normalized = OctopusEventNormalizer.NormalizeAuditEventElement(
                         ev,
                         baseUri,

@@ -17,6 +17,12 @@ public static class OctopusEventNormalizer
 
         if (root.TryGetProperty("Payload", out var payload) && payload.TryGetProperty("Event", out var ev))
         {
+            var category = GetString(ev, "Category") ?? string.Empty;
+            var message = GetString(ev, "Message") ?? string.Empty;
+            if (IsNoiseAuditEvent(category, message))
+            {
+                return null;
+            }
             var serverUri = GetString(payload, "ServerUri")?.TrimEnd('/') ?? Cmdemo1PlatformCatalog.OctopusUrl;
             return NormalizeAuditEventElement(ev, serverUri, projectNamesById, environmentNamesById, IngestionChannel.Webhook, receivedAt, rawJson);
         }
@@ -24,10 +30,38 @@ public static class OctopusEventNormalizer
         // Direct event shape fallback
         if (root.TryGetProperty("Category", out _) && root.TryGetProperty("Id", out _))
         {
+            var category = GetString(root, "Category") ?? string.Empty;
+            var message = GetString(root, "Message") ?? string.Empty;
+            if (IsNoiseAuditEvent(category, message))
+            {
+                return null;
+            }
             return NormalizeAuditEventElement(root, Cmdemo1PlatformCatalog.OctopusUrl, projectNamesById, environmentNamesById, IngestionChannel.Webhook, receivedAt, rawJson);
         }
 
         return null;
+    }
+
+    public static bool IsNoiseAuditEvent(string? category, string? message)
+    {
+        if (string.IsNullOrWhiteSpace(message))
+        {
+            return false;
+        }
+
+        if (message.Contains("Ran task Process subscriptions", StringComparison.OrdinalIgnoreCase) ||
+            message.Contains("ServerTaskProcessExecution", StringComparison.OrdinalIgnoreCase))
+        {
+            return true;
+        }
+
+        if (message.Contains("OIDC token exchanged", StringComparison.OrdinalIgnoreCase) &&
+            !message.Contains("cmdemo1", StringComparison.OrdinalIgnoreCase))
+        {
+            return true;
+        }
+
+        return false;
     }
 
     public static ObservedEvent NormalizeAuditEventElement(
