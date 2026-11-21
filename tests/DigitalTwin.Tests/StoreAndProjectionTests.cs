@@ -84,6 +84,42 @@ public sealed class StoreAndProjectionTests : IAsyncLifetime, IAsyncDisposable
     }
 
     [Fact]
+    public async Task DuplicateKeysKeepTheEarliestObservationRegardlessOfProcessingOrder()
+    {
+        static ObservedEvent Observation(DateTimeOffset ingestedAt, string summary) => new()
+        {
+            EventId = "redelivered-1",
+            IdempotencyKey = "github:redelivered-1",
+            Source = EventSourceKind.GitHub,
+            SourceEventId = "redelivered-1",
+            EventType = "dev.cdevents.repository.modified",
+            SubjectType = "repository",
+            SubjectId = "cmdemo1-digitaltwin",
+            Predicate = "pinged",
+            OccurredAt = ingestedAt,
+            IngestedAt = ingestedAt,
+            Summary = summary
+        };
+
+        var first = DateTimeOffset.Parse("2026-11-21T05:00:00Z", System.Globalization.CultureInfo.InvariantCulture);
+        var later = first.AddSeconds(3);
+
+        // Later redelivery processed first, original second
+        Assert.Single(await _store.AppendEventsReturnNewAsync([Observation(later, "redelivery")], CancellationToken.None));
+        Assert.Empty(await _store.AppendEventsReturnNewAsync([Observation(first, "original")], CancellationToken.None));
+
+        var stored = Assert.Single(await _store.QueryEventsAsync(null, null, null, null, null, 10, CancellationToken.None));
+        Assert.Equal("original", stored.Summary);
+        Assert.Equal(first, stored.IngestedAt);
+
+        // Opposite order converges on the same row
+        await _store.ClearEventJournalAsync(CancellationToken.None);
+        await _store.AppendEventsReturnNewAsync([Observation(first, "original")], CancellationToken.None);
+        await _store.AppendEventsReturnNewAsync([Observation(later, "redelivery")], CancellationToken.None);
+        Assert.Equal("original", Assert.Single(await _store.QueryEventsAsync(null, null, null, null, null, 10, CancellationToken.None)).Summary);
+    }
+
+    [Fact]
     public async Task ExplainItemCorrelatesIssuePrBuildReleaseDeploymentAndWorkload()
     {
         var now = DateTimeOffset.UtcNow;

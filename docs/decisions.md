@@ -106,6 +106,7 @@ Following the domain research in the prompt's prior-art references:
   - Pollers, probes and drift reconciliation publish through the same path via `ObservedEventIntake`, which first drops idempotency keys already in the journal so raw volume and SQL load stay small.
   - `TwinIntakeCapturedHandler` → `IntakeEventApplier` normalizes deterministically, appends with dedupe on `IdempotencyKey`, pushes SignalR/SSE, and schedules coalesced follow-up refreshes (20s minimum per target, which keeps the GitHub rate budget unchanged).
   - Failures get 3 retries with cooldown (1s, 5s, 15s), then `MoveToErrorQueue` (Wolverine dead-letter table); the raw row records attempts and `dead_lettered_at`. Admin endpoints replay dead letters and rebuild the journal from the raw table.
+- **Order independence**: when observations share an idempotency key, the journal keeps the earliest one (`ObservedEventPrecedence`: lowest `IngestedAt`, then a content tie-break). Live processing (parallel, retries, replays) and rebuild-in-capture-order therefore produce the same journal.
 - **Consequences**: The raw table is the system of record and the event journal is a pure projection of it. Reconciled snapshots (repos, runs, deployments, Azure resources) remain current-state reads written by pollers; losing one is self-healing on the next poll, so they are not part of the rebuild.
 
 ---

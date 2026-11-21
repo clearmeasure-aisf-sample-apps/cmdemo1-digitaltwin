@@ -24,65 +24,100 @@ public sealed class EfTwinStore(IDbContextFactory<TwinDbContext> factory) : ITwi
         return added.Count;
     }
 
+    /// <summary>
+    /// Appends events whose idempotency key is new and returns them. For keys already present the earliest
+    /// observation is kept (<see cref="ObservedEventPrecedence"/>), so the result does not depend on processing order.
+    /// </summary>
     public async Task<IReadOnlyList<ObservedEvent>> AppendEventsReturnNewAsync(IEnumerable<ObservedEvent> observedEvents, CancellationToken ct)
     {
-        var deduped = observedEvents
+        var candidates = observedEvents
             .GroupBy(e => e.IdempotencyKey, StringComparer.Ordinal)
-            .Select(g => g.First())
+            .Select(ObservedEventPrecedence.Earliest)
             .ToList();
-
-        if (deduped.Count == 0)
+        if (candidates.Count == 0)
         {
             return [];
         }
 
-        var keys = deduped.Select(e => e.IdempotencyKey).ToList();
-        await using var db = await factory.CreateDbContextAsync(ct);
-
-        var existingKeys = (await db.ObservedEvents
-            .AsNoTracking()
-            .Where(e => keys.Contains(e.IdempotencyKey))
-            .Select(e => e.IdempotencyKey)
-            .ToListAsync(ct))
-            .ToHashSet(StringComparer.Ordinal);
-
-        var toInsert = deduped.Where(e => !existingKeys.Contains(e.IdempotencyKey)).ToList();
-        if (toInsert.Count == 0)
-        {
-            return [];
-        }
-
-        db.ObservedEvents.AddRange(toInsert);
         try
         {
-            await db.SaveChangesAsync(ct);
-            return toInsert;
+            return await MergeAsync(candidates, ct);
         }
         catch (DbUpdateException)
         {
-            // Fallback row-by-row if a concurrent webhook raced on one key
+            // A concurrent handler inserted one of the keys; merge one by one against the committed rows.
             var inserted = new List<ObservedEvent>();
-            foreach (var ev in toInsert)
+            foreach (var candidate in candidates)
             {
-                await using var singleDb = await factory.CreateDbContextAsync(ct);
-                if (await singleDb.ObservedEvents.AnyAsync(x => x.IdempotencyKey == ev.IdempotencyKey, ct))
-                {
-                    continue;
-                }
-                singleDb.ObservedEvents.Add(ev);
                 try
                 {
-                    await singleDb.SaveChangesAsync(ct);
-                    inserted.Add(ev);
+                    inserted.AddRange(await MergeAsync([candidate], ct));
                 }
                 catch (DbUpdateException)
                 {
-                    // concurrent duplicate
+                    inserted.AddRange(await MergeAsync([candidate], ct));
                 }
             }
             return inserted;
         }
     }
+
+    private async Task<IReadOnlyList<ObservedEvent>> MergeAsync(IReadOnlyList<ObservedEvent> candidates, CancellationToken ct)
+    {
+        var keys = candidates.Select(e => e.IdempotencyKey).ToList();
+        await using var db = await factory.CreateDbContextAsync(ct);
+        var existing = await db.ObservedEvents
+            .Where(e => keys.Contains(e.IdempotencyKey))
+            .ToDictionaryAsync(e => e.IdempotencyKey, StringComparer.Ordinal, ct);
+
+        var inserted = new List<ObservedEvent>();
+        foreach (var candidate in candidates)
+        {
+            if (existing.TryGetValue(candidate.IdempotencyKey, out var current))
+            {
+                if (ObservedEventPrecedence.Precedes(candidate, current))
+                {
+                    var replacement = Clone(candidate);
+                    replacement.Id = current.Id;
+                    db.Entry(current).CurrentValues.SetValues(replacement);
+                }
+                continue;
+            }
+
+            var row = Clone(candidate);
+            db.ObservedEvents.Add(row);
+            inserted.Add(row);
+        }
+
+        await db.SaveChangesAsync(ct);
+        return inserted;
+    }
+
+    private static ObservedEvent Clone(ObservedEvent e) => new()
+    {
+        EventId = e.EventId,
+        IdempotencyKey = e.IdempotencyKey,
+        Source = e.Source,
+        SourceEventId = e.SourceEventId,
+        SpecVersion = e.SpecVersion,
+        EventType = e.EventType,
+        SubjectType = e.SubjectType,
+        SubjectId = e.SubjectId,
+        Predicate = e.Predicate,
+        OccurredAt = e.OccurredAt,
+        IngestedAt = e.IngestedAt,
+        Channel = e.Channel,
+        CorrelationId = e.CorrelationId,
+        ChainId = e.ChainId,
+        PipelineId = e.PipelineId,
+        StageName = e.StageName,
+        DeployableName = e.DeployableName,
+        Actor = e.Actor,
+        Outcome = e.Outcome,
+        Summary = e.Summary,
+        SourceUrl = e.SourceUrl,
+        PayloadJson = e.PayloadJson
+    };
 
     public async Task<IReadOnlySet<string>> FindExistingIdempotencyKeysAsync(IReadOnlyCollection<string> idempotencyKeys, CancellationToken ct)
     {
