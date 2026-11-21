@@ -39,6 +39,16 @@ param webhookSecret string
 @secure()
 param twinApiKey string
 
+@description('Wolverine intake transport: SqlServer (queue table in the twin database) or LocalDurable (in-process durable queue). Ignored when deployServiceBus is true.')
+@allowed([
+  'SqlServer'
+  'LocalDurable'
+])
+param intakeTransport string = 'SqlServer'
+
+@description('Deploy sb-cmdemo1-twin and switch the intake to Azure Service Bus with managed identity. Requires Microsoft.ServiceBus to be registered and roleAssignments/write; disabled until a subscription Owner enables it.')
+param deployServiceBus bool = false
+
 var suffix = take(uniqueString(subscription().id, resourceGroup().id, 'cmdemo1-twin'), 5)
 var tags = {
   system: 'cmdemo1'
@@ -160,6 +170,27 @@ resource sqlDatabase 'Microsoft.Sql/servers/databases@2023-08-01' = {
   }
 }
 
+var twinIdentityName = 'id-cmdemo1-twin'
+
+module serviceBus 'servicebus.bicep' = if (deployServiceBus) {
+  name: 'deploy-cmdemo1-twin-servicebus'
+  params: {
+    location: location
+    identityName: twinIdentityName
+    tags: tags
+  }
+}
+
+var intakeEnv = deployServiceBus
+  ? [
+      { name: 'Twin__Messaging__Transport', value: 'AzureServiceBus' }
+      { name: 'Twin__Messaging__ServiceBusNamespace', value: serviceBus!.outputs.namespaceFqdn }
+      { name: 'Twin__Messaging__ManagedIdentityClientId', value: serviceBus!.outputs.identityClientId }
+    ]
+  : [
+      { name: 'Twin__Messaging__Transport', value: intakeTransport }
+    ]
+
 var twinPublicUrl = 'https://${appName}.${managedEnvironment.properties.defaultDomain}'
 
 resource twinApp 'Microsoft.App/containerApps@2025-01-01' = {
@@ -170,6 +201,16 @@ resource twinApp 'Microsoft.App/containerApps@2025-01-01' = {
     sqlDatabase
     allowAzureServices
   ]
+  identity: deployServiceBus
+    ? {
+        type: 'UserAssigned'
+        userAssignedIdentities: {
+          '${resourceId('Microsoft.ManagedIdentity/userAssignedIdentities', twinIdentityName)}': {}
+        }
+      }
+    : {
+        type: 'None'
+      }
   properties: {
     environmentId: managedEnvironment.id
     workloadProfileName: 'Consumption'
@@ -208,7 +249,7 @@ resource twinApp 'Microsoft.App/containerApps@2025-01-01' = {
             cpu: json('1.0')
             memory: '2Gi'
           }
-          env: [
+          env: concat([
             { name: 'ASPNETCORE_URLS', value: 'http://+:8080' }
             { name: 'AZURE_CLIENT_ID', value: azureClientId }
             { name: 'AZURE_TENANT_ID', value: azureTenantId }
@@ -221,7 +262,7 @@ resource twinApp 'Microsoft.App/containerApps@2025-01-01' = {
             { name: 'GH_PAT', secretRef: 'gh-pat' }
             { name: 'WEBHOOK_SECRET', secretRef: 'webhook-secret' }
             { name: 'TWIN_API_KEY', secretRef: 'twin-api-key' }
-          ]
+          ], intakeEnv)
           probes: [
             {
               type: 'Startup'
@@ -264,3 +305,4 @@ output managedEnvironmentName string = managedEnvironment.name
 output keyVaultName string = keyVault.name
 output sqlServerName string = sqlServer.name
 output sqlDatabaseName string = sqlDatabase.name
+output intakeTransport string = deployServiceBus ? 'AzureServiceBus' : intakeTransport

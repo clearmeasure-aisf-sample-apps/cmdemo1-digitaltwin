@@ -1,6 +1,6 @@
 # cmdemo1-digitaltwin
 
-Platform-level DevOps Digital Twin of the `cmdemo1` environment (`clearmeasure-aisf-sample-apps`), built on **.NET 11**, ASP.NET Core Minimal APIs, EF Core (Azure SQL / SQLite), SignalR / Server-Sent Events, and the official **Model Context Protocol (MCP)** C# SDK.
+Platform-level DevOps Digital Twin of the `cmdemo1` environment (`clearmeasure-aisf-sample-apps`), built on **.NET 11**, ASP.NET Core Minimal APIs, EF Core (Azure SQL), **Wolverine** (durable intake queue with transactional outbox), SignalR / Server-Sent Events, and the official **Model Context Protocol (MCP)** C# SDK.
 
 The twin sits **one level above `cmdemo1`**: it observes GitHub, Octopus Deploy (`Spaces-355`), Azure (`rg-cmdemo1-nonprod` and `rg-cmdemo1-prod`), and live service endpoints without becoming one of `cmdemo1`'s deployables.
 
@@ -28,6 +28,22 @@ flowchart TB
     Az -->|"/hooks/azure + 60s ARG/ARM poll"| Twin
     Live -->|"45s HTTP probes"| Twin
 ```
+
+### Solution Layout (Onion Architecture)
+
+Dependencies point inward only; `ArchitectureTests` fails the build if they don't.
+
+| Layer | Project | May reference | Contents |
+|---|---|---|---|
+| Core | `DigitalTwin.Core` | nothing (BCL only) | Domain model, normalizers, drift/DORA domain services, intake model (`RawIntakeEvent`, `IntakeNormalizer`), all ports (`ITwinStore`, `IIntakePublisher`, `IRawIntakeStore`, sync ports, …) |
+| Application | `DigitalTwin.Application` | Core | Use cases: idempotent intake applier, rebuild-from-raw, drift reconciliation, follow-up refresh scheduler, backfill + polling scheduler, query service, DTOs |
+| Integration | `DigitalTwin.GitHub` | Core | GitHub REST/GraphQL client (rate budget, ETags), repo/run/board sync, webhook registration |
+| Integration | `DigitalTwin.Octopus` | Core | Octopus `Spaces-355` sync and subscription registration |
+| Integration | `DigitalTwin.Azure` | Core | Resource Graph / ARM sync, Event Grid check |
+| Integration | `DigitalTwin.Probes` | Core | HTTP health probes of cmdemo1 endpoints |
+| Integration | `DigitalTwin.Persistence` | Core | EF Core `TwinDbContext` / `EfTwinStore` (SQL Server; SQLite for unit tests) |
+| Integration | `DigitalTwin.Messaging` | Core | Wolverine intake: transactional outbox publisher, raw intake store, handler, dead-letter admin, transports |
+| Host | `DigitalTwin.Api` | everything | Composition root: webhooks, REST, MCP, SignalR/SSE, dashboard |
 
 ### Hierarchy Modeled
 
@@ -63,14 +79,36 @@ All terminology follows Domain-Driven Design across eight bounded contexts (usin
 
 ---
 
+## Durable Intake (Guaranteed Event Capture)
+
+Every occurrence, from webhooks and from backstop pollers alike, is durably captured before it is acknowledged, then applied to the model by a separate handler:
+
+```mermaid
+flowchart LR
+    W["/hooks/github · /hooks/octopus · /hooks/azure<br/>verify signature, wrap raw body"] -->|"one SQL transaction"| R[("twin.raw_intake_events<br/>(system of record, gzip body)")]
+    P["Pollers / probes / drift<br/>(skip keys already in journal)"] -->|"same path"| R
+    R --- O["Wolverine outbox envelope<br/>TwinIntakeCaptured(rawEventId)"]
+    O --> Q["Queue: SQL Server transport (deployed)<br/>local durable (dev/tests) · Azure Service Bus (later)"]
+    Q --> H["TwinIntakeCapturedHandler<br/>3 retries 1s/5s/15s, then dead letter"]
+    H --> A["IntakeEventApplier: normalize, dedupe on IdempotencyKey,<br/>append journal, push SignalR/SSE, coalesced follow-up refresh"]
+```
+
+- **Ack after commit**: the webhook returns `200` only after the raw row and the Wolverine envelope are committed together; any failure returns `503` so GitHub/Octopus/Event Grid redeliver. Signature/secret headers are never persisted.
+- **Idempotent processing**: the handler dedupes on the event's idempotency key, so redeliveries, replays and webhook/poll overlap are harmless.
+- **Failures**: 3 retries with backoff (1s, 5s, 15s), then the message is dead-lettered (Wolverine dead-letter table) and the raw row is marked. Replay via `POST /api/admin/deadletters/replay`.
+- **Rebuild**: `POST /api/admin/rebuild-from-raw` clears the event journal and replays every raw row in capture order; normalization is deterministic, so the journal comes back identical. Reconciled snapshots (repos, runs, deployments, Azure resources) are current-state reads that the pollers re-derive from source.
+- **Visibility**: queue depth (captured but not yet applied), oldest pending age and dead-letter count appear on `/api/twin/summary` (`intakeQueue`), `/api/intake/status`, the dashboard "Intake" pill, and the MCP `get_intake_queue` tool.
+- **Transport is configuration** (`Twin:Messaging:Transport`): `LocalDurable` (in-process durable queue backed by the SQL message store), `SqlServer` (queue table in `sqldb-cmdemo1-twin`, used by the deployed twin), `AzureServiceBus` (queue `twin-intake` on `sb-cmdemo1-twin` with managed identity; `infra/servicebus.bicep`, enabled with `deployServiceBus=true` once `Microsoft.ServiceBus` is registered).
+- **Processor role**: `Twin:Messaging:ProcessorEnabled=false` turns a host into intake-only (queue transports). The deployed twin runs both roles in one container app; see `docs/decisions.md` (ADR-012).
+
 ## How Ingestion Works (Hooks + Reconciliation Polls)
 
 1. **Startup Backfill & Full Rebuild**: On startup (and via `POST /api/admin/rebuild`), `BackfillCoordinator` hydrates desired state (`cmdemo1-system/system.json`, `environments/*/versions.json`, `status/*`), GitHub repos/PRs/runs/Project #679 board, Octopus `Spaces-355`, Azure Resource Graph + ARM revisions, and live HTTP probes, then evaluates drift.
 2. **GitHub (Rate-Budgeted <= 1,500 REST calls/hr)**:
-   - **Webhook** `POST /hooks/github` verifies `X-Hub-Signature-256` (HMAC-SHA256 with `WEBHOOK_SECRET`), normalizes `push`, `pull_request`, `workflow_run`, `workflow_job`, `check_run`, `issues`, `release`, `deployment`, `package`, etc., streams via SignalR/SSE, and triggers a 15s-coalesced single-repo refresh.
+   - **Webhook** `POST /hooks/github` verifies `X-Hub-Signature-256` (HMAC-SHA256 with `WEBHOOK_SECRET`) and durably captures the raw delivery; the processor normalizes `push`, `pull_request`, `workflow_run`, `workflow_job`, `check_run`, `issues`, `release`, `deployment`, `package`, etc., streams via SignalR/SSE, and schedules a coalesced single-repo refresh.
    - **Conditional & Batched Reconciliation**: Full backfill once at startup; incremental repo/workflow runs reconciliation every **10 minutes** using `If-None-Match` ETags (`304 Not Modified` = 0 quota), aliased GraphQL repo batching, and zero-quota `raw.githubusercontent.com` reads for `cmdemo1-system`; Project #679 GraphQL board check every **5 minutes**. Tracks `X-RateLimit-Remaining`, enters `backoff` below 1,000, pauses polling below 500, and exposes `gitHubQuota` on `/api/twin/summary`.
 3. **Octopus Deploy (`Spaces-355`)**:
-   - **Webhook** `POST /hooks/octopus` verifies `X-Webhook-Secret` and ingests all event categories from the `cmdemo1-digitaltwin` subscription.
+   - **Webhook** `POST /hooks/octopus` verifies `X-Webhook-Secret` and durably captures all event categories from the `cmdemo1-digitaltwin` subscription.
    - **Reconciliation Poller** (every 45s) syncs `/api/events`, releases, deployments, tasks, interruptions, runbooks, and deployment freezes.
 4. **Azure & Live Probes**:
    - **Webhook** `POST /hooks/azure` handles Event Grid validation handshakes (`SubscriptionValidationEvent`) and `ResourceWrite/Delete/Action` events (activated automatically when `Microsoft.EventGrid` is registered on the subscription).
@@ -95,6 +133,9 @@ All terminology follows Domain-Driven Design across eight bounded contexts (usin
 - `GET /api/deployments?stage=&deployable=&limit=`
 - `GET /api/metrics?windowDays=7&stage=prod`
 - `GET /api/explain?q=<issue|pr|version|sha|task>`
+- `GET /api/intake` (also public read at `GET /api/intake/status`)
+- `GET /api/admin/deadletters` and `POST /api/admin/deadletters/replay` (optional body `{"ids":[...]}`)
+- `POST /api/admin/rebuild-from-raw`
 - `POST /api/admin/rebuild` and `POST /api/admin/register-hooks`
 
 ### MCP Server (Streamable HTTP at `/mcp`)
@@ -107,15 +148,46 @@ Pass header `X-Twin-Key: <TWIN_API_KEY>`:
 - `get_drift`
 - `get_pipeline`
 - `explain_item`
+- `get_intake_queue`
 
 ---
 
-## Local Development & Verification
+## Local Development & Verification (no Azure needed)
+
+Prerequisites: .NET 11 SDK and Docker. No Azure, GitHub or Octopus credentials are required.
 
 ```bash
-dotnet restore cmdemo1-digitaltwin.sln
-dotnet build cmdemo1-digitaltwin.sln --configuration Release
+# Build and run every test. Integration tests start SQL Server via Testcontainers
+# and wait for Wolverine processing with tracked sessions.
 dotnet test cmdemo1-digitaltwin.sln --configuration Release
+```
+
+To use an existing SQL Server instead of Testcontainers, set `TWIN_TEST_SQLSERVER` to a server connection string.
+
+Run the twin locally against SQL Server in Docker:
+
+```bash
+docker compose up -d sqlserver
+export ConnectionStrings__TwinDb='Server=localhost,1433;Database=twin_local;User Id=sa;Password=LocalDev_Tw1n!Only;TrustServerCertificate=True'
+export TWIN_API_KEY=local-key WEBHOOK_SECRET=local-secret
+export Twin__EnableBackgroundWorkers=false     # no pollers without credentials
+export Twin__Messaging__Transport=LocalDurable # or SqlServer, like the deployed twin
+dotnet run --project src/DigitalTwin.Api      # dashboard on the printed URL
+
+# Send a signed test webhook, then watch it get captured and processed
+BODY='{"zen":"local","repository":{"name":"cmdemo1-digitaltwin"}}'
+SIG=$(printf '%s' "$BODY" | openssl dgst -sha256 -hmac local-secret -r | cut -d' ' -f1)
+curl -X POST http://localhost:5000/hooks/github -H 'X-GitHub-Event: ping' -H 'X-GitHub-Delivery: local-1' \
+  -H "X-Hub-Signature-256: sha256=$SIG" -H 'Content-Type: application/json' -d "$BODY"
+curl http://localhost:5000/api/intake/status
+```
+
+Optional Service Bus emulator (for future transport tests; CI does not use it):
+
+```bash
+docker compose --profile servicebus up -d
+export Twin__Messaging__Transport=AzureServiceBus
+export Twin__Messaging__ServiceBusConnectionString='Endpoint=sb://localhost;SharedAccessKeyName=RootManageSharedAccessKey;SharedAccessKey=SAS_KEY_VALUE;UseDevelopmentEmulator=true;'
 ```
 
 Architecture & infrastructure trade-offs are documented in [`docs/decisions.md`](docs/decisions.md).

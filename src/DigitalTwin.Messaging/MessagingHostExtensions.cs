@@ -65,13 +65,24 @@ public static class MessagingHostExtensions
                 opts.PublishMessage<TwinIntakeCaptured>().ToSqlServerQueue(messaging.SqlQueueName);
                 if (messaging.ProcessorEnabled)
                 {
-                    opts.ListenToSqlServerQueue(messaging.SqlQueueName).UseDurableInbox();
+                    // Bounded polling keeps load trivial on the small (Basic 5 DTU) twin database.
+                    opts.ListenToSqlServerQueue(messaging.SqlQueueName)
+                        .PollingInterval(TimeSpan.FromMilliseconds(messaging.SqlQueuePollingMs))
+                        .UseDurableInbox();
                 }
                 break;
 
             case IntakeTransport.AzureServiceBus:
                 opts.PersistMessagesWithSqlServer(messaging.ConnectionString, messaging.WolverineSchema);
-                opts.UseAzureServiceBus(messaging.ServiceBusNamespace, CreateServiceBusCredential(messaging)).AutoProvision();
+                if (string.IsNullOrWhiteSpace(messaging.ServiceBusConnectionString))
+                {
+                    opts.UseAzureServiceBus(messaging.ServiceBusNamespace, CreateServiceBusCredential(messaging)).AutoProvision();
+                }
+                else
+                {
+                    // The emulator has no management API; its queue is declared in docker/servicebus-emulator/config.json.
+                    opts.UseAzureServiceBus(messaging.ServiceBusConnectionString);
+                }
                 opts.PublishMessage<TwinIntakeCaptured>().ToAzureServiceBusQueue(messaging.QueueName).UseDurableOutbox();
                 if (messaging.ProcessorEnabled)
                 {
@@ -108,9 +119,12 @@ public static class MessagingHostExtensions
             throw new InvalidOperationException(
                 "Twin intake needs a SQL Server connection string (ConnectionStrings:TwinDb). For local runs start SQL Server in Docker; see README.");
         }
-        if (messaging.Transport == IntakeTransport.AzureServiceBus && string.IsNullOrWhiteSpace(messaging.ServiceBusNamespace))
+        if (messaging.Transport == IntakeTransport.AzureServiceBus &&
+            string.IsNullOrWhiteSpace(messaging.ServiceBusNamespace) &&
+            string.IsNullOrWhiteSpace(messaging.ServiceBusConnectionString))
         {
-            throw new InvalidOperationException("Twin:Messaging:ServiceBusNamespace is required for the AzureServiceBus transport.");
+            throw new InvalidOperationException(
+                "Twin:Messaging:ServiceBusNamespace (managed identity) or ServiceBusConnectionString (emulator) is required for the AzureServiceBus transport.");
         }
         return messaging;
     }

@@ -31,13 +31,14 @@ jobs:
       - name: Build solution
         run: dotnet build cmdemo1-digitaltwin.sln --configuration Release --no-restore
 
-      - name: Test solution
+      - name: Test solution (unit, architecture, Testcontainers SQL Server integration)
         run: dotnet test cmdemo1-digitaltwin.sln --configuration Release --no-build --verbosity normal
 
       - name: Validate Bicep templates
         run: |
           az bicep build --file infra/main.bicep
           az bicep build --file infra/eventgrid.bicep
+          az bicep build --file infra/servicebus.bicep
 
   deploy:
     needs: build-and-test
@@ -218,6 +219,51 @@ jobs:
             -d "$MCP_CALL_PAYLOAD")
           echo "${MCP_CALL_RESP:0:400}"
           echo "$MCP_CALL_RESP" | grep -q "Clear Measure Demo Platform"
+          MCP_INTAKE_PAYLOAD='{"jsonrpc":"2.0","id":4,"method":"tools/call","params":{"name":"get_intake_queue","arguments":{}}}'
+          MCP_INTAKE_RESP=$(curl -fsS -X POST "${TWIN_URL}/mcp" \
+            -H "X-Twin-Key: ${TWIN_API_KEY}" \
+            -H "Content-Type: application/json" \
+            -H "Accept: application/json, text/event-stream" \
+            -d "$MCP_INTAKE_PAYLOAD")
+          echo "${MCP_INTAKE_RESP:0:600}"
+          echo "$MCP_INTAKE_RESP" | grep -q "deadLetterCount"
           echo "## Digital Twin Deployment Summary" >> "$GITHUB_STEP_SUMMARY"
           echo "- Dashboard URL: ${TWIN_URL}" >> "$GITHUB_STEP_SUMMARY"
           echo "- MCP URL: ${TWIN_URL}/mcp" >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Verify durable intake end to end (signed test webhook -> captured -> processed)
+        env:
+          TWIN_URL: ${{ steps.bicep.outputs.twin_url }}
+          TWIN_API_KEY: ${{ secrets.TWIN_API_KEY }}
+          WEBHOOK_SECRET: ${{ secrets.WEBHOOK_SECRET }}
+        run: |
+          set -euo pipefail
+          DELIVERY="twin-ci-${{ github.run_id }}-${{ github.run_attempt }}"
+          BODY=$(jq -cn --arg d "$DELIVERY" '{zen:"Durable intake verification", hook_id:0, repository:{name:"cmdemo1-digitaltwin", full_name:"clearmeasure-aisf-sample-apps/cmdemo1-digitaltwin"}, sender:{login:"twin-ci"}, delivery:$d}')
+          SIG=$(printf '%s' "$BODY" | openssl dgst -sha256 -hmac "$WEBHOOK_SECRET" -r | cut -d' ' -f1)
+          SENT_AT=$(date -u +%s)
+          ACK=$(curl -fsS -X POST "${TWIN_URL}/hooks/github" \
+            -H "Content-Type: application/json" \
+            -H "X-GitHub-Event: ping" \
+            -H "X-GitHub-Delivery: ${DELIVERY}" \
+            -H "X-Hub-Signature-256: sha256=${SIG}" \
+            -d "$BODY")
+          echo "Webhook acknowledged after durable capture: ${ACK}"
+          echo "$ACK" | jq -e '.captured == true' >/dev/null
+
+          for i in $(seq 1 30); do
+            if curl -fsS -H "X-Twin-Key: ${TWIN_API_KEY}" "${TWIN_URL}/api/events?source=GitHub&limit=200" \
+                | jq -e --arg k "github:${DELIVERY}" 'map(select(.idempotencyKey == $k)) | length == 1' >/dev/null; then
+              echo "Processed into the event journal after $(( $(date -u +%s) - SENT_AT ))s (idempotency key github:${DELIVERY})"
+              break
+            fi
+            if [ "$i" -eq 30 ]; then
+              echo "Test webhook ${DELIVERY} was not processed within 60s" >&2
+              exit 1
+            fi
+            sleep 2
+          done
+
+          curl -fsS -H "X-Twin-Key: ${TWIN_API_KEY}" "${TWIN_URL}/api/intake" | jq '{transport, processorEnabled, depth, oldestPendingAgeSeconds, deadLetterCount, capturedTotal, processedTotal, lastCapturedAt, lastProcessedAt}'
+          curl -fsS -H "X-Twin-Key: ${TWIN_API_KEY}" "${TWIN_URL}/api/admin/deadletters" | jq 'length'
+          echo "- Durable intake: test webhook ${DELIVERY} captured and processed" >> "$GITHUB_STEP_SUMMARY"

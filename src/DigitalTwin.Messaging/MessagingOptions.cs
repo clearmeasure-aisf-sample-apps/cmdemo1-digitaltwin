@@ -24,7 +24,11 @@ public sealed class MessagingOptions
     public string ConnectionString { get; set; } = string.Empty;
     public string WolverineSchema { get; set; } = "wolverine";
     public string QueueName { get; set; } = "twin-intake";
+    public int SqlQueuePollingMs { get; set; } = 1_000;
     public string ServiceBusNamespace { get; set; } = string.Empty;
+
+    /// <summary>Connection string alternative to namespace + managed identity (local Service Bus emulator only).</summary>
+    public string ServiceBusConnectionString { get; set; } = string.Empty;
     public string ManagedIdentityClientId { get; set; } = string.Empty;
 
     /// <summary>Comma-separated backoff (ms) between retries; after the last retry fails the message is dead-lettered.</summary>

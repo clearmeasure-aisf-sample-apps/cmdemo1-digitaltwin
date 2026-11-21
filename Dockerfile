@@ -2,14 +2,18 @@ FROM mcr.microsoft.com/dotnet/sdk:11.0 AS build
 ARG VERSION=1.0.0
 WORKDIR /src
 
-COPY global.json Directory.Build.props cmdemo1-digitaltwin.sln ./
-COPY src/DigitalTwin.Domain/DigitalTwin.Domain.csproj src/DigitalTwin.Domain/
+COPY global.json Directory.Build.props ./
+COPY src/DigitalTwin.Core/DigitalTwin.Core.csproj src/DigitalTwin.Core/
 COPY src/DigitalTwin.Application/DigitalTwin.Application.csproj src/DigitalTwin.Application/
-COPY src/DigitalTwin.Infrastructure/DigitalTwin.Infrastructure.csproj src/DigitalTwin.Infrastructure/
+COPY src/DigitalTwin.GitHub/DigitalTwin.GitHub.csproj src/DigitalTwin.GitHub/
+COPY src/DigitalTwin.Octopus/DigitalTwin.Octopus.csproj src/DigitalTwin.Octopus/
+COPY src/DigitalTwin.Azure/DigitalTwin.Azure.csproj src/DigitalTwin.Azure/
+COPY src/DigitalTwin.Probes/DigitalTwin.Probes.csproj src/DigitalTwin.Probes/
+COPY src/DigitalTwin.Persistence/DigitalTwin.Persistence.csproj src/DigitalTwin.Persistence/
+COPY src/DigitalTwin.Messaging/DigitalTwin.Messaging.csproj src/DigitalTwin.Messaging/
 COPY src/DigitalTwin.Api/DigitalTwin.Api.csproj src/DigitalTwin.Api/
-COPY tests/DigitalTwin.Tests/DigitalTwin.Tests.csproj tests/DigitalTwin.Tests/
 
-RUN dotnet restore cmdemo1-digitaltwin.sln
+RUN dotnet restore src/DigitalTwin.Api/DigitalTwin.Api.csproj
 
 COPY src/ src/
 RUN dotnet publish src/DigitalTwin.Api/DigitalTwin.Api.csproj \
