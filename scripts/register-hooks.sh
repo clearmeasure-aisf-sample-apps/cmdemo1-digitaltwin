@@ -92,11 +92,12 @@ if [ "${ENABLE_EVENT_GRID_DEPLOY:-false}" = "true" ] && [ "$EG_STATE" = "Registe
   for rg in rg-cmdemo1-nonprod rg-cmdemo1-prod; do
     TOPIC="eg-twin-${rg}"
     TOPIC_ID=$(az eventgrid system-topic show -g "$rg" -n "$TOPIC" --query id -o tsv 2>/dev/null || echo "")
+    # metricResourceId is assigned when the topic is created, so it changes if the topic is ever recreated.
     BEFORE=""
     if [ -n "$TOPIC_ID" ]; then
-      BEFORE=$(az resource show --ids "$TOPIC_ID" --query systemData.createdAt -o tsv)
+      BEFORE=$(az eventgrid system-topic show -g "$rg" -n "$TOPIC" --query metricResourceId -o tsv)
     fi
-    echo "  ${TOPIC}: before deploy createdAt=${BEFORE:-<absent>}"
+    echo "  ${TOPIC}: before deploy metricResourceId=${BEFORE:-<absent>}"
 
     CHANGES=$(az deployment group what-if -g "$rg" --name "deploy-twin-eventgrid" \
       --template-file infra/eventgrid.bicep --parameters webhookEndpointUrl="$EG_URL" \
@@ -111,18 +112,18 @@ if [ "${ENABLE_EVENT_GRID_DEPLOY:-false}" = "true" ] && [ "$EG_STATE" = "Registe
       --template-file infra/eventgrid.bicep --parameters webhookEndpointUrl="$EG_URL" --output none
 
     AFTER_ID=$(az eventgrid system-topic show -g "$rg" -n "$TOPIC" --query id -o tsv)
-    AFTER=$(az resource show --ids "$AFTER_ID" --query systemData.createdAt -o tsv)
-    if [ -n "$BEFORE" ] && { [ "$AFTER_ID" != "$TOPIC_ID" ] || [ "$AFTER" != "$BEFORE" ]; }; then
-      echo "::error::${TOPIC} was recreated (createdAt ${BEFORE} -> ${AFTER})"
+    AFTER=$(az eventgrid system-topic show -g "$rg" -n "$TOPIC" --query metricResourceId -o tsv)
+    if [ -n "$TOPIC_ID" ] && { [ "$AFTER_ID" != "$TOPIC_ID" ] || [ "$AFTER" != "$BEFORE" ]; }; then
+      echo "::error::${TOPIC} was recreated (metricResourceId ${BEFORE} -> ${AFTER})"
       exit 1
     fi
-    echo "  ${TOPIC}: after deploy createdAt=${AFTER} (not recreated)"
+    echo "  ${TOPIC}: after deploy metricResourceId=${AFTER} (same topic, not recreated)"
 
     az eventgrid system-topic event-subscription show -g "$rg" --system-topic-name "$TOPIC" -n twin-observer \
       --query "{subscription:name, state:provisioningState, endpoint:destination.endpointBaseUrl}" -o tsv | sed 's/^/    /'
     az monitor metrics list --resource "$AFTER_ID" --metric DeliverySuccessCount DeliveryAttemptFailCount DroppedEventCount \
-      --interval PT1H --aggregation Total --start-time "$(date -u -d '-24 hours' +%Y-%m-%dT%H:%M:%SZ)" \
-      --query "value[].{metric:name.value, last24h:sum(timeseries[0].data[].total)}" -o tsv | sed 's/^/    delivery /'
+      --interval PT1H --aggregation Total --start-time "$(date -u -d '-24 hours' +%Y-%m-%dT%H:%M:%SZ)" -o json 2>/dev/null \
+      | jq -r '.value[] | "    delivery last 24h \(.name.value)=\([.timeseries[0].data[]?.total // 0] | add // 0)"' || echo "    delivery metrics unavailable"
   done
 else
   echo "  Event Grid infra not deployed by this run (ENABLE_EVENT_GRID_DEPLOY=${ENABLE_EVENT_GRID_DEPLOY:-false})."
