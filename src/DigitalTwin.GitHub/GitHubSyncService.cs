@@ -34,6 +34,7 @@ public sealed partial class GitHubSyncService(
     ];
 
     private readonly ConcurrentDictionary<string, DateTimeOffset> _lastRepoRefresh = new(StringComparer.OrdinalIgnoreCase);
+    private readonly ConcurrentDictionary<string, bool> _archivedRepos = new(StringComparer.OrdinalIgnoreCase);
 
     [LoggerMessage(Level = LogLevel.Warning, Message = "GitHub sync failed")]
     private partial void LogGitHubSyncFailed(Exception ex);
@@ -518,6 +519,7 @@ public sealed partial class GitHubSyncService(
             var htmlUrl = repoEl.GetProperty("url").GetString() ?? "";
             var isPrivate = repoEl.TryGetProperty("isPrivate", out var priv) && priv.ValueKind == JsonValueKind.True;
             var isArchived = repoEl.TryGetProperty("isArchived", out var arch) && arch.ValueKind == JsonValueKind.True;
+            _archivedRepos[repoName] = isArchived;
             var openIssues = repoEl.TryGetProperty("issues", out var iss) && iss.TryGetProperty("totalCount", out var ic) ? ic.GetInt32() : 0;
 
             var pipelineId = Cmdemo1PlatformCatalog.ResolvePipelineIdFromRepository(repoName);
@@ -845,6 +847,12 @@ public sealed partial class GitHubSyncService(
             }
         }
 
+        // Archived repositories cannot hold webhooks, so they are not part of the hook inventory.
+        if (!webhookRegistered && webhookId is null && await IsArchivedAsync(repoName, ct))
+        {
+            return null;
+        }
+
         return new WebhookRegistrationStatus
         {
             Id = $"github:{repoName}",
@@ -858,6 +866,24 @@ public sealed partial class GitHubSyncService(
             Detail = webhookRegistered ? "active" : "not registered",
             CheckedAt = now
         };
+    }
+
+    private async Task<bool> IsArchivedAsync(string repoName, CancellationToken ct)
+    {
+        if (_archivedRepos.TryGetValue(repoName, out var known))
+        {
+            return known;
+        }
+
+        var meta = await gh.GetApiAsync($"repos/{Cmdemo1PlatformCatalog.GitHubOrg}/{repoName}", bypassPause: false, ct);
+        if (!meta.Success || string.IsNullOrWhiteSpace(meta.Body))
+        {
+            return false;
+        }
+        using var doc = JsonDocument.Parse(meta.Body);
+        var archived = doc.RootElement.TryGetProperty("archived", out var a) && a.ValueKind == JsonValueKind.True;
+        _archivedRepos[repoName] = archived;
+        return archived;
     }
 
     private async Task SyncWorkItemsAsync(bool queryBoardGraphQl, DateTimeOffset now, CancellationToken ct)

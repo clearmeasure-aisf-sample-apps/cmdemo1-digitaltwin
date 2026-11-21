@@ -190,6 +190,7 @@ jobs:
           OCTOPUS_URL: ${{ secrets.OCTOPUS_URL }}
           OCTOPUS_API_KEY: ${{ secrets.OCTOPUS_API_KEY }}
           WEBHOOK_SECRET: ${{ secrets.WEBHOOK_SECRET }}
+          ENABLE_EVENT_GRID_DEPLOY: ${{ vars.ENABLE_EVENT_GRID_DEPLOY || 'true' }}
         run: |
           chmod +x scripts/register-hooks.sh
           ./scripts/register-hooks.sh
@@ -289,3 +290,32 @@ jobs:
             echo "- Dead letters replayed: ${DL_BEFORE} -> ${DL_AFTER}" >> "$GITHUB_STEP_SUMMARY"
           fi
           echo "- Durable intake: test webhook ${DELIVERY} captured and processed" >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Verify a real Azure change flows through Event Grid into the durable intake
+        env:
+          TWIN_URL: ${{ steps.bicep.outputs.twin_url }}
+          TWIN_API_KEY: ${{ secrets.TWIN_API_KEY }}
+        run: |
+          set -euo pipefail
+          RG=rg-cmdemo1-nonprod
+          # Harmless tag change on a twin-owned resource (never a cmdemo1 resource).
+          WS_ID=$(az monitor log-analytics workspace show -g "$RG" -n log-cmdemo1-twin --query id -o tsv)
+          PROBE="${{ github.run_id }}-${{ github.run_attempt }}"
+          SINCE=$(date -u +%Y-%m-%dT%H:%M:%SZ)
+          az tag update --resource-id "$WS_ID" --operation Merge --tags "twinIntakeProbe=${PROBE}" --output none
+          echo "Tagged log-cmdemo1-twin (twinIntakeProbe=${PROBE}) at ${SINCE}"
+          FOUND=""
+          for i in $(seq 1 36); do
+            FOUND=$(curl -fsS -H "X-Twin-Key: ${TWIN_API_KEY}" "${TWIN_URL}/api/events?source=Azure&since=${SINCE}&limit=200" \
+              | jq -c '[.[] | select(.channel == "Webhook" and (.payloadJson | contains("log-cmdemo1-twin")))] | first // empty')
+            if [ -n "$FOUND" ]; then break; fi
+            sleep 5
+          done
+          az tag update --resource-id "$WS_ID" --operation Delete --tags "twinIntakeProbe=${PROBE}" --output none
+          if [ -z "$FOUND" ]; then
+            echo "::error::Azure change on log-cmdemo1-twin did not reach the event journal within 3 minutes"
+            exit 1
+          fi
+          echo "$FOUND" | jq '{idempotencyKey, eventType, predicate, channel, subjectId, occurredAt, capturedAt: .ingestedAt}'
+          curl -fsS -H "X-Twin-Key: ${TWIN_API_KEY}" "${TWIN_URL}/api/intake" | jq '{transport, depth, deadLetterCount, capturedTotal, processedTotal}'
+          echo "- Azure change via Event Grid captured and processed: $(echo "$FOUND" | jq -r .idempotencyKey)" >> "$GITHUB_STEP_SUMMARY"

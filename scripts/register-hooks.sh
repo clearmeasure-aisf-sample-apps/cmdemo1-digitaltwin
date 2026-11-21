@@ -3,7 +3,7 @@ set -euo pipefail
 
 # Idempotently register:
 # 1. Octopus Deploy Subscription in Spaces-355 (no GitHub quota cost)
-# 2. Azure Event Grid: status only; deploys infra/eventgrid.bicep only when ENABLE_EVENT_GRID_DEPLOY=true
+# 2. Azure Event Grid system topics (managed in code; idempotent, refuses to recreate); disable with ENABLE_EVENT_GRID_DEPLOY=false
 # 3. GitHub repo webhooks across all active (non-archived) cmdemo1-* repos (quota-guarded!)
 
 : "${TWIN_URL:?TWIN_URL is required (e.g. https://ca-cmdemo1-twin....azurecontainerapps.io)}"
@@ -78,7 +78,7 @@ else
   echo "  CREATED Octopus subscription $(echo "$CREATED_SUB" | jq -r '.Id')"
 fi
 
-echo "=== 2. Azure Event Grid (status only unless ENABLE_EVENT_GRID_DEPLOY=true) ==="
+echo "=== 2. Azure Event Grid system topics (ENABLE_EVENT_GRID_DEPLOY=${ENABLE_EVENT_GRID_DEPLOY:-false}) ==="
 EG_STATE=$(az provider show --namespace Microsoft.EventGrid --query registrationState -o tsv 2>/dev/null || echo "Unknown")
 echo "  Microsoft.EventGrid provider: ${EG_STATE}"
 for rg in rg-cmdemo1-nonprod rg-cmdemo1-prod; do
@@ -90,17 +90,42 @@ if [ "${ENABLE_EVENT_GRID_DEPLOY:-false}" = "true" ] && [ "$EG_STATE" = "Registe
   ENCODED_TOKEN=$(python3 -c 'import os,urllib.parse; print(urllib.parse.quote(os.environ["WEBHOOK_SECRET"], safe=""))')
   EG_URL="${TWIN_URL}/hooks/azure?token=${ENCODED_TOKEN}"
   for rg in rg-cmdemo1-nonprod rg-cmdemo1-prod; do
-    echo "  Deploying Event Grid system topic & subscription in ${rg}..."
-    az deployment group create \
-      --resource-group "$rg" \
-      --name "deploy-twin-eventgrid" \
-      --template-file infra/eventgrid.bicep \
-      --parameters webhookEndpointUrl="$EG_URL" \
-      --output none
-    echo "  ACTIVE Event Grid subscription in ${rg}"
+    TOPIC="eg-twin-${rg}"
+    TOPIC_ID=$(az eventgrid system-topic show -g "$rg" -n "$TOPIC" --query id -o tsv 2>/dev/null || echo "")
+    BEFORE=""
+    if [ -n "$TOPIC_ID" ]; then
+      BEFORE=$(az resource show --ids "$TOPIC_ID" --query systemData.createdAt -o tsv)
+    fi
+    echo "  ${TOPIC}: before deploy createdAt=${BEFORE:-<absent>}"
+
+    CHANGES=$(az deployment group what-if -g "$rg" --name "deploy-twin-eventgrid" \
+      --template-file infra/eventgrid.bicep --parameters webhookEndpointUrl="$EG_URL" \
+      --no-pretty-print --query "changes[].[changeType, resourceId]" -o tsv)
+    echo "$CHANGES" | sed -E 's#/subscriptions/[^/]+#/subscriptions/<sub>#; s/^/    what-if: /'
+    if [ -n "$TOPIC_ID" ] && echo "$CHANGES" | grep -qE '^(Create|Delete)'; then
+      echo "::error::what-if for ${rg} would recreate Event Grid resources; refusing to deploy"
+      exit 1
+    fi
+
+    az deployment group create -g "$rg" --name "deploy-twin-eventgrid" \
+      --template-file infra/eventgrid.bicep --parameters webhookEndpointUrl="$EG_URL" --output none
+
+    AFTER_ID=$(az eventgrid system-topic show -g "$rg" -n "$TOPIC" --query id -o tsv)
+    AFTER=$(az resource show --ids "$AFTER_ID" --query systemData.createdAt -o tsv)
+    if [ -n "$BEFORE" ] && { [ "$AFTER_ID" != "$TOPIC_ID" ] || [ "$AFTER" != "$BEFORE" ]; }; then
+      echo "::error::${TOPIC} was recreated (createdAt ${BEFORE} -> ${AFTER})"
+      exit 1
+    fi
+    echo "  ${TOPIC}: after deploy createdAt=${AFTER} (not recreated)"
+
+    az eventgrid system-topic event-subscription show -g "$rg" --system-topic-name "$TOPIC" -n twin-observer \
+      --query "{subscription:name, state:provisioningState, endpoint:destination.endpointBaseUrl}" -o tsv | sed 's/^/    /'
+    az monitor metrics list --resource "$AFTER_ID" --metric DeliverySuccessCount DeliveryAttemptFailCount DroppedEventCount \
+      --interval PT1H --aggregation Total --start-time "$(date -u -d '-24 hours' +%Y-%m-%dT%H:%M:%SZ)" \
+      --query "value[].{metric:name.value, last24h:sum(timeseries[0].data[].total)}" -o tsv | sed 's/^/    delivery /'
   done
 else
-  echo "  Event Grid infra not deployed by this run (opt in with ENABLE_EVENT_GRID_DEPLOY=true)."
+  echo "  Event Grid infra not deployed by this run (ENABLE_EVENT_GRID_DEPLOY=${ENABLE_EVENT_GRID_DEPLOY:-false})."
 fi
 
 echo "=== 3. Checking GitHub REST quota before registering repo webhooks ==="
