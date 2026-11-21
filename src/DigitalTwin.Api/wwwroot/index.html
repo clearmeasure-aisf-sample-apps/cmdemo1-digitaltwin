@@ -1,0 +1,183 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>cmdemo1 Digital Twin — Clear Measure Platform</title>
+  <link rel="stylesheet" href="/css/twin.css" />
+</head>
+<body>
+  <div class="twin-shell">
+    <!-- Top Platform Command Header -->
+    <header class="topbar">
+      <div class="brand-group">
+        <div class="brand-badge" aria-hidden="true">
+          <span class="pulse-ring"></span>
+          <span class="pulse-core"></span>
+        </div>
+        <div>
+          <div class="breadcrumb">
+            <span class="crumb-platform">CLEAR MEASURE PLATFORM</span>
+            <span class="crumb-sep">/</span>
+            <span class="crumb-system">cmdemo1</span>
+            <span class="level-pill" title="Twin sits one level above cmdemo1 and is not a cmdemo1 deployable">PLATFORM OBSERVER LEVEL +1</span>
+          </div>
+          <h1 class="title">DevOps Digital Twin <span id="system-subtitle" class="subtitle">Clear Measure work orders demo 1</span></h1>
+        </div>
+      </div>
+
+      <div class="header-controls">
+        <div class="ingestion-pills" id="ingestion-pills">
+          <span class="ingest-pill" data-source="github">GH Hooks <strong id="pill-gh">--</strong></span>
+          <span class="ingest-pill" data-source="octopus">Octopus <strong id="pill-octo">--</strong></span>
+          <span class="ingest-pill" data-source="azure">Azure ARG <strong id="pill-az">--</strong></span>
+          <span class="ingest-pill" data-source="probes">Probes <strong id="pill-probes">--</strong></span>
+        </div>
+
+        <div class="search-wrap">
+          <input id="trace-input" type="search" placeholder="Trace #issue, version, SHA..." aria-label="Trace work item, version, or commit" />
+        </div>
+
+        <div class="live-status" id="live-status">
+          <span class="live-dot"></span>
+          <span id="live-label">CONNECTING</span>
+          <span id="utc-clock" class="clock">--:--:--Z</span>
+        </div>
+      </div>
+    </header>
+
+    <!-- DORA 5-Metric + Cost Strip -->
+    <section class="metrics-strip" aria-label="Delivery performance and cost">
+      <div class="metrics-header">
+        <div class="section-tag">DORA &amp; FLOW TELEMETRY</div>
+        <div class="window-toggle" role="group" aria-label="Metrics window">
+          <button type="button" class="toggle-btn active" data-window="7">7D</button>
+          <button type="button" class="toggle-btn" data-window="28">28D</button>
+        </div>
+      </div>
+      <div class="metrics-grid">
+        <article class="metric-card">
+          <div class="metric-label">Deployment Frequency</div>
+          <div class="metric-value" id="m-freq">--</div>
+          <div class="metric-sub" id="m-freq-sub">prod / day</div>
+        </article>
+        <article class="metric-card">
+          <div class="metric-label">Change Lead Time</div>
+          <div class="metric-value" id="m-lead">--</div>
+          <div class="metric-sub" id="m-lead-sub">median commit → prod</div>
+        </article>
+        <article class="metric-card">
+          <div class="metric-label">Change Fail Rate</div>
+          <div class="metric-value" id="m-cfr">--</div>
+          <div class="metric-sub" id="m-cfr-sub">incl. guided failures</div>
+        </article>
+        <article class="metric-card">
+          <div class="metric-label">Failed Deploy Recovery</div>
+          <div class="metric-value" id="m-mttr">--</div>
+          <div class="metric-sub" id="m-mttr-sub">fail → next success</div>
+        </article>
+        <article class="metric-card">
+          <div class="metric-label">Deployment Rework</div>
+          <div class="metric-value" id="m-rework">--</div>
+          <div class="metric-sub" id="m-rework-sub">review fails + reverts</div>
+        </article>
+        <article class="metric-card metric-drift" id="drift-kpi-card">
+          <div class="metric-label">Observed Drift</div>
+          <div class="metric-value" id="m-drift">--</div>
+          <div class="metric-sub" id="m-drift-sub">desired vs Azure/Octopus</div>
+        </article>
+        <article class="metric-card">
+          <div class="metric-label">Azure Spend MTD</div>
+          <div class="metric-value" id="m-cost">--</div>
+          <div class="metric-sub" id="m-cost-sub">yesterday: --</div>
+        </article>
+      </div>
+    </section>
+
+    <!-- Multi-Pipeline Animated Value Stream Canvas -->
+    <section class="flow-board" aria-label="Multi-pipeline delivery flow">
+      <div class="observer-tier" id="observer-tier">
+        <div class="observer-meta">
+          <span class="observer-badge">OBSERVER LAYER (NOT IN cmdemo1)</span>
+          <strong id="obs-repo">cmdemo1-digitaltwin</strong>
+          <span class="obs-detail" id="obs-detail">Webhooks + Reconciliation Pollers + MCP / REST API</span>
+        </div>
+        <div class="observer-links">
+          <a href="/llms.txt" target="_blank" rel="noopener">llms.txt</a>
+          <a href="/api/twin/summary" target="_blank" rel="noopener">summary.json</a>
+          <a href="/api/twin/graph" target="_blank" rel="noopener">graph.json</a>
+        </div>
+      </div>
+
+      <div class="flow-canvas-wrap" id="flow-canvas-wrap">
+        <svg class="flow-svg" id="flow-svg" aria-hidden="true"></svg>
+        <div class="stage-headers">
+          <div class="lane-head-spacer">PIPELINE</div>
+          <div class="stage-col-head">Work Item</div>
+          <div class="stage-col-head">Branch / PR</div>
+          <div class="stage-col-head">CI Build</div>
+          <div class="stage-col-head">RC / Pkg</div>
+          <div class="stage-col-head">Octopus</div>
+          <div class="stage-col-head stage-tdd">TDD</div>
+          <div class="stage-col-head stage-uat">UAT</div>
+          <div class="stage-col-head stage-prod">PROD</div>
+        </div>
+        <div class="swim-lanes" id="swim-lanes"></div>
+      </div>
+    </section>
+
+    <!-- Bottom Three-Pane Operational Matrix -->
+    <section class="ops-grid">
+      <!-- Pane 1: Environments, Hosting Boundaries & Drift -->
+      <article class="ops-panel">
+        <header class="panel-header">
+          <h2>Environments &amp; Drift</h2>
+          <span class="panel-meta" id="env-meta">Hosting boundaries &amp; revisions</span>
+        </header>
+        <div class="env-cards" id="env-cards"></div>
+        <div class="drift-list" id="drift-list"></div>
+      </article>
+
+      <!-- Pane 2: Project 679 Work Board -->
+      <article class="ops-panel">
+        <header class="panel-header">
+          <h2>Work Board <span class="muted">Project #679</span></h2>
+          <span class="panel-meta" id="work-meta">bot vs team flow</span>
+        </header>
+        <div class="kanban-strip" id="kanban-strip"></div>
+        <div class="work-list" id="work-list"></div>
+      </article>
+
+      <!-- Pane 3: Live Event Ticker -->
+      <article class="ops-panel">
+        <header class="panel-header">
+          <h2>Live Event Journal</h2>
+          <div class="filter-pills" id="event-filters">
+            <button type="button" class="filter-pill active" data-source="ALL">ALL</button>
+            <button type="button" class="filter-pill" data-source="GitHub">GH</button>
+            <button type="button" class="filter-pill" data-source="Octopus">OCTO</button>
+            <button type="button" class="filter-pill" data-source="Azure">AZ</button>
+            <button type="button" class="filter-pill" data-source="Probe">PROBE</button>
+          </div>
+        </header>
+        <div class="event-ticker" id="event-ticker"></div>
+      </article>
+    </section>
+  </div>
+
+  <!-- Slide-over Inspector Drawer -->
+  <aside class="inspector-drawer hidden" id="inspector-drawer" aria-label="Details inspector">
+    <div class="drawer-head">
+      <div>
+        <div class="drawer-kicker" id="drawer-kicker">INSPECTOR</div>
+        <h3 id="drawer-title">Details</h3>
+      </div>
+      <button type="button" class="drawer-close" id="drawer-close" aria-label="Close inspector">×</button>
+    </div>
+    <div class="drawer-body" id="drawer-body"></div>
+  </aside>
+
+  <script src="/js/signalr.min.js"></script>
+  <script src="/js/twin.js"></script>
+</body>
+</html>

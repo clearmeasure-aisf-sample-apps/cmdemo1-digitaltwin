@@ -1,0 +1,204 @@
+name: CI and Deploy Digital Twin
+
+on:
+  pull_request:
+    branches: [main]
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-deploy-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  build-and-test:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v6.0.1
+
+      - name: Setup .NET 11
+        uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: '11.0.x'
+
+      - name: Restore solution
+        run: dotnet restore cmdemo1-digitaltwin.sln
+
+      - name: Build solution
+        run: dotnet build cmdemo1-digitaltwin.sln --configuration Release --no-restore
+
+      - name: Test solution
+        run: dotnet test cmdemo1-digitaltwin.sln --configuration Release --no-build --verbosity normal
+
+      - name: Validate Bicep templates
+        run: |
+          az bicep build --file infra/main.bicep
+          az bicep build --file infra/eventgrid.bicep
+
+  deploy:
+    needs: build-and-test
+    if: github.event_name != 'pull_request'
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v6.0.1
+
+      - name: Azure login
+        env:
+          ARM_CLIENT_ID: ${{ secrets.AZURE_CLIENT_ID }}
+          ARM_CLIENT_SECRET: ${{ secrets.AZURE_CLIENT_SECRET }}
+          ARM_TENANT_ID: ${{ secrets.AZURE_TENANT_ID }}
+          ARM_SUBSCRIPTION_ID: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
+        run: |
+          set -euo pipefail
+          az login --service-principal -u "$ARM_CLIENT_ID" -p "$ARM_CLIENT_SECRET" --tenant "$ARM_TENANT_ID" --output none
+          az account set --subscription "$ARM_SUBSCRIPTION_ID"
+
+      - name: Build and push container image to ACR
+        id: acr
+        run: |
+          set -euo pipefail
+          ACR_NAME="acrcmdemo1chu4gq"
+          ACR_RG="rg-cmdemo1-nonprod"
+          az acr update --name "$ACR_NAME" --resource-group "$ACR_RG" --admin-enabled true --output none
+          ACR_USER=$(az acr credential show --name "$ACR_NAME" --resource-group "$ACR_RG" --query username -o tsv)
+          ACR_PASS=$(az acr credential show --name "$ACR_NAME" --resource-group "$ACR_RG" --query 'passwords[0].value' -o tsv)
+          echo "::add-mask::$ACR_PASS"
+
+          VERSION="1.0.${{ github.run_number }}"
+          IMAGE="${ACR_NAME}.azurecr.io/cmdemo1/digitaltwin:${VERSION}"
+          echo "$ACR_PASS" | docker login "${ACR_NAME}.azurecr.io" -u "$ACR_USER" --password-stdin
+          docker build --build-arg "VERSION=${VERSION}" --tag "$IMAGE" .
+          docker push "$IMAGE"
+
+          echo "image=${IMAGE}" >> "$GITHUB_OUTPUT"
+          echo "acr_user=${ACR_USER}" >> "$GITHUB_OUTPUT"
+          echo "acr_pass=${ACR_PASS}" >> "$GITHUB_OUTPUT"
+
+      - name: Deploy Bicep infrastructure to rg-cmdemo1-nonprod
+        id: bicep
+        env:
+          ARM_CLIENT_ID: ${{ secrets.AZURE_CLIENT_ID }}
+          ARM_CLIENT_SECRET: ${{ secrets.AZURE_CLIENT_SECRET }}
+          ARM_TENANT_ID: ${{ secrets.AZURE_TENANT_ID }}
+          ARM_SUBSCRIPTION_ID: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
+          OCTOPUS_URL: ${{ secrets.OCTOPUS_URL }}
+          OCTOPUS_API_KEY: ${{ secrets.OCTOPUS_API_KEY }}
+          GH_PAT: ${{ secrets.GH_PAT }}
+          WEBHOOK_SECRET: ${{ secrets.WEBHOOK_SECRET }}
+          TWIN_API_KEY: ${{ secrets.TWIN_API_KEY }}
+          ACR_PASS: ${{ steps.acr.outputs.acr_pass }}
+        run: |
+          set -euo pipefail
+          RG="rg-cmdemo1-nonprod"
+          DEPLOYER_OID=$(az ad sp show --id "$ARM_CLIENT_ID" --query id -o tsv)
+          KV_EXISTING=$(az keyvault list -g "$RG" --query "[?tags.purpose=='digital-twin'].name | [0]" -o tsv 2>/dev/null || echo "")
+
+          SQL_PASS=""
+          if [ -n "$KV_EXISTING" ]; then
+            SQL_PASS=$(az keyvault secret show --vault-name "$KV_EXISTING" --name sql-admin-password --query value -o tsv 2>/dev/null || echo "")
+          fi
+          if [ -z "$SQL_PASS" ]; then
+            SQL_PASS=$(python3 -c 'import secrets,string; chars=string.ascii_letters+string.digits+"-_.~"; print("Tw1!"+"".join(secrets.choice(chars) for _ in range(28)))')
+          fi
+          echo "::add-mask::$SQL_PASS"
+
+          PARAMS_FILE=$(mktemp)
+          chmod 600 "$PARAMS_FILE"
+          trap 'rm -f "$PARAMS_FILE"' EXIT
+
+          jq -n \
+            --arg img "${{ steps.acr.outputs.image }}" \
+            --arg acrUser "${{ steps.acr.outputs.acr_user }}" \
+            --arg acrPass "$ACR_PASS" \
+            --arg oid "$DEPLOYER_OID" \
+            --arg sqlPass "$SQL_PASS" \
+            --arg azCid "$ARM_CLIENT_ID" \
+            --arg azSec "$ARM_CLIENT_SECRET" \
+            --arg azTid "$ARM_TENANT_ID" \
+            --arg azSub "$ARM_SUBSCRIPTION_ID" \
+            --arg octoUrl "$OCTOPUS_URL" \
+            --arg octoKey "$OCTOPUS_API_KEY" \
+            --arg ghPat "$GH_PAT" \
+            --arg whSec "$WEBHOOK_SECRET" \
+            --arg apiKey "$TWIN_API_KEY" \
+            '{
+              "$schema": "https://schema.management.azure.com/schemas/2019-04-01/deploymentParameters.json#",
+              "contentVersion": "1.0.0.0",
+              "parameters": {
+                "containerImage": { "value": $img },
+                "acrUsername": { "value": $acrUser },
+                "acrPassword": { "value": $acrPass },
+                "deployerObjectId": { "value": $oid },
+                "sqlAdminPassword": { "value": $sqlPass },
+                "azureClientId": { "value": $azCid },
+                "azureClientSecret": { "value": $azSec },
+                "azureTenantId": { "value": $azTid },
+                "azureSubscriptionId": { "value": $azSub },
+                "octopusUrl": { "value": $octoUrl },
+                "octopusApiKey": { "value": $octoKey },
+                "gitHubPat": { "value": $ghPat },
+                "webhookSecret": { "value": $whSec },
+                "twinApiKey": { "value": $apiKey }
+              }
+            }' > "$PARAMS_FILE"
+
+          TWIN_URL=$(az deployment group create \
+            --resource-group "$RG" \
+            --name "deploy-cmdemo1-twin" \
+            --template-file infra/main.bicep \
+            --parameters "@${PARAMS_FILE}" \
+            --query properties.outputs.twinUrl.value \
+            -o tsv)
+
+          echo "twin_url=${TWIN_URL}" >> "$GITHUB_OUTPUT"
+          echo "Deployed Digital Twin at ${TWIN_URL}"
+
+      - name: Wait for twin HTTPS healthcheck
+        env:
+          TWIN_URL: ${{ steps.bicep.outputs.twin_url }}
+        run: |
+          set -euo pipefail
+          for i in $(seq 1 30); do
+            if curl -fsS "${TWIN_URL}/_healthcheck" | grep -q "Healthy"; then
+              echo "Twin is healthy at ${TWIN_URL}"
+              exit 0
+            fi
+            sleep 5
+          done
+          echo "Timed out waiting for ${TWIN_URL}/_healthcheck" >&2
+          exit 1
+
+      - name: Register GitHub webhooks, Octopus subscription, and Azure Event Grid
+        env:
+          TWIN_URL: ${{ steps.bicep.outputs.twin_url }}
+          GH_PAT: ${{ secrets.GH_PAT }}
+          OCTOPUS_URL: ${{ secrets.OCTOPUS_URL }}
+          OCTOPUS_API_KEY: ${{ secrets.OCTOPUS_API_KEY }}
+          WEBHOOK_SECRET: ${{ secrets.WEBHOOK_SECRET }}
+        run: |
+          chmod +x scripts/register-hooks.sh
+          ./scripts/register-hooks.sh
+
+      - name: Verify API, MCP, and Backfill
+        env:
+          TWIN_URL: ${{ steps.bicep.outputs.twin_url }}
+          TWIN_API_KEY: ${{ secrets.TWIN_API_KEY }}
+        run: |
+          set -euo pipefail
+          curl -fsS -m 120 -X POST -H "X-Twin-Key: ${TWIN_API_KEY}" "${TWIN_URL}/api/admin/rebuild" | jq '{gitHubOk, octopusOk, azureOk, probesOk, activeDriftCount}'
+          curl -fsS -H "X-Twin-Key: ${TWIN_API_KEY}" "${TWIN_URL}/api/twin/summary" | jq '{systemSlug, activeDriftCount, criticalDriftCount, pipelinesCount: (.pipelines | length), stagesCount: (.stages | length), costMonthToDateUsd}'
+          curl -fsS "${TWIN_URL}/llms.txt" | head -n 5
+          MCP_INIT='{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-03-26","capabilities":{},"clientInfo":{"name":"ci-smoke","version":"1.0"}}}'
+          curl -fsS -X POST "${TWIN_URL}/mcp" \
+            -H "X-Twin-Key: ${TWIN_API_KEY}" \
+            -H "Content-Type: application/json" \
+            -H "Accept: application/json, text/event-stream" \
+            -d "$MCP_INIT" | head -c 300
+          echo ""
+          echo "## Digital Twin Deployment Summary" >> "$GITHUB_STEP_SUMMARY"
+          echo "- Dashboard URL: ${TWIN_URL}" >> "$GITHUB_STEP_SUMMARY"
+          echo "- MCP URL: ${TWIN_URL}/mcp" >> "$GITHUB_STEP_SUMMARY"
