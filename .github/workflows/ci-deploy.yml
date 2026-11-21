@@ -194,27 +194,30 @@ jobs:
           curl -fsS -H "X-Twin-Key: ${TWIN_API_KEY}" "${TWIN_URL}/api/drift" | jq 'length'
           curl -fsS -H "X-Twin-Key: ${TWIN_API_KEY}" "${TWIN_URL}/api/metrics?windowDays=7&stage=prod" | jq '{totalDeployments, deploymentsPerDay, medianLeadTimeHours, changeFailRatePercent}'
           curl -fsS -H "X-Twin-Key: ${TWIN_API_KEY}" "${TWIN_URL}/api/workitems?limit=3" | jq 'length'
-          curl -fsS "${TWIN_URL}/llms.txt" | head -n 5
-          MCP_INIT='{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-03-26","capabilities":{},"clientInfo":{"name":"ci-smoke","version":"1.0"}}}'
-          curl -fsS -X POST "${TWIN_URL}/mcp" \
+          LLMS_TXT=$(curl -fsS "${TWIN_URL}/llms.txt")
+          printf '%s\n' "$LLMS_TXT" | head -n 5
+          MCP_INIT_PAYLOAD='{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-03-26","capabilities":{},"clientInfo":{"name":"ci-smoke","version":"1.0"}}}'
+          MCP_INIT_RESP=$(curl -fsS -X POST "${TWIN_URL}/mcp" \
             -H "X-Twin-Key: ${TWIN_API_KEY}" \
             -H "Content-Type: application/json" \
             -H "Accept: application/json, text/event-stream" \
-            -d "$MCP_INIT" | head -c 300
-          echo ""
-          MCP_TOOLS='{"jsonrpc":"2.0","id":2,"method":"tools/list","params":{}}'
-          curl -fsS -X POST "${TWIN_URL}/mcp" \
+            -d "$MCP_INIT_PAYLOAD")
+          echo "${MCP_INIT_RESP:0:300}"
+          MCP_TOOLS_PAYLOAD='{"jsonrpc":"2.0","id":2,"method":"tools/list","params":{}}'
+          MCP_TOOLS_RESP=$(curl -fsS -X POST "${TWIN_URL}/mcp" \
             -H "X-Twin-Key: ${TWIN_API_KEY}" \
             -H "Content-Type: application/json" \
             -H "Accept: application/json, text/event-stream" \
-            -d "$MCP_TOOLS" | grep -oE '"name":"[^"]+"'
-          MCP_CALL='{"jsonrpc":"2.0","id":3,"method":"tools/call","params":{"name":"get_summary","arguments":{}}}'
-          curl -fsS -X POST "${TWIN_URL}/mcp" \
+            -d "$MCP_TOOLS_PAYLOAD")
+          printf '%s\n' "$MCP_TOOLS_RESP" | grep -oE '"name":"[^"]+"'
+          MCP_CALL_PAYLOAD='{"jsonrpc":"2.0","id":3,"method":"tools/call","params":{"name":"get_summary","arguments":{}}}'
+          MCP_CALL_RESP=$(curl -fsS -X POST "${TWIN_URL}/mcp" \
             -H "X-Twin-Key: ${TWIN_API_KEY}" \
             -H "Content-Type: application/json" \
             -H "Accept: application/json, text/event-stream" \
-            -d "$MCP_CALL" | head -c 400
-          echo ""
+            -d "$MCP_CALL_PAYLOAD")
+          echo "${MCP_CALL_RESP:0:400}"
+          echo "$MCP_CALL_RESP" | grep -q "Clear Measure Demo Platform"
           echo "## Digital Twin Deployment Summary" >> "$GITHUB_STEP_SUMMARY"
           echo "- Dashboard URL: ${TWIN_URL}" >> "$GITHUB_STEP_SUMMARY"
           echo "- MCP URL: ${TWIN_URL}/mcp" >> "$GITHUB_STEP_SUMMARY"
