@@ -1,4 +1,5 @@
 using System.Globalization;
+using System.Reflection;
 using System.Text;
 using DigitalTwin.Api.Auth;
 using DigitalTwin.Api.Realtime;
@@ -19,7 +20,7 @@ public static class TwinApiEndpoints
     public static void MapTwinEndpoints(this WebApplication app)
     {
         // Health checks for Container Apps & probes
-        app.MapGet("/health", () => Results.Ok(new { status = "Healthy", service = "cmdemo1-digitaltwin" }));
+        app.MapGet("/health", () => Results.Ok(new { status = "Healthy", service = "cmdemo1-digitaltwin", version = BuildVersion }));
         app.MapGet("/_healthcheck", () => Results.Text("Healthy\n"));
 
         // Public dashboard hydration + SignalR/SSE stream + public summary/graph
@@ -159,6 +160,9 @@ public static class TwinApiEndpoints
             return Results.Text(BuildLlmsTxt(baseUrl), "text/plain; charset=utf-8");
         });
     }
+
+    private static readonly string BuildVersion =
+        typeof(TwinApiEndpoints).Assembly.GetCustomAttribute<AssemblyInformationalVersionAttribute>()?.InformationalVersion.Split('+')[0] ?? "unknown";
 
     private static string BuildLlmsTxt(string baseUrl)
     {

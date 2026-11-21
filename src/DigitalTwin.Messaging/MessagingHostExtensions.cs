@@ -1,7 +1,7 @@
 using Azure.Core;
 using Azure.Identity;
 using DigitalTwin.Core.Ports;
-using JasperFx.Resources;
+using Microsoft.Data.SqlClient;
 using Microsoft.Extensions.Configuration;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Hosting;
@@ -40,7 +40,6 @@ public static class MessagingHostExtensions
             opts.Durability.Mode = Enum.Parse<DurabilityMode>(messaging.DurabilityMode, ignoreCase: true);
             opts.Policies.OnAnyException().RetryWithCooldown([.. messaging.RetryDelaySchedule]).Then.MoveToErrorQueue();
 
-            opts.Services.AddResourceSetupOnStartup();
         });
 
         return builder;
@@ -52,16 +51,17 @@ public static class MessagingHostExtensions
 
     private static void ConfigureTransport(WolverineOptions opts, MessagingOptions messaging)
     {
+        var wolverineConnection = WithMinimumCommandTimeout(messaging.ConnectionString, messaging.WolverineCommandTimeoutSeconds);
         switch (messaging.Transport)
         {
             case IntakeTransport.LocalDurable:
-                opts.PersistMessagesWithSqlServer(messaging.ConnectionString, messaging.WolverineSchema);
+                opts.PersistMessagesWithSqlServer(wolverineConnection, messaging.WolverineSchema);
                 opts.PublishMessage<TwinIntakeCaptured>().ToLocalQueue(messaging.QueueName);
                 opts.LocalQueue(messaging.QueueName).UseDurableInbox();
                 break;
 
             case IntakeTransport.SqlServer:
-                opts.UseSqlServerPersistenceAndTransport(messaging.ConnectionString, messaging.WolverineSchema).AutoProvision();
+                opts.UseSqlServerPersistenceAndTransport(wolverineConnection, messaging.WolverineSchema).AutoProvision();
                 opts.PublishMessage<TwinIntakeCaptured>().ToSqlServerQueue(messaging.SqlQueueName);
                 if (messaging.ProcessorEnabled)
                 {
@@ -73,7 +73,7 @@ public static class MessagingHostExtensions
                 break;
 
             case IntakeTransport.AzureServiceBus:
-                opts.PersistMessagesWithSqlServer(messaging.ConnectionString, messaging.WolverineSchema);
+                opts.PersistMessagesWithSqlServer(wolverineConnection, messaging.WolverineSchema);
                 if (string.IsNullOrWhiteSpace(messaging.ServiceBusConnectionString))
                 {
                     opts.UseAzureServiceBus(messaging.ServiceBusNamespace, CreateServiceBusCredential(messaging)).AutoProvision();
@@ -93,6 +93,16 @@ public static class MessagingHostExtensions
             default:
                 throw new ArgumentOutOfRangeException(nameof(messaging), messaging.Transport, "Unknown intake transport");
         }
+    }
+
+    private static string WithMinimumCommandTimeout(string connectionString, int minimumSeconds)
+    {
+        var builder = new SqlConnectionStringBuilder(connectionString);
+        if (builder.CommandTimeout < minimumSeconds)
+        {
+            builder.CommandTimeout = minimumSeconds;
+        }
+        return builder.ConnectionString;
     }
 
     private static TokenCredential CreateServiceBusCredential(MessagingOptions messaging)

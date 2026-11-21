@@ -140,3 +140,15 @@ Following the domain research in the prompt's prior-art references:
 
 - **Decision**: The integration tests use Testcontainers SQL Server (one container per run, a fresh database per test host) and Wolverine tracked sessions (`TrackActivity().ExecuteAndWaitAsync`) to wait for processing. They run with no Azure credentials, and `TWIN_TEST_SQLSERVER` can point them at an existing server. EF unit tests still use in-memory SQLite.
 - **Covered**: duplicate delivery and webhook/poll overlap (captured 3 times, applied once); processor down while webhooks arrive (SQL Server transport, processed later); forced failure → 3 retries → dead letter → replay; rebuild from raw yields an identical journal; `503` when capture can't commit.
+
+---
+
+## ADR-014: Startup and Journal Hardening After the First Durable-Intake Deploy
+
+- **What happened**: The first deploy of the durable intake (image `1.0.15`) crash-looped. Wolverine's envelope-storage schema migration exceeded the default 30s SQL command timeout on the Basic-tier database (DTU stayed below 60%, and there was no blocking). Each restart repeated the migration, so the old revision kept serving and the post-deploy checks ran against it. With a 600s timeout the same image migrated in about 110s and then started normally. Once live, the intake dead-lettered 3 poller batches with `DbUpdateException`: some observations (for example Octopus audit messages) exceeded the journal's column limits. The previous code's row-by-row fallback had silently dropped those observations.
+- **Decision**:
+  - Wolverine uses its own connection string with a minimum 300s command timeout (`Twin:Messaging:WolverineCommandTimeoutSeconds`). Intake capture keeps the normal timeout, so a stuck insert still returns `503` quickly.
+  - The duplicate JasperFx resource-setup pass is removed, leaving one Wolverine storage migration per startup. The startup probe allows up to about 7.5 minutes.
+  - The journal fits values to column limits using EF model metadata. Over-long idempotency keys get a deterministic SHA-256 suffix (collision-free and rebuild-stable), and full detail stays in `PayloadJson`. Dead-letter records keep the innermost exception message.
+  - CI waits until the latest revision is ready and `/health` reports the build version before verifying, dumps revision logs if it isn't, and replays dead letters after a successful deploy.
+  - The `Diagnose Digital Twin Container App` workflow (manual, read-only, secrets masked) is kept for revision status, logs, SQL tier/DTU and intake failures.

@@ -120,6 +120,39 @@ public sealed class StoreAndProjectionTests : IAsyncLifetime, IAsyncDisposable
     }
 
     [Fact]
+    public async Task OverlongValuesAreFittedToColumnsWithCollisionFreeKeys()
+    {
+        static ObservedEvent Long(string keySuffix) => new()
+        {
+            EventId = new string('e', 300),
+            IdempotencyKey = "azure-change:" + new string('k', 300) + keySuffix,
+            Source = EventSourceKind.Azure,
+            SourceEventId = new string('s', 300),
+            EventType = "dev.cdevents.environment.modified",
+            SubjectType = "azureResource",
+            SubjectId = "/subscriptions/x/resourceGroups/rg-cmdemo1-nonprod/providers/Microsoft.App/containerApps/" + new string('r', 300),
+            Predicate = "write",
+            OccurredAt = DateTimeOffset.UtcNow,
+            IngestedAt = DateTimeOffset.UtcNow,
+            Summary = new string('m', 5000),
+            PayloadJson = "{\"full\":\"detail kept\"}"
+        };
+
+        var applied = await _store.AppendEventsReturnNewAsync([Long("-a"), Long("-b")], CancellationToken.None);
+        Assert.Equal(2, applied.Count);
+        Assert.All(applied, e =>
+        {
+            Assert.True(e.IdempotencyKey.Length <= 256);
+            Assert.True(e.SubjectId.Length <= 200);
+            Assert.Equal(1000, e.Summary.Length);
+        });
+        Assert.NotEqual(applied[0].IdempotencyKey, applied[1].IdempotencyKey);
+
+        // Re-applying the same long events is idempotent
+        Assert.Empty(await _store.AppendEventsReturnNewAsync([Long("-a")], CancellationToken.None));
+    }
+
+    [Fact]
     public async Task ExplainItemCorrelatesIssuePrBuildReleaseDeploymentAndWorkload()
     {
         var now = DateTimeOffset.UtcNow;

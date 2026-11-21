@@ -22,6 +22,12 @@ public sealed class MessagingOptions
     public bool ProcessorEnabled { get; set; } = true;
 
     public string ConnectionString { get; set; } = string.Empty;
+
+    /// <summary>
+    /// Minimum SQL command timeout for Wolverine's own connections. Its startup schema migration can take well over
+    /// the 30s default on a small Azure SQL tier; intake capture keeps the normal timeout so a stuck insert still fails fast.
+    /// </summary>
+    public int WolverineCommandTimeoutSeconds { get; set; } = 300;
     public string WolverineSchema { get; set; } = "wolverine";
     public string QueueName { get; set; } = "twin-intake";
     public int SqlQueuePollingMs { get; set; } = 1_000;

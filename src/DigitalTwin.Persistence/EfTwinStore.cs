@@ -30,7 +30,9 @@ public sealed class EfTwinStore(IDbContextFactory<TwinDbContext> factory) : ITwi
     /// </summary>
     public async Task<IReadOnlyList<ObservedEvent>> AppendEventsReturnNewAsync(IEnumerable<ObservedEvent> observedEvents, CancellationToken ct)
     {
+        var columnLimits = await GetObservedEventColumnLimitsAsync(ct);
         var candidates = observedEvents
+            .Select(e => FitToColumns(e, columnLimits))
             .GroupBy(e => e.IdempotencyKey, StringComparer.Ordinal)
             .Select(ObservedEventPrecedence.Earliest)
             .ToList();
@@ -91,6 +93,47 @@ public sealed class EfTwinStore(IDbContextFactory<TwinDbContext> factory) : ITwi
 
         await db.SaveChangesAsync(ct);
         return inserted;
+    }
+
+    private IReadOnlyDictionary<string, int>? _observedEventColumnLimits;
+
+    private async Task<IReadOnlyDictionary<string, int>> GetObservedEventColumnLimitsAsync(CancellationToken ct)
+    {
+        if (_observedEventColumnLimits is not null)
+        {
+            return _observedEventColumnLimits;
+        }
+        await using var db = await factory.CreateDbContextAsync(ct);
+        _observedEventColumnLimits = db.Model.FindEntityType(typeof(ObservedEvent))!
+            .GetProperties()
+            .Where(p => p.ClrType == typeof(string) && p.GetMaxLength() is not null)
+            .ToDictionary(p => p.Name, p => p.GetMaxLength()!.Value, StringComparer.Ordinal);
+        return _observedEventColumnLimits;
+    }
+
+    /// <summary>
+    /// Fits values to the journal's column limits (full detail stays in PayloadJson). Over-long idempotency keys get a
+    /// deterministic hash suffix instead of plain truncation so distinct keys can never collide.
+    /// </summary>
+    private static ObservedEvent FitToColumns(ObservedEvent source, IReadOnlyDictionary<string, int> limits)
+    {
+        var e = Clone(source);
+        foreach (var (name, max) in limits)
+        {
+            var property = typeof(ObservedEvent).GetProperty(name)!;
+            if (property.GetValue(e) is not string value || value.Length <= max)
+            {
+                continue;
+            }
+            property.SetValue(e, name == nameof(ObservedEvent.IdempotencyKey) ? HashSuffixed(value, max) : value[..max]);
+        }
+        return e;
+    }
+
+    private static string HashSuffixed(string value, int max)
+    {
+        var hash = Convert.ToHexStringLower(System.Security.Cryptography.SHA256.HashData(System.Text.Encoding.UTF8.GetBytes(value)))[..16];
+        return $"{value[..(max - hash.Length - 1)]}#{hash}";
     }
 
     private static ObservedEvent Clone(ObservedEvent e) => new()

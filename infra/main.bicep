@@ -270,7 +270,8 @@ resource twinApp 'Microsoft.App/containerApps@2025-01-01' = {
               initialDelaySeconds: 5
               periodSeconds: 5
               timeoutSeconds: 5
-              failureThreshold: 30
+              // Up to ~7.5 min: first-time Wolverine schema migration is slow on the Basic tier database.
+              failureThreshold: 90
             }
             {
               type: 'Readiness'

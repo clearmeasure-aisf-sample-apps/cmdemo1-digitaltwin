@@ -25,7 +25,7 @@ public static class TwinIntakeCapturedHandler
             var finalAttempt = envelope.Attempts >= options.Value.MaxAttempts;
             await rawStore.RecordFailureAsync(
                 message.RawEventId,
-                $"{ex.GetType().Name}: {ex.Message}",
+                $"{ex.GetType().Name}: {ex.GetBaseException().Message}",
                 deadLettered: finalAttempt,
                 timeProvider.GetUtcNow(),
                 CancellationToken.None);
