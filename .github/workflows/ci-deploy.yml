@@ -189,8 +189,11 @@ jobs:
           TWIN_API_KEY: ${{ secrets.TWIN_API_KEY }}
         run: |
           set -euo pipefail
-          curl -fsS -m 120 -X POST -H "X-Twin-Key: ${TWIN_API_KEY}" "${TWIN_URL}/api/admin/rebuild" | jq '{gitHubOk, octopusOk, azureOk, probesOk, activeDriftCount}'
-          curl -fsS -H "X-Twin-Key: ${TWIN_API_KEY}" "${TWIN_URL}/api/twin/summary" | jq '{systemSlug, activeDriftCount, criticalDriftCount, pipelinesCount: (.pipelines | length), stagesCount: (.stages | length), costMonthToDateUsd, gitHubQuota}'
+          curl -fsS -m 120 -X POST -H "X-Twin-Key: ${TWIN_API_KEY}" "${TWIN_URL}/api/admin/rebuild" | jq '{gitHubOk, octopusOk, azureOk, probesOk, activeDriftCount, notes}'
+          curl -fsS -H "X-Twin-Key: ${TWIN_API_KEY}" "${TWIN_URL}/api/twin/summary" | jq '{systemSlug, activeDriftCount, criticalDriftCount, pipelinesCount: (.pipelines | length), stagesCount: (.stages | length), webhooksCount: (.webhooks | length), webhooks: [.webhooks[] | {id, source, target, isActive, lastDeliveryStatusCode, detail}], costMonthToDateUsd, gitHubQuota}'
+          curl -fsS -H "X-Twin-Key: ${TWIN_API_KEY}" "${TWIN_URL}/api/drift" | jq 'length'
+          curl -fsS -H "X-Twin-Key: ${TWIN_API_KEY}" "${TWIN_URL}/api/metrics?windowDays=7&stage=prod" | jq '{totalDeployments, deploymentsPerDay, medianLeadTimeHours, changeFailRatePercent}'
+          curl -fsS -H "X-Twin-Key: ${TWIN_API_KEY}" "${TWIN_URL}/api/workitems?limit=3" | jq 'length'
           curl -fsS "${TWIN_URL}/llms.txt" | head -n 5
           MCP_INIT='{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-03-26","capabilities":{},"clientInfo":{"name":"ci-smoke","version":"1.0"}}}'
           curl -fsS -X POST "${TWIN_URL}/mcp" \
@@ -198,6 +201,19 @@ jobs:
             -H "Content-Type: application/json" \
             -H "Accept: application/json, text/event-stream" \
             -d "$MCP_INIT" | head -c 300
+          echo ""
+          MCP_TOOLS='{"jsonrpc":"2.0","id":2,"method":"tools/list","params":{}}'
+          curl -fsS -X POST "${TWIN_URL}/mcp" \
+            -H "X-Twin-Key: ${TWIN_API_KEY}" \
+            -H "Content-Type: application/json" \
+            -H "Accept: application/json, text/event-stream" \
+            -d "$MCP_TOOLS" | grep -oE '"name":"[^"]+"'
+          MCP_CALL='{"jsonrpc":"2.0","id":3,"method":"tools/call","params":{"name":"get_summary","arguments":{}}}'
+          curl -fsS -X POST "${TWIN_URL}/mcp" \
+            -H "X-Twin-Key: ${TWIN_API_KEY}" \
+            -H "Content-Type: application/json" \
+            -H "Accept: application/json, text/event-stream" \
+            -d "$MCP_CALL" | head -c 400
           echo ""
           echo "## Digital Twin Deployment Summary" >> "$GITHUB_STEP_SUMMARY"
           echo "- Dashboard URL: ${TWIN_URL}" >> "$GITHUB_STEP_SUMMARY"

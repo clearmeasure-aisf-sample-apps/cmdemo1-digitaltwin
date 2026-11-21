@@ -144,11 +144,23 @@ for repo in $SEED_REPOS; do
   ')
 
   if [ -n "$ALREADY_OK" ]; then
-    DEL=$(curl -fsSL \
+    DEL_JSON=$(curl -fsSL \
       -H "Authorization: Bearer ${GH_PAT}" \
       -H "Accept: application/vnd.github+json" \
-      "https://api.github.com/repos/${GITHUB_ORG}/${repo}/hooks/${ALREADY_OK}/deliveries?per_page=1" | jq -r '.[0] | "\(.event) HTTP \(.status_code) (\(.status))"' || echo "pending")
-    echo "  OK github hook ${repo} (id=${ALREADY_OK}, last=${DEL})"
+      "https://api.github.com/repos/${GITHUB_ORG}/${repo}/hooks/${ALREADY_OK}/deliveries?per_page=1" || echo '[]')
+    if [ "$(echo "$DEL_JSON" | jq 'length')" -eq 0 ]; then
+      curl -fsSL -X POST \
+        -H "Authorization: Bearer ${GH_PAT}" \
+        -H "Accept: application/vnd.github+json" \
+        "https://api.github.com/repos/${GITHUB_ORG}/${repo}/hooks/${ALREADY_OK}/pings" >/dev/null || true
+      sleep 1
+      DEL_JSON=$(curl -fsSL \
+        -H "Authorization: Bearer ${GH_PAT}" \
+        -H "Accept: application/vnd.github+json" \
+        "https://api.github.com/repos/${GITHUB_ORG}/${repo}/hooks/${ALREADY_OK}/deliveries?per_page=1" || echo '[]')
+    fi
+    DEL=$(echo "$DEL_JSON" | jq -r '.[0] // empty | "\(.event) HTTP \(.status_code) (\(.status))"' || echo "pending")
+    echo "  OK github hook ${repo} (id=${ALREADY_OK}, last=${DEL:-pending})"
     continue
   fi
 
