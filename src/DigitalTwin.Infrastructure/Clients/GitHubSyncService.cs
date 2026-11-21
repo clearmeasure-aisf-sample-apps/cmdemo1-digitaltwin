@@ -77,7 +77,19 @@ public sealed partial class GitHubSyncService(
             var newEvents = new List<ObservedEvent>();
 
             var gqlResult = await FetchBatchRepositoriesGraphQlAsync(targetRepos, fullBackfill, now, repoSnapshots, prSnapshots, artifactSnapshots, newEvents, ct);
-            var rateLimited = gqlResult.RateLimited;
+            var graphQlRateLimited = gqlResult.RateLimited;
+            var restRateLimited = false;
+
+            // Preserve cached repository records when GraphQL is paused so REST webhook metadata still updates
+            if (repoSnapshots.Count == 0)
+            {
+                var cachedRepos = await store.GetRepositoriesAsync(ct);
+                var targetSet = targetRepos.ToHashSet(StringComparer.OrdinalIgnoreCase);
+                foreach (var cached in cachedRepos.Where(r => targetSet.Contains(r.Name)))
+                {
+                    repoSnapshots.Add(cached);
+                }
+            }
 
             // 3. ETag-cached REST calls for workflow runs (active repos only on incremental polls)
             var runSnapshots = new List<PipelineRunSnapshot>();
@@ -89,7 +101,7 @@ public sealed partial class GitHubSyncService(
                 ct.ThrowIfCancellationRequested();
                 if (gh.IsRestPaused(out _))
                 {
-                    rateLimited = true;
+                    restRateLimited = true;
                     break;
                 }
 
@@ -108,6 +120,7 @@ public sealed partial class GitHubSyncService(
                             repoSnap.WebhookId = long.TryParse(hookStatus.ExternalId, out var wid) ? wid : null;
                             repoSnap.LastWebhookStatusCode = hookStatus.LastDeliveryStatusCode;
                             repoSnap.LastWebhookDeliveryAt = hookStatus.LastDeliveryAt;
+                            repoSnap.UpdatedAt = now;
                         }
                     }
                 }
@@ -118,8 +131,8 @@ public sealed partial class GitHubSyncService(
             if (runSnapshots.Count > 0) await store.UpsertPipelineRunsAsync(runSnapshots, ct);
             if (artifactSnapshots.Count > 0) await store.UpsertArtifactsAsync(artifactSnapshots, ct);
 
-            // Preserve last-known-good webhook statuses when rate limited or incomplete
-            if (fullBackfill && webhookStatuses.Count > 0 && !rateLimited)
+            // Save REST webhook statuses whenever REST was not rate-limited (independent of GraphQL quota)
+            if (fullBackfill && webhookStatuses.Count > 0 && !restRateLimited)
             {
                 await store.ReplaceWebhookStatusesAsync("github", webhookStatuses, ct);
             }
@@ -130,10 +143,18 @@ public sealed partial class GitHubSyncService(
             var ingestedCount = await ingestion.IngestBatchAsync(newEvents, ct);
             var quota = gh.GetStatus();
 
-            cursor.LastSuccessAt = rateLimited ? null : timeProvider.GetUtcNow();
-            cursor.Status = quota.Mode == "paused" ? "rate-limit-paused" : quota.Mode == "backoff" ? "rate-limit-backoff" : "ok";
-            cursor.LastError = rateLimited ? "GitHub API rate limit reached; preserving cached state until reset" : null;
-            cursor.ItemsProcessed = repoSnapshots.Count + prSnapshots.Count + runSnapshots.Count + ingestedCount;
+            cursor.LastSuccessAt = restRateLimited ? null : timeProvider.GetUtcNow();
+            cursor.Status = restRateLimited || quota.Mode == "paused"
+                ? "rate-limit-paused"
+                : quota.Mode == "backoff"
+                    ? "rate-limit-backoff"
+                    : "ok";
+            cursor.LastError = restRateLimited
+                ? "GitHub REST rate limit reached; preserving cached state until reset"
+                : graphQlRateLimited
+                    ? $"GitHub GraphQL paused until {quota.GraphQlResetAt:HH:mm:ss}Z; REST runs, webhooks, and raw GitOps active"
+                    : null;
+            cursor.ItemsProcessed = repoSnapshots.Count + prSnapshots.Count + runSnapshots.Count + webhookStatuses.Count + ingestedCount;
             cursor.LastCursor = now.ToString("O", CultureInfo.InvariantCulture);
             await store.UpsertCursorAsync(cursor, ct);
         }

@@ -142,11 +142,43 @@ public sealed class EfTwinStore(IDbContextFactory<TwinDbContext> factory) : ITwi
 
     public async Task ReplaceWebhookStatusesAsync(string source, IReadOnlyList<WebhookRegistrationStatus> statuses, CancellationToken ct)
     {
-        await using var db = await factory.CreateDbContextAsync(ct);
-        var old = await db.WebhookRegistrationStatuses.Where(w => w.Source == source).ToListAsync(ct);
-        db.WebhookRegistrationStatuses.RemoveRange(old);
-        db.WebhookRegistrationStatuses.AddRange(statuses);
-        await db.SaveChangesAsync(ct);
+        var deduped = statuses.GroupBy(s => s.Id, StringComparer.OrdinalIgnoreCase).Select(g => g.Last()).ToList();
+        var keepIds = deduped.Select(s => s.Id).ToHashSet(StringComparer.OrdinalIgnoreCase);
+
+        for (var attempt = 0; attempt < 2; attempt++)
+        {
+            await using var db = await factory.CreateDbContextAsync(ct);
+            var existing = await db.WebhookRegistrationStatuses
+                .Where(w => w.Source == source)
+                .ToDictionaryAsync(w => w.Id, StringComparer.OrdinalIgnoreCase, ct);
+
+            foreach (var stale in existing.Values.Where(w => !keepIds.Contains(w.Id)))
+            {
+                db.WebhookRegistrationStatuses.Remove(stale);
+            }
+
+            foreach (var item in deduped)
+            {
+                if (existing.TryGetValue(item.Id, out var found))
+                {
+                    db.Entry(found).CurrentValues.SetValues(item);
+                }
+                else
+                {
+                    db.WebhookRegistrationStatuses.Add(item);
+                }
+            }
+
+            try
+            {
+                await db.SaveChangesAsync(ct);
+                return;
+            }
+            catch (DbUpdateConcurrencyException) when (attempt == 0)
+            {
+                // Retry once if an overlapping revision deleted/updated rows concurrently
+            }
+        }
     }
 
     public async Task<IReadOnlyList<WebhookRegistrationStatus>> GetWebhookStatusesAsync(CancellationToken ct)
@@ -275,13 +307,13 @@ public sealed class EfTwinStore(IDbContextFactory<TwinDbContext> factory) : ITwi
     }
 
     public async Task ReplaceFreezesAsync(IReadOnlyList<DeploymentFreezeSnapshot> freezes, CancellationToken ct)
-    {
-        await using var db = await factory.CreateDbContextAsync(ct);
-        var all = await db.DeploymentFreezes.ToListAsync(ct);
-        db.DeploymentFreezes.RemoveRange(all);
-        db.DeploymentFreezes.AddRange(freezes);
-        await db.SaveChangesAsync(ct);
-    }
+        => await ReplaceSetAsync(
+            freezes,
+            f => f.FreezeId,
+            (db, token) => db.DeploymentFreezes.ToListAsync(token),
+            (db, item) => db.DeploymentFreezes.Add(item),
+            (db, item) => db.DeploymentFreezes.Remove(item),
+            ct);
 
     public async Task<IReadOnlyList<DeploymentFreezeSnapshot>> GetFreezesAsync(CancellationToken ct)
     {
@@ -319,13 +351,13 @@ public sealed class EfTwinStore(IDbContextFactory<TwinDbContext> factory) : ITwi
     }
 
     public async Task ReplaceWorkloadsAsync(IReadOnlyList<WorkloadRevisionSnapshot> workloads, CancellationToken ct)
-    {
-        await using var db = await factory.CreateDbContextAsync(ct);
-        var old = await db.WorkloadRevisions.ToListAsync(ct);
-        db.WorkloadRevisions.RemoveRange(old);
-        db.WorkloadRevisions.AddRange(workloads);
-        await db.SaveChangesAsync(ct);
-    }
+        => await ReplaceSetAsync(
+            workloads,
+            w => w.Id,
+            (db, token) => db.WorkloadRevisions.ToListAsync(token),
+            (db, item) => db.WorkloadRevisions.Add(item),
+            (db, item) => db.WorkloadRevisions.Remove(item),
+            ct);
 
     public async Task<IReadOnlyList<WorkloadRevisionSnapshot>> GetWorkloadsAsync(CancellationToken ct)
     {
@@ -334,13 +366,13 @@ public sealed class EfTwinStore(IDbContextFactory<TwinDbContext> factory) : ITwi
     }
 
     public async Task ReplaceAzureResourcesAsync(IReadOnlyList<AzureResourceSnapshot> resources, CancellationToken ct)
-    {
-        await using var db = await factory.CreateDbContextAsync(ct);
-        var old = await db.AzureResources.ToListAsync(ct);
-        db.AzureResources.RemoveRange(old);
-        db.AzureResources.AddRange(resources);
-        await db.SaveChangesAsync(ct);
-    }
+        => await ReplaceSetAsync(
+            resources,
+            r => r.ResourceId,
+            (db, token) => db.AzureResources.ToListAsync(token),
+            (db, item) => db.AzureResources.Add(item),
+            (db, item) => db.AzureResources.Remove(item),
+            ct);
 
     public async Task<IReadOnlyList<AzureResourceSnapshot>> GetAzureResourcesAsync(CancellationToken ct)
     {
@@ -450,5 +482,52 @@ public sealed class EfTwinStore(IDbContextFactory<TwinDbContext> factory) : ITwi
         }
 
         await db.SaveChangesAsync(ct);
+    }
+
+    private async Task ReplaceSetAsync<TEntity>(
+        IReadOnlyList<TEntity> items,
+        Func<TEntity, string> keySelector,
+        Func<TwinDbContext, CancellationToken, Task<List<TEntity>>> loadAll,
+        Action<TwinDbContext, TEntity> addEntity,
+        Action<TwinDbContext, TEntity> removeEntity,
+        CancellationToken ct) where TEntity : class
+    {
+        var deduped = items.GroupBy(keySelector, StringComparer.OrdinalIgnoreCase).Select(g => g.Last()).ToList();
+        var keepIds = deduped.Select(keySelector).ToHashSet(StringComparer.OrdinalIgnoreCase);
+
+        for (var attempt = 0; attempt < 2; attempt++)
+        {
+            await using var db = await factory.CreateDbContextAsync(ct);
+            var existingList = await loadAll(db, ct);
+            var existing = existingList.ToDictionary(keySelector, StringComparer.OrdinalIgnoreCase);
+
+            foreach (var stale in existing.Values.Where(x => !keepIds.Contains(keySelector(x))))
+            {
+                removeEntity(db, stale);
+            }
+
+            foreach (var item in deduped)
+            {
+                var id = keySelector(item);
+                if (existing.TryGetValue(id, out var found))
+                {
+                    db.Entry(found).CurrentValues.SetValues(item);
+                }
+                else
+                {
+                    addEntity(db, item);
+                }
+            }
+
+            try
+            {
+                await db.SaveChangesAsync(ct);
+                return;
+            }
+            catch (DbUpdateConcurrencyException) when (attempt == 0)
+            {
+                // Retry once if overlapping container revisions updated rows concurrently
+            }
+        }
     }
 }

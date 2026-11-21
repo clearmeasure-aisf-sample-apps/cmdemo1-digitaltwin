@@ -77,6 +77,61 @@ public sealed class GitHubRateBudgetTests
         Assert.Equal(1, gh.GetStatus().TwinCallsSkippedByQuota);
     }
 
+    [Fact]
+    public async Task GraphQlPauseDoesNotBlockCoreRestAndAutoResetsAfterWindow()
+    {
+        var clock = new TestTimeProvider(new DateTimeOffset(2026, 11, 21, 5, 50, 0, TimeSpan.Zero));
+        var resetEpoch = clock.GetUtcNow().AddMinutes(10).ToUnixTimeSeconds();
+        var restResetEpoch = clock.GetUtcNow().AddMinutes(2).ToUnixTimeSeconds();
+
+        var handler = new FakeHttpMessageHandler(req =>
+        {
+            if (req.RequestUri!.AbsolutePath.EndsWith("graphql", StringComparison.Ordinal))
+            {
+                var resp = new HttpResponseMessage(HttpStatusCode.Forbidden);
+                resp.Headers.Add("X-RateLimit-Resource", "graphql");
+                resp.Headers.Add("X-RateLimit-Limit", "5000");
+                resp.Headers.Add("X-RateLimit-Remaining", "0");
+                resp.Headers.Add("X-RateLimit-Reset", resetEpoch.ToString(System.Globalization.CultureInfo.InvariantCulture));
+                return resp;
+            }
+
+            var coreResp = new HttpResponseMessage(HttpStatusCode.OK)
+            {
+                Content = new StringContent("[]", Encoding.UTF8, "application/json")
+            };
+            coreResp.Headers.Add("X-RateLimit-Resource", "core");
+            coreResp.Headers.Add("X-RateLimit-Limit", "5000");
+            coreResp.Headers.Add("X-RateLimit-Remaining", "4999");
+            coreResp.Headers.Add("X-RateLimit-Reset", restResetEpoch.ToString(System.Globalization.CultureInfo.InvariantCulture));
+            return coreResp;
+        });
+
+        var gh = new GitHubApiClient(new StubHttpClientFactory(handler), Microsoft.Extensions.Options.Options.Create(new TwinOptions { GitHubToken = "test" }), clock);
+
+        var gql = await gh.PostGraphQlAsync("query { viewer { login } }", null, CancellationToken.None);
+        Assert.True(gql.RateLimited);
+        Assert.True(gh.IsGraphQlPaused(out _));
+        Assert.False(gh.IsRestPaused(out _));
+
+        // REST calls still succeed while GraphQL is paused
+        var rest = await gh.GetApiAsync("repos/org/r1/hooks", bypassPause: false, CancellationToken.None);
+        Assert.True(rest.Success);
+        Assert.Equal("normal", gh.GetStatus().Mode);
+
+        // Advance past GraphQL reset window -> auto-resets GraphQlRemaining
+        clock.Advance(TimeSpan.FromMinutes(11));
+        Assert.False(gh.IsGraphQlPaused(out _));
+        Assert.Equal(5000, gh.GetStatus().GraphQlRemaining);
+    }
+
+    private sealed class TestTimeProvider(DateTimeOffset start) : TimeProvider
+    {
+        private DateTimeOffset _now = start;
+        public override DateTimeOffset GetUtcNow() => _now;
+        public void Advance(TimeSpan delta) => _now = _now.Add(delta);
+    }
+
     private sealed class FakeHttpMessageHandler(Func<HttpRequestMessage, HttpResponseMessage> responder) : HttpMessageHandler
     {
         protected override Task<HttpResponseMessage> SendAsync(HttpRequestMessage request, CancellationToken cancellationToken)

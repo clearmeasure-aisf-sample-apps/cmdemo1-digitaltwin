@@ -154,16 +154,27 @@ public sealed partial class TwinPollingHostedService(
         using var probeTimer = new PeriodicTimer(TimeSpan.FromSeconds(Math.Max(20, options.Value.ProbeIntervalSeconds)));
 
         var ghBackoffCounter = 0;
+        var needsGitHubBackfill = ghClient.IsRestPaused(out _);
 
         await Task.WhenAll(
             RunLoopAsync(ghTimer, "GitHub", async ct =>
             {
                 // Stretch reconciliation 3x when in backoff mode (<1,000 remaining)
-                if (ghClient.IsRestBackoff() && (++ghBackoffCounter % 3) != 0)
+                if (!needsGitHubBackfill && ghClient.IsRestBackoff() && (++ghBackoffCounter % 3) != 0)
                 {
                     return;
                 }
-                await gitHub.SyncAsync(fullBackfill: false, ct);
+                if (needsGitHubBackfill && ghClient.IsRestPaused(out _))
+                {
+                    return;
+                }
+
+                var runFullBackfill = needsGitHubBackfill;
+                await gitHub.SyncAsync(fullBackfill: runFullBackfill, ct);
+                if (runFullBackfill && !ghClient.IsRestPaused(out _))
+                {
+                    needsGitHubBackfill = false;
+                }
                 await ingestion.EvaluateAndRecordDriftAsync(ct);
             }, stoppingToken),
             RunLoopAsync(ghBoardTimer, "GitHubBoard", async ct =>

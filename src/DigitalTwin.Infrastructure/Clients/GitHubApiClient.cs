@@ -90,6 +90,10 @@ public sealed class GitHubApiClient(
             {
                 _coreRemaining = _coreLimit ?? 5000;
             }
+            if (_graphQlResetAt is not null && now >= _graphQlResetAt.Value && _graphQlRemaining is < PauseThreshold)
+            {
+                _graphQlRemaining = _graphQlLimit ?? 5000;
+            }
 
             string mode;
             if ((_coreRemaining is < PauseThreshold && (_coreResetAt is null || now < _coreResetAt.Value)) ||
