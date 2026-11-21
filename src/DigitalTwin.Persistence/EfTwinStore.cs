@@ -222,6 +222,16 @@ public sealed class EfTwinStore(IDbContextFactory<TwinDbContext> factory) : ITwi
             query = query.Where(e => e.EventType == eventType);
         }
 
+        if (!db.Database.IsSqlite())
+        {
+            return await query
+                .OrderByDescending(e => e.OccurredAt)
+                .ThenByDescending(e => e.Id)
+                .Take(limit)
+                .ToListAsync(ct);
+        }
+
+        // SQLite (unit tests) cannot ORDER BY DateTimeOffset server-side.
         var rows = await query.ToListAsync(ct);
         return rows
             .OrderByDescending(e => e.OccurredAt)

@@ -3,7 +3,7 @@ set -euo pipefail
 
 # Idempotently register:
 # 1. Octopus Deploy Subscription in Spaces-355 (no GitHub quota cost)
-# 2. Azure Event Grid system topics + subscriptions on rg-cmdemo1-nonprod & rg-cmdemo1-prod (no GitHub quota cost)
+# 2. Azure Event Grid: status only; deploys infra/eventgrid.bicep only when ENABLE_EVENT_GRID_DEPLOY=true
 # 3. GitHub repo webhooks across all active (non-archived) cmdemo1-* repos (quota-guarded!)
 
 : "${TWIN_URL:?TWIN_URL is required (e.g. https://ca-cmdemo1-twin....azurecontainerapps.io)}"
@@ -78,24 +78,15 @@ else
   echo "  CREATED Octopus subscription $(echo "$CREATED_SUB" | jq -r '.Id')"
 fi
 
-echo "=== 2. Checking Azure Event Grid provider & system topics ==="
+echo "=== 2. Azure Event Grid (status only unless ENABLE_EVENT_GRID_DEPLOY=true) ==="
 EG_STATE=$(az provider show --namespace Microsoft.EventGrid --query registrationState -o tsv 2>/dev/null || echo "Unknown")
-if [ "$EG_STATE" != "Registered" ]; then
-  echo "  Microsoft.EventGrid is '${EG_STATE}'; attempting registration..."
-  set +e
-  az provider register --namespace Microsoft.EventGrid --wait >/dev/null 2>&1
-  REG_RC=$?
-  set -e
-  EG_STATE=$(az provider show --namespace Microsoft.EventGrid --query registrationState -o tsv 2>/dev/null || echo "Unknown")
-  if [ "$REG_RC" -ne 0 ] || [ "$EG_STATE" != "Registered" ]; then
-    echo "  NOTICE: Microsoft.EventGrid remains '${EG_STATE}' (RG-scoped Contributor cannot register subscription resource providers)."
-    echo "  To enable Event Grid push delivery in addition to Resource Graph/ARM pollers, a subscription Owner should run:"
-    echo "    az provider register --namespace Microsoft.EventGrid"
-    echo "  and re-run this workflow."
-  fi
-fi
+echo "  Microsoft.EventGrid provider: ${EG_STATE}"
+for rg in rg-cmdemo1-nonprod rg-cmdemo1-prod; do
+  TOPICS=$(az eventgrid system-topic list -g "$rg" --query "[].name" -o tsv 2>/dev/null | tr '\n' ' ' || true)
+  echo "  ${rg}: system topics [${TOPICS:-none}]"
+done
 
-if [ "$EG_STATE" = "Registered" ]; then
+if [ "${ENABLE_EVENT_GRID_DEPLOY:-false}" = "true" ] && [ "$EG_STATE" = "Registered" ]; then
   ENCODED_TOKEN=$(python3 -c 'import os,urllib.parse; print(urllib.parse.quote(os.environ["WEBHOOK_SECRET"], safe=""))')
   EG_URL="${TWIN_URL}/hooks/azure?token=${ENCODED_TOKEN}"
   for rg in rg-cmdemo1-nonprod rg-cmdemo1-prod; do
@@ -108,6 +99,8 @@ if [ "$EG_STATE" = "Registered" ]; then
       --output none
     echo "  ACTIVE Event Grid subscription in ${rg}"
   done
+else
+  echo "  Event Grid infra not deployed by this run (opt in with ENABLE_EVENT_GRID_DEPLOY=true)."
 fi
 
 echo "=== 3. Checking GitHub REST quota before registering repo webhooks ==="
