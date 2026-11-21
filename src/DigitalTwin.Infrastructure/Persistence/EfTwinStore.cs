@@ -14,37 +14,74 @@ public sealed class EfTwinStore(IDbContextFactory<TwinDbContext> factory) : ITwi
 {
     public async Task<bool> AppendEventIfNewAsync(ObservedEvent observedEvent, CancellationToken ct)
     {
-        await using var db = await factory.CreateDbContextAsync(ct);
-        var exists = await db.ObservedEvents.AnyAsync(e => e.IdempotencyKey == observedEvent.IdempotencyKey, ct);
-        if (exists)
-        {
-            return false;
-        }
-
-        db.ObservedEvents.Add(observedEvent);
-        try
-        {
-            await db.SaveChangesAsync(ct);
-            return true;
-        }
-        catch (DbUpdateException)
-        {
-            // Concurrent webhook/poller race on unique IdempotencyKey
-            return false;
-        }
+        var added = await AppendEventsReturnNewAsync([observedEvent], ct);
+        return added.Count > 0;
     }
 
     public async Task<int> AppendEventsIfNewAsync(IEnumerable<ObservedEvent> observedEvents, CancellationToken ct)
     {
-        var count = 0;
-        foreach (var ev in observedEvents)
+        var added = await AppendEventsReturnNewAsync(observedEvents, ct);
+        return added.Count;
+    }
+
+    public async Task<IReadOnlyList<ObservedEvent>> AppendEventsReturnNewAsync(IEnumerable<ObservedEvent> observedEvents, CancellationToken ct)
+    {
+        var deduped = observedEvents
+            .GroupBy(e => e.IdempotencyKey, StringComparer.Ordinal)
+            .Select(g => g.First())
+            .ToList();
+
+        if (deduped.Count == 0)
         {
-            if (await AppendEventIfNewAsync(ev, ct))
-            {
-                count++;
-            }
+            return [];
         }
-        return count;
+
+        var keys = deduped.Select(e => e.IdempotencyKey).ToList();
+        await using var db = await factory.CreateDbContextAsync(ct);
+
+        var existingKeys = (await db.ObservedEvents
+            .AsNoTracking()
+            .Where(e => keys.Contains(e.IdempotencyKey))
+            .Select(e => e.IdempotencyKey)
+            .ToListAsync(ct))
+            .ToHashSet(StringComparer.Ordinal);
+
+        var toInsert = deduped.Where(e => !existingKeys.Contains(e.IdempotencyKey)).ToList();
+        if (toInsert.Count == 0)
+        {
+            return [];
+        }
+
+        db.ObservedEvents.AddRange(toInsert);
+        try
+        {
+            await db.SaveChangesAsync(ct);
+            return toInsert;
+        }
+        catch (DbUpdateException)
+        {
+            // Fallback row-by-row if a concurrent webhook raced on one key
+            var inserted = new List<ObservedEvent>();
+            foreach (var ev in toInsert)
+            {
+                await using var singleDb = await factory.CreateDbContextAsync(ct);
+                if (await singleDb.ObservedEvents.AnyAsync(x => x.IdempotencyKey == ev.IdempotencyKey, ct))
+                {
+                    continue;
+                }
+                singleDb.ObservedEvents.Add(ev);
+                try
+                {
+                    await singleDb.SaveChangesAsync(ct);
+                    inserted.Add(ev);
+                }
+                catch (DbUpdateException)
+                {
+                    // concurrent duplicate
+                }
+            }
+            return inserted;
+        }
     }
 
     public async Task<IReadOnlyList<ObservedEvent>> QueryEventsAsync(
@@ -80,7 +117,6 @@ public sealed class EfTwinStore(IDbContextFactory<TwinDbContext> factory) : ITwi
             query = query.Where(e => e.EventType == eventType);
         }
 
-        // Order by OccurredAt client-safe for SQLite DateTimeOffset support
         var rows = await query.ToListAsync(ct);
         return rows
             .OrderByDescending(e => e.OccurredAt)
@@ -93,14 +129,8 @@ public sealed class EfTwinStore(IDbContextFactory<TwinDbContext> factory) : ITwi
     {
         await using var db = await factory.CreateDbContextAsync(ct);
         var existing = await db.IngestionCursors.FindAsync([cursor.SourceKey], ct);
-        if (existing is null)
-        {
-            db.IngestionCursors.Add(cursor);
-        }
-        else
-        {
-            db.Entry(existing).CurrentValues.SetValues(cursor);
-        }
+        if (existing is null) db.IngestionCursors.Add(cursor);
+        else db.Entry(existing).CurrentValues.SetValues(cursor);
         await db.SaveChangesAsync(ct);
     }
 
@@ -126,16 +156,12 @@ public sealed class EfTwinStore(IDbContextFactory<TwinDbContext> factory) : ITwi
     }
 
     public async Task UpsertRepositoriesAsync(IReadOnlyList<RepositorySnapshot> repositories, CancellationToken ct)
-    {
-        await using var db = await factory.CreateDbContextAsync(ct);
-        foreach (var item in repositories)
-        {
-            var existing = await db.Repositories.FindAsync([item.Name], ct);
-            if (existing is null) db.Repositories.Add(item);
-            else db.Entry(existing).CurrentValues.SetValues(item);
-        }
-        await db.SaveChangesAsync(ct);
-    }
+        => await BatchUpsertAsync(
+            repositories,
+            r => r.Name,
+            (db, ids, token) => db.Repositories.Where(x => ids.Contains(x.Name)).ToDictionaryAsync(x => x.Name, StringComparer.OrdinalIgnoreCase, token),
+            (db, item) => db.Repositories.Add(item),
+            ct);
 
     public async Task<IReadOnlyList<RepositorySnapshot>> GetRepositoriesAsync(CancellationToken ct)
     {
@@ -144,16 +170,12 @@ public sealed class EfTwinStore(IDbContextFactory<TwinDbContext> factory) : ITwi
     }
 
     public async Task UpsertSourceChangesAsync(IReadOnlyList<SourceChangeSnapshot> changes, CancellationToken ct)
-    {
-        await using var db = await factory.CreateDbContextAsync(ct);
-        foreach (var item in changes)
-        {
-            var existing = await db.SourceChanges.FindAsync([item.Id], ct);
-            if (existing is null) db.SourceChanges.Add(item);
-            else db.Entry(existing).CurrentValues.SetValues(item);
-        }
-        await db.SaveChangesAsync(ct);
-    }
+        => await BatchUpsertAsync(
+            changes,
+            c => c.Id,
+            (db, ids, token) => db.SourceChanges.Where(x => ids.Contains(x.Id)).ToDictionaryAsync(x => x.Id, StringComparer.OrdinalIgnoreCase, token),
+            (db, item) => db.SourceChanges.Add(item),
+            ct);
 
     public async Task<IReadOnlyList<SourceChangeSnapshot>> GetSourceChangesAsync(CancellationToken ct)
     {
@@ -163,16 +185,12 @@ public sealed class EfTwinStore(IDbContextFactory<TwinDbContext> factory) : ITwi
     }
 
     public async Task UpsertPipelineRunsAsync(IReadOnlyList<PipelineRunSnapshot> runs, CancellationToken ct)
-    {
-        await using var db = await factory.CreateDbContextAsync(ct);
-        foreach (var item in runs)
-        {
-            var existing = await db.PipelineRuns.FindAsync([item.Id], ct);
-            if (existing is null) db.PipelineRuns.Add(item);
-            else db.Entry(existing).CurrentValues.SetValues(item);
-        }
-        await db.SaveChangesAsync(ct);
-    }
+        => await BatchUpsertAsync(
+            runs,
+            r => r.Id,
+            (db, ids, token) => db.PipelineRuns.Where(x => ids.Contains(x.Id)).ToDictionaryAsync(x => x.Id, StringComparer.OrdinalIgnoreCase, token),
+            (db, item) => db.PipelineRuns.Add(item),
+            ct);
 
     public async Task<IReadOnlyList<PipelineRunSnapshot>> GetPipelineRunsAsync(int limit, CancellationToken ct)
     {
@@ -182,16 +200,12 @@ public sealed class EfTwinStore(IDbContextFactory<TwinDbContext> factory) : ITwi
     }
 
     public async Task UpsertArtifactsAsync(IReadOnlyList<ArtifactPackageSnapshot> artifacts, CancellationToken ct)
-    {
-        await using var db = await factory.CreateDbContextAsync(ct);
-        foreach (var item in artifacts)
-        {
-            var existing = await db.Artifacts.FindAsync([item.Id], ct);
-            if (existing is null) db.Artifacts.Add(item);
-            else db.Entry(existing).CurrentValues.SetValues(item);
-        }
-        await db.SaveChangesAsync(ct);
-    }
+        => await BatchUpsertAsync(
+            artifacts,
+            a => a.Id,
+            (db, ids, token) => db.Artifacts.Where(x => ids.Contains(x.Id)).ToDictionaryAsync(x => x.Id, StringComparer.OrdinalIgnoreCase, token),
+            (db, item) => db.Artifacts.Add(item),
+            ct);
 
     public async Task<IReadOnlyList<ArtifactPackageSnapshot>> GetArtifactsAsync(CancellationToken ct)
     {
@@ -201,16 +215,12 @@ public sealed class EfTwinStore(IDbContextFactory<TwinDbContext> factory) : ITwi
     }
 
     public async Task UpsertWorkItemsAsync(IReadOnlyList<WorkItemSnapshot> items, CancellationToken ct)
-    {
-        await using var db = await factory.CreateDbContextAsync(ct);
-        foreach (var item in items)
-        {
-            var existing = await db.WorkItems.FindAsync([item.Id], ct);
-            if (existing is null) db.WorkItems.Add(item);
-            else db.Entry(existing).CurrentValues.SetValues(item);
-        }
-        await db.SaveChangesAsync(ct);
-    }
+        => await BatchUpsertAsync(
+            items,
+            w => w.Id,
+            (db, ids, token) => db.WorkItems.Where(x => ids.Contains(x.Id)).ToDictionaryAsync(x => x.Id, StringComparer.OrdinalIgnoreCase, token),
+            (db, item) => db.WorkItems.Add(item),
+            ct);
 
     public async Task<IReadOnlyList<WorkItemSnapshot>> GetWorkItemsAsync(CancellationToken ct)
     {
@@ -220,16 +230,12 @@ public sealed class EfTwinStore(IDbContextFactory<TwinDbContext> factory) : ITwi
     }
 
     public async Task UpsertReleasesAsync(IReadOnlyList<ReleaseSnapshot> releases, CancellationToken ct)
-    {
-        await using var db = await factory.CreateDbContextAsync(ct);
-        foreach (var item in releases)
-        {
-            var existing = await db.Releases.FindAsync([item.ReleaseId], ct);
-            if (existing is null) db.Releases.Add(item);
-            else db.Entry(existing).CurrentValues.SetValues(item);
-        }
-        await db.SaveChangesAsync(ct);
-    }
+        => await BatchUpsertAsync(
+            releases,
+            r => r.ReleaseId,
+            (db, ids, token) => db.Releases.Where(x => ids.Contains(x.ReleaseId)).ToDictionaryAsync(x => x.ReleaseId, StringComparer.OrdinalIgnoreCase, token),
+            (db, item) => db.Releases.Add(item),
+            ct);
 
     public async Task<IReadOnlyList<ReleaseSnapshot>> GetReleasesAsync(int limit, CancellationToken ct)
     {
@@ -239,16 +245,12 @@ public sealed class EfTwinStore(IDbContextFactory<TwinDbContext> factory) : ITwi
     }
 
     public async Task UpsertDeliveriesAsync(IReadOnlyList<DeliveryExecutionSnapshot> deliveries, CancellationToken ct)
-    {
-        await using var db = await factory.CreateDbContextAsync(ct);
-        foreach (var item in deliveries)
-        {
-            var existing = await db.Deliveries.FindAsync([item.DeploymentId], ct);
-            if (existing is null) db.Deliveries.Add(item);
-            else db.Entry(existing).CurrentValues.SetValues(item);
-        }
-        await db.SaveChangesAsync(ct);
-    }
+        => await BatchUpsertAsync(
+            deliveries,
+            d => d.DeploymentId,
+            (db, ids, token) => db.Deliveries.Where(x => ids.Contains(x.DeploymentId)).ToDictionaryAsync(x => x.DeploymentId, StringComparer.OrdinalIgnoreCase, token),
+            (db, item) => db.Deliveries.Add(item),
+            ct);
 
     public async Task<IReadOnlyList<DeliveryExecutionSnapshot>> GetDeliveriesAsync(int limit, CancellationToken ct)
     {
@@ -258,16 +260,12 @@ public sealed class EfTwinStore(IDbContextFactory<TwinDbContext> factory) : ITwi
     }
 
     public async Task UpsertRunbooksAsync(IReadOnlyList<RunbookExecutionSnapshot> runs, CancellationToken ct)
-    {
-        await using var db = await factory.CreateDbContextAsync(ct);
-        foreach (var item in runs)
-        {
-            var existing = await db.RunbookExecutions.FindAsync([item.TaskId], ct);
-            if (existing is null) db.RunbookExecutions.Add(item);
-            else db.Entry(existing).CurrentValues.SetValues(item);
-        }
-        await db.SaveChangesAsync(ct);
-    }
+        => await BatchUpsertAsync(
+            runs,
+            r => r.TaskId,
+            (db, ids, token) => db.RunbookExecutions.Where(x => ids.Contains(x.TaskId)).ToDictionaryAsync(x => x.TaskId, StringComparer.OrdinalIgnoreCase, token),
+            (db, item) => db.RunbookExecutions.Add(item),
+            ct);
 
     public async Task<IReadOnlyList<RunbookExecutionSnapshot>> GetRunbooksAsync(int limit, CancellationToken ct)
     {
@@ -307,16 +305,12 @@ public sealed class EfTwinStore(IDbContextFactory<TwinDbContext> factory) : ITwi
     }
 
     public async Task UpsertEnvironmentInstancesAsync(IReadOnlyList<EnvironmentInstanceSnapshot> stages, CancellationToken ct)
-    {
-        await using var db = await factory.CreateDbContextAsync(ct);
-        foreach (var item in stages)
-        {
-            var existing = await db.EnvironmentInstances.FindAsync([item.StageName], ct);
-            if (existing is null) db.EnvironmentInstances.Add(item);
-            else db.Entry(existing).CurrentValues.SetValues(item);
-        }
-        await db.SaveChangesAsync(ct);
-    }
+        => await BatchUpsertAsync(
+            stages,
+            s => s.StageName,
+            (db, ids, token) => db.EnvironmentInstances.Where(x => ids.Contains(x.StageName)).ToDictionaryAsync(x => x.StageName, StringComparer.OrdinalIgnoreCase, token),
+            (db, item) => db.EnvironmentInstances.Add(item),
+            ct);
 
     public async Task<IReadOnlyList<EnvironmentInstanceSnapshot>> GetEnvironmentInstancesAsync(CancellationToken ct)
     {
@@ -355,16 +349,12 @@ public sealed class EfTwinStore(IDbContextFactory<TwinDbContext> factory) : ITwi
     }
 
     public async Task UpsertHealthProbesAsync(IReadOnlyList<HealthProbeSnapshot> probes, CancellationToken ct)
-    {
-        await using var db = await factory.CreateDbContextAsync(ct);
-        foreach (var item in probes)
-        {
-            var existing = await db.HealthProbes.FindAsync([item.TargetKey], ct);
-            if (existing is null) db.HealthProbes.Add(item);
-            else db.Entry(existing).CurrentValues.SetValues(item);
-        }
-        await db.SaveChangesAsync(ct);
-    }
+        => await BatchUpsertAsync(
+            probes,
+            p => p.TargetKey,
+            (db, ids, token) => db.HealthProbes.Where(x => ids.Contains(x.TargetKey)).ToDictionaryAsync(x => x.TargetKey, StringComparer.OrdinalIgnoreCase, token),
+            (db, item) => db.HealthProbes.Add(item),
+            ct);
 
     public async Task<IReadOnlyList<HealthProbeSnapshot>> GetHealthProbesAsync(CancellationToken ct)
     {
@@ -424,5 +414,41 @@ public sealed class EfTwinStore(IDbContextFactory<TwinDbContext> factory) : ITwi
         }
         var list = await query.ToListAsync(ct);
         return list.OrderByDescending(d => d.Severity).ThenByDescending(d => d.DetectedAt).ToList();
+    }
+
+    private async Task BatchUpsertAsync<TEntity>(
+        IReadOnlyList<TEntity> items,
+        Func<TEntity, string> keySelector,
+        Func<TwinDbContext, List<string>, CancellationToken, Task<Dictionary<string, TEntity>>> loadExisting,
+        Action<TwinDbContext, TEntity> addEntity,
+        CancellationToken ct) where TEntity : class
+    {
+        var deduped = items
+            .GroupBy(keySelector, StringComparer.OrdinalIgnoreCase)
+            .Select(g => g.Last())
+            .ToList();
+        if (deduped.Count == 0)
+        {
+            return;
+        }
+
+        var ids = deduped.Select(keySelector).ToList();
+        await using var db = await factory.CreateDbContextAsync(ct);
+        var existing = await loadExisting(db, ids, ct);
+
+        foreach (var item in deduped)
+        {
+            var id = keySelector(item);
+            if (existing.TryGetValue(id, out var found))
+            {
+                db.Entry(found).CurrentValues.SetValues(item);
+            }
+            else
+            {
+                addEntity(db, item);
+            }
+        }
+
+        await db.SaveChangesAsync(ct);
     }
 }

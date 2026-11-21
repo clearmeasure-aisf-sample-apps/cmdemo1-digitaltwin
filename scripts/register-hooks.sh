@@ -2,7 +2,7 @@
 set -euo pipefail
 
 # Idempotently register:
-# 1. GitHub repo webhooks across all cmdemo1-* repos in clearmeasure-aisf-sample-apps
+# 1. GitHub repo webhooks across all active (non-archived) cmdemo1-* repos in clearmeasure-aisf-sample-apps
 # 2. Octopus Deploy Subscription in Spaces-355
 # 3. Azure Event Grid system topics + subscriptions on rg-cmdemo1-nonprod & rg-cmdemo1-prod (if provider registered)
 
@@ -18,15 +18,27 @@ OCTO_BASE="${OCTOPUS_URL%/}"
 OCTO_SPACE="Spaces-355"
 SUB_NAME="cmdemo1-digitaltwin"
 
-echo "=== 1. Registering GitHub webhooks on all cmdemo1-* repos -> ${TWIN_URL}/hooks/github ==="
-REPOS_JSON=$(curl -fsSL \
+echo "=== 1. Registering GitHub webhooks on all active cmdemo1-* repos -> ${TWIN_URL}/hooks/github ==="
+SEED_REPOS="cmdemo1-system cmdemo1-workorders cmdemo1-dashboard cmdemo1-aisf cmdemo1-fworker cmdemo1-app2-ui cmdemo1-scorecard cmdemo1-scorecard-site cmdemo1-video cmdemo1-digitaltwin"
+SEARCH_JSON=$(curl -fsSL \
   -H "Authorization: Bearer ${GH_PAT}" \
   -H "Accept: application/vnd.github+json" \
-  "https://api.github.com/orgs/${GITHUB_ORG}/repos?per_page=100&type=all")
+  "https://api.github.com/search/repositories?q=org:${GITHUB_ORG}+cmdemo1-+in:name&per_page=100" || echo '{"items":[]}')
 
-REPO_LIST=$(echo "$REPOS_JSON" | jq -r '.[] | select(.name | startswith("cmdemo1-")) | .name' | sort -u)
+FOUND_REPOS=$(echo "$SEARCH_JSON" | jq -r '.items[]? | select(.name | startswith("cmdemo1-")) | .name')
+REPO_LIST=$(printf '%s\n%s\n' "$SEED_REPOS" "$FOUND_REPOS" | grep -E '^cmdemo1-' | sort -u)
 
 for repo in $REPO_LIST; do
+  REPO_INFO=$(curl -fsSL \
+    -H "Authorization: Bearer ${GH_PAT}" \
+    -H "Accept: application/vnd.github+json" \
+    "https://api.github.com/repos/${GITHUB_ORG}/${repo}" 2>/dev/null || echo '{}')
+  IS_ARCHIVED=$(echo "$REPO_INFO" | jq -r '.archived // false')
+  if [ "$IS_ARCHIVED" = "true" ]; then
+    echo "  SKIP archived repo ${repo}"
+    continue
+  fi
+
   HOOKS_JSON=$(curl -fsSL \
     -H "Authorization: Bearer ${GH_PAT}" \
     -H "Accept: application/vnd.github+json" \
@@ -54,15 +66,39 @@ for repo in $REPO_LIST; do
       -H "Accept: application/vnd.github+json" \
       -d "$PAYLOAD" \
       "https://api.github.com/repos/${GITHUB_ORG}/${repo}/hooks/${EXISTING_ID}" >/dev/null
-    echo "  UPDATED github hook ${repo} (id=${EXISTING_ID})"
+    HOOK_ID="$EXISTING_ID"
+    echo "  UPDATED github hook ${repo} (id=${HOOK_ID})"
   else
     CREATED=$(curl -fsSL -X POST \
       -H "Authorization: Bearer ${GH_PAT}" \
       -H "Accept: application/vnd.github+json" \
       -d "$PAYLOAD" \
       "https://api.github.com/repos/${GITHUB_ORG}/${repo}/hooks")
-    NEW_ID=$(echo "$CREATED" | jq -r '.id')
-    echo "  CREATED github hook ${repo} (id=${NEW_ID})"
+    HOOK_ID=$(echo "$CREATED" | jq -r '.id')
+    echo "  CREATED github hook ${repo} (id=${HOOK_ID})"
+  fi
+
+  # Ping hook to confirm live 2xx delivery
+  curl -fsSL -X POST \
+    -H "Authorization: Bearer ${GH_PAT}" \
+    -H "Accept: application/vnd.github+json" \
+    "https://api.github.com/repos/${GITHUB_ORG}/${repo}/hooks/${HOOK_ID}/pings" >/dev/null || true
+done
+
+sleep 2
+echo "=== Verifying recent GitHub webhook deliveries ==="
+for repo in $REPO_LIST; do
+  HOOKS_JSON=$(curl -fsSL \
+    -H "Authorization: Bearer ${GH_PAT}" \
+    -H "Accept: application/vnd.github+json" \
+    "https://api.github.com/repos/${GITHUB_ORG}/${repo}/hooks" 2>/dev/null || echo '[]')
+  HOOK_ID=$(echo "$HOOKS_JSON" | jq -r --arg target "${TWIN_URL}/hooks/github" '[.[] | select((.config.url // "") == $target)][0].id // empty')
+  if [ -n "$HOOK_ID" ]; then
+    DEL=$(curl -fsSL \
+      -H "Authorization: Bearer ${GH_PAT}" \
+      -H "Accept: application/vnd.github+json" \
+      "https://api.github.com/repos/${GITHUB_ORG}/${repo}/hooks/${HOOK_ID}/deliveries?per_page=1" | jq -r '.[0] | "\(.event) HTTP \(.status_code) (\(.status))"' || echo "pending")
+    echo "  ${repo} (hook=${HOOK_ID}): ${DEL}"
   fi
 done
 

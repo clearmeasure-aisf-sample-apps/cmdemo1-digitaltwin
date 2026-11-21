@@ -14,7 +14,6 @@ public sealed partial class BackfillCoordinator(
     IHealthProbeService probes,
     EventIngestionService ingestion,
     IRealtimeEventPublisher realtime,
-    IOptions<TwinOptions> options,
     TimeProvider timeProvider,
     ILogger<BackfillCoordinator> logger) : IBackfillCoordinator, IDisposable
 {
@@ -35,52 +34,49 @@ public sealed partial class BackfillCoordinator(
             var azOk = false;
             var probeOk = false;
 
-            if (!string.IsNullOrWhiteSpace(options.Value.TwinPublicUrl))
+            var ghTask = Task.Run(async () =>
             {
                 try
                 {
-                    await gitHub.EnsureWebhooksRegisteredAsync(options.Value.TwinPublicUrl, ct);
-                    await octopus.EnsureSubscriptionRegisteredAsync(options.Value.TwinPublicUrl, ct);
-                    await azure.TryEnsureEventGridSubscriptionsAsync(options.Value.TwinPublicUrl, ct);
+                    await gitHub.SyncAsync(fullBackfill: true, ct);
+                    ghOk = true;
                 }
                 catch (Exception ex) when (ex is not OperationCanceledException)
                 {
-                    notes.Add($"Webhook ensure note: {ex.Message}");
+                    lock (notes) { notes.Add($"GitHub: {ex.Message}"); }
+                    LogBackfillStepFailed(ex, "GitHub");
                 }
-            }
+            }, ct);
 
-            try
+            var octoTask = Task.Run(async () =>
             {
-                await gitHub.SyncAsync(fullBackfill: true, ct);
-                ghOk = true;
-            }
-            catch (Exception ex) when (ex is not OperationCanceledException)
-            {
-                notes.Add($"GitHub: {ex.Message}");
-                LogBackfillStepFailed(ex, "GitHub");
-            }
+                try
+                {
+                    await octopus.SyncAsync(fullBackfill: true, ct);
+                    octoOk = true;
+                }
+                catch (Exception ex) when (ex is not OperationCanceledException)
+                {
+                    lock (notes) { notes.Add($"Octopus: {ex.Message}"); }
+                    LogBackfillStepFailed(ex, "Octopus");
+                }
+            }, ct);
 
-            try
+            var azTask = Task.Run(async () =>
             {
-                await octopus.SyncAsync(fullBackfill: true, ct);
-                octoOk = true;
-            }
-            catch (Exception ex) when (ex is not OperationCanceledException)
-            {
-                notes.Add($"Octopus: {ex.Message}");
-                LogBackfillStepFailed(ex, "Octopus");
-            }
+                try
+                {
+                    await azure.SyncAsync(fullBackfill: true, ct);
+                    azOk = true;
+                }
+                catch (Exception ex) when (ex is not OperationCanceledException)
+                {
+                    lock (notes) { notes.Add($"Azure: {ex.Message}"); }
+                    LogBackfillStepFailed(ex, "Azure");
+                }
+            }, ct);
 
-            try
-            {
-                await azure.SyncAsync(fullBackfill: true, ct);
-                azOk = true;
-            }
-            catch (Exception ex) when (ex is not OperationCanceledException)
-            {
-                notes.Add($"Azure: {ex.Message}");
-                LogBackfillStepFailed(ex, "Azure");
-            }
+            await Task.WhenAll(ghTask, octoTask, azTask);
 
             try
             {
@@ -149,10 +145,10 @@ public sealed partial class TwinPollingHostedService(
             LogBackfillError(ex);
         }
 
-        using var ghTimer = new PeriodicTimer(TimeSpan.FromSeconds(Math.Max(15, options.Value.GitHubPollSeconds)));
-        using var octoTimer = new PeriodicTimer(TimeSpan.FromSeconds(Math.Max(15, options.Value.OctopusPollSeconds)));
-        using var azTimer = new PeriodicTimer(TimeSpan.FromSeconds(Math.Max(20, options.Value.AzurePollSeconds)));
-        using var probeTimer = new PeriodicTimer(TimeSpan.FromSeconds(Math.Max(15, options.Value.ProbeIntervalSeconds)));
+        using var ghTimer = new PeriodicTimer(TimeSpan.FromSeconds(Math.Max(30, options.Value.GitHubPollSeconds)));
+        using var octoTimer = new PeriodicTimer(TimeSpan.FromSeconds(Math.Max(20, options.Value.OctopusPollSeconds)));
+        using var azTimer = new PeriodicTimer(TimeSpan.FromSeconds(Math.Max(30, options.Value.AzurePollSeconds)));
+        using var probeTimer = new PeriodicTimer(TimeSpan.FromSeconds(Math.Max(20, options.Value.ProbeIntervalSeconds)));
 
         await Task.WhenAll(
             RunLoopAsync(ghTimer, "GitHub", async ct =>

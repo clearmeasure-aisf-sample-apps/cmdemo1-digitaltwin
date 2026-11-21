@@ -54,7 +54,8 @@ public sealed class DriftEvaluatorTests
 
         var repos = new List<RepositorySnapshot>
         {
-            new() { Name = "cmdemo1-workorders", WebhookRegistered = true }
+            new() { Name = "cmdemo1-workorders", WebhookRegistered = true },
+            new() { Name = "cmdemo1-app2-ui", IsRetired = true, WebhookRegistered = false }
         };
 
         var findings = DriftEvaluator.Evaluate(desired, workloads, probes, [], repos, now);

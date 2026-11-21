@@ -190,6 +190,7 @@ resource twinApp 'Microsoft.App/containerApps@2025-01-01' = {
       ]
       secrets: [
         { name: 'acr-password', value: acrPassword }
+        #disable-next-line use-secure-value-for-secure-inputs
         { name: 'twin-db-connection', value: sqlConnectionString }
         { name: 'azure-client-secret', value: azureClientSecret }
         { name: 'octopus-api-key', value: octopusApiKey }
@@ -204,8 +205,8 @@ resource twinApp 'Microsoft.App/containerApps@2025-01-01' = {
           name: 'twin'
           image: containerImage
           resources: {
-            cpu: json('0.5')
-            memory: '1Gi'
+            cpu: json('1.0')
+            memory: '2Gi'
           }
           env: [
             { name: 'ASPNETCORE_URLS', value: 'http://+:8080' }
@@ -227,17 +228,23 @@ resource twinApp 'Microsoft.App/containerApps@2025-01-01' = {
               httpGet: { path: '/_healthcheck', port: 8080 }
               initialDelaySeconds: 5
               periodSeconds: 5
-              failureThreshold: 20
+              timeoutSeconds: 5
+              failureThreshold: 30
             }
             {
               type: 'Readiness'
               httpGet: { path: '/_healthcheck', port: 8080 }
               periodSeconds: 15
+              timeoutSeconds: 5
+              failureThreshold: 4
             }
             {
               type: 'Liveness'
               httpGet: { path: '/_healthcheck', port: 8080 }
+              initialDelaySeconds: 20
               periodSeconds: 30
+              timeoutSeconds: 10
+              failureThreshold: 5
             }
           ]
         }

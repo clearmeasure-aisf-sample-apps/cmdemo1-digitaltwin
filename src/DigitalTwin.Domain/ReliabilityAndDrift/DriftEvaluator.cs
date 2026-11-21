@@ -234,8 +234,8 @@ public static class DriftEvaluator
             }
         }
 
-        // 4. Repository webhook coverage gaps
-        foreach (var repo in repositories.Where(r => !r.WebhookRegistered))
+        // 4. Repository webhook coverage gaps (skip archived/retired repositories)
+        foreach (var repo in repositories.Where(r => !r.IsRetired && !r.WebhookRegistered))
         {
             findings.Add(new DriftFinding
             {

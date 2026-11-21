@@ -26,7 +26,6 @@ jobs:
         uses: actions/setup-dotnet@v4
         with:
           dotnet-version: '11.0.x'
-          include-prerelease: true
 
       - name: Restore solution
         run: dotnet restore cmdemo1-digitaltwin.sln
@@ -192,8 +191,16 @@ jobs:
           TWIN_API_KEY: ${{ secrets.TWIN_API_KEY }}
         run: |
           set -euo pipefail
-          curl -fsS -X POST -H "X-Twin-Key: ${TWIN_API_KEY}" "${TWIN_URL}/api/admin/rebuild" | jq '{gitHubOk, octopusOk, azureOk, probesOk, activeDriftCount}'
-          curl -fsS -H "X-Twin-Key: ${TWIN_API_KEY}" "${TWIN_URL}/api/twin/summary" | jq '{systemSlug, activeDriftCount, pipelinesCount: (.pipelines | length), stagesCount: (.stages | length)}'
+          curl -fsS -m 120 -X POST -H "X-Twin-Key: ${TWIN_API_KEY}" "${TWIN_URL}/api/admin/rebuild" | jq '{gitHubOk, octopusOk, azureOk, probesOk, activeDriftCount}'
+          curl -fsS -H "X-Twin-Key: ${TWIN_API_KEY}" "${TWIN_URL}/api/twin/summary" | jq '{systemSlug, activeDriftCount, criticalDriftCount, pipelinesCount: (.pipelines | length), stagesCount: (.stages | length), costMonthToDateUsd}'
+          curl -fsS "${TWIN_URL}/llms.txt" | head -n 5
+          MCP_INIT='{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-03-26","capabilities":{},"clientInfo":{"name":"ci-smoke","version":"1.0"}}}'
+          curl -fsS -X POST "${TWIN_URL}/mcp" \
+            -H "X-Twin-Key: ${TWIN_API_KEY}" \
+            -H "Content-Type: application/json" \
+            -H "Accept: application/json, text/event-stream" \
+            -d "$MCP_INIT" | head -c 300
+          echo ""
           echo "## Digital Twin Deployment Summary" >> "$GITHUB_STEP_SUMMARY"
           echo "- Dashboard URL: ${TWIN_URL}" >> "$GITHUB_STEP_SUMMARY"
           echo "- MCP URL: ${TWIN_URL}/mcp" >> "$GITHUB_STEP_SUMMARY"

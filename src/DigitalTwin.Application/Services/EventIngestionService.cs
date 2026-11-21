@@ -23,23 +23,19 @@ public sealed class EventIngestionService(
 
     public async Task<int> IngestBatchAsync(IEnumerable<ObservedEvent> events, CancellationToken ct)
     {
-        var list = events.ToList();
+        var list = events.OrderBy(e => e.OccurredAt).ToList();
         if (list.Count == 0)
         {
             return 0;
         }
 
-        var newlyAdded = 0;
-        foreach (var ev in list.OrderBy(e => e.OccurredAt))
+        var newlyAdded = await store.AppendEventsReturnNewAsync(list, ct);
+        foreach (var ev in newlyAdded)
         {
-            if (await store.AppendEventIfNewAsync(ev, ct))
-            {
-                newlyAdded++;
-                await realtime.PublishEventAsync(ev, ct);
-            }
+            await realtime.PublishEventAsync(ev, ct);
         }
 
-        return newlyAdded;
+        return newlyAdded.Count;
     }
 
     public async Task<IReadOnlyList<DriftFinding>> EvaluateAndRecordDriftAsync(CancellationToken ct)

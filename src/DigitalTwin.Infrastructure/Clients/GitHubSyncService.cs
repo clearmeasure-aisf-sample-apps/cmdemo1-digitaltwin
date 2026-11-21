@@ -27,6 +27,7 @@ public sealed partial class GitHubSyncService(
 {
     private static readonly string[] ActiveStages = ["tdd", "uat", "prod"];
     private static readonly string[] AllWebhookEvents = ["*"];
+    private DateTimeOffset _lastBoardGraphQlSync = DateTimeOffset.MinValue;
 
     [LoggerMessage(Level = LogLevel.Warning, Message = "GitHub sync failed")]
     private partial void LogGitHubSyncFailed(Exception ex);
@@ -51,31 +52,49 @@ public sealed partial class GitHubSyncService(
             // 1. Sync GitOps desired state from cmdemo1-system
             await SyncGitOpsDesiredStateAsync(client, now, ct);
 
-            // 2. Sync repositories, commits, PRs, workflow runs, releases, and webhook statuses
+            // 2. Sync repositories, commits, PRs, workflow runs, releases, and webhook statuses (4 concurrent)
             var repos = await DiscoverCmdemo1RepositoriesAsync(client, ct);
-            var repoSnapshots = new List<RepositorySnapshot>();
-            var prSnapshots = new List<SourceChangeSnapshot>();
-            var runSnapshots = new List<PipelineRunSnapshot>();
-            var artifactSnapshots = new List<ArtifactPackageSnapshot>();
-            var newEvents = new List<ObservedEvent>();
-            var webhookStatuses = new List<WebhookRegistrationStatus>();
+            var repoBag = new System.Collections.Concurrent.ConcurrentBag<RepositorySnapshot>();
+            var prBag = new System.Collections.Concurrent.ConcurrentBag<SourceChangeSnapshot>();
+            var runBag = new System.Collections.Concurrent.ConcurrentBag<PipelineRunSnapshot>();
+            var artifactBag = new System.Collections.Concurrent.ConcurrentBag<ArtifactPackageSnapshot>();
+            var eventBag = new System.Collections.Concurrent.ConcurrentBag<ObservedEvent>();
+            var hookBag = new System.Collections.Concurrent.ConcurrentBag<WebhookRegistrationStatus>();
 
-            foreach (var repoName in repos)
+            using var repoGate = new SemaphoreSlim(4, 4);
+            await Task.WhenAll(repos.Select(async repoName =>
             {
-                ct.ThrowIfCancellationRequested();
-                await SyncRepositoryAsync(
-                    client,
-                    repoName,
-                    fullBackfill,
-                    now,
-                    repoSnapshots,
-                    prSnapshots,
-                    runSnapshots,
-                    artifactSnapshots,
-                    newEvents,
-                    webhookStatuses,
-                    ct);
-            }
+                await repoGate.WaitAsync(ct);
+                try
+                {
+                    var rList = new List<RepositorySnapshot>();
+                    var pList = new List<SourceChangeSnapshot>();
+                    var rnList = new List<PipelineRunSnapshot>();
+                    var aList = new List<ArtifactPackageSnapshot>();
+                    var eList = new List<ObservedEvent>();
+                    var hList = new List<WebhookRegistrationStatus>();
+
+                    await SyncRepositoryAsync(client, repoName, fullBackfill, now, rList, pList, rnList, aList, eList, hList, ct);
+
+                    foreach (var x in rList) repoBag.Add(x);
+                    foreach (var x in pList) prBag.Add(x);
+                    foreach (var x in rnList) runBag.Add(x);
+                    foreach (var x in aList) artifactBag.Add(x);
+                    foreach (var x in eList) eventBag.Add(x);
+                    foreach (var x in hList) hookBag.Add(x);
+                }
+                finally
+                {
+                    repoGate.Release();
+                }
+            }));
+
+            var repoSnapshots = repoBag.ToList();
+            var prSnapshots = prBag.ToList();
+            var runSnapshots = runBag.ToList();
+            var artifactSnapshots = artifactBag.ToList();
+            var newEvents = eventBag.ToList();
+            var webhookStatuses = hookBag.ToList();
 
             await store.UpsertRepositoriesAsync(repoSnapshots, ct);
             await store.UpsertSourceChangesAsync(prSnapshots, ct);
@@ -83,8 +102,13 @@ public sealed partial class GitHubSyncService(
             await store.UpsertArtifactsAsync(artifactSnapshots, ct);
             await store.ReplaceWebhookStatusesAsync("github", webhookStatuses, ct);
 
-            // 3. Sync Work Items from status/workitems.json + live Project 679 GraphQL
-            await SyncWorkItemsAsync(client, now, ct);
+            // 3. Sync Work Items from status/workitems.json + throttled live Project 679 GraphQL (at most every 15 min)
+            var queryBoardGraphQl = fullBackfill || (now - _lastBoardGraphQlSync) >= TimeSpan.FromMinutes(15);
+            await SyncWorkItemsAsync(client, queryBoardGraphQl, now, ct);
+            if (queryBoardGraphQl)
+            {
+                _lastBoardGraphQlSync = now;
+            }
 
             var ingestedCount = await ingestion.IngestBatchAsync(newEvents, ct);
 
@@ -125,6 +149,16 @@ public sealed partial class GitHubSyncService(
             ct.ThrowIfCancellationRequested();
             try
             {
+                var repoMetaJson = await GetStringOrNullAsync(client, $"repos/{Cmdemo1PlatformCatalog.GitHubOrg}/{repo}", ct);
+                if (!string.IsNullOrWhiteSpace(repoMetaJson))
+                {
+                    using var metaDoc = JsonDocument.Parse(repoMetaJson);
+                    if (metaDoc.RootElement.TryGetProperty("archived", out var arch) && arch.ValueKind == JsonValueKind.True)
+                    {
+                        continue;
+                    }
+                }
+
                 var hooksJson = await GetStringOrNullAsync(client, $"repos/{Cmdemo1PlatformCatalog.GitHubOrg}/{repo}/hooks", ct);
                 long? existingId = null;
                 if (!string.IsNullOrWhiteSpace(hooksJson))
@@ -289,13 +323,13 @@ public sealed partial class GitHubSyncService(
     private static async Task<IReadOnlyList<string>> DiscoverCmdemo1RepositoriesAsync(HttpClient client, CancellationToken ct)
     {
         var names = new HashSet<string>(Cmdemo1PlatformCatalog.ObservedRepositories, StringComparer.OrdinalIgnoreCase);
-        var json = await GetStringOrNullAsync(client, $"orgs/{Cmdemo1PlatformCatalog.GitHubOrg}/repos?per_page=100&type=all", ct);
+        var json = await GetStringOrNullAsync(client, $"search/repositories?q=org:{Cmdemo1PlatformCatalog.GitHubOrg}+cmdemo1-+in:name&per_page=100", ct);
         if (!string.IsNullOrWhiteSpace(json))
         {
             using var doc = JsonDocument.Parse(json);
-            if (doc.RootElement.ValueKind == JsonValueKind.Array)
+            if (doc.RootElement.TryGetProperty("items", out var items) && items.ValueKind == JsonValueKind.Array)
             {
-                foreach (var repo in doc.RootElement.EnumerateArray())
+                foreach (var repo in items.EnumerateArray())
                 {
                     var name = repo.TryGetProperty("name", out var n) ? n.GetString() : null;
                     if (!string.IsNullOrWhiteSpace(name) && name.StartsWith("cmdemo1-", StringComparison.OrdinalIgnoreCase))
@@ -335,7 +369,8 @@ public sealed partial class GitHubSyncService(
         var pipelineId = Cmdemo1PlatformCatalog.ResolvePipelineIdFromRepository(repoName);
         var deployable = Cmdemo1PlatformCatalog.ResolveDeployableFromRepository(repoName);
         var isTwin = repoName.Equals(Cmdemo1PlatformCatalog.TwinRepository, StringComparison.OrdinalIgnoreCase);
-        var isRetired = repoName is "cmdemo1-aisf" or "cmdemo1-fworker" or "cmdemo1-app2-ui" or "cmdemo1-scorecard";
+        var isArchived = root.TryGetProperty("archived", out var arch) && arch.ValueKind == JsonValueKind.True;
+        var isRetired = isArchived || repoName is "cmdemo1-aisf" or "cmdemo1-fworker" or "cmdemo1-app2-ui" or "cmdemo1-scorecard";
 
         // Recent commits
         var commitsCount = fullBackfill ? 10 : 4;
@@ -637,7 +672,7 @@ public sealed partial class GitHubSyncService(
         });
     }
 
-    private async Task SyncWorkItemsAsync(HttpClient client, DateTimeOffset now, CancellationToken ct)
+    private async Task SyncWorkItemsAsync(HttpClient client, bool queryBoardGraphQl, DateTimeOffset now, CancellationToken ct)
     {
         var itemsById = new Dictionary<string, WorkItemSnapshot>(StringComparer.OrdinalIgnoreCase);
 
@@ -691,7 +726,13 @@ public sealed partial class GitHubSyncService(
             }
         }
 
-        // Overlay authoritative live GitHub Projects v2 board (Project 679) columns via GraphQL!
+        // Overlay authoritative live GitHub Projects v2 board (Project 679) columns via slim GraphQL (cost-efficient)
+        if (!queryBoardGraphQl)
+        {
+            await store.UpsertWorkItemsAsync(itemsById.Values.ToList(), ct);
+            return;
+        }
+
         var graphqlQuery = """
         query($nodeId: ID!, $cursor: String) {
           node(id: $nodeId) {
@@ -699,7 +740,6 @@ public sealed partial class GitHubSyncService(
               items(first: 100, after: $cursor) {
                 pageInfo { hasNextPage endCursor }
                 nodes {
-                  updatedAt
                   fieldValueByName(name: "Status") {
                     ... on ProjectV2ItemFieldSingleSelectValue { name }
                   }
@@ -713,8 +753,6 @@ public sealed partial class GitHubSyncService(
                       closedAt
                       updatedAt
                       repository { name }
-                      assignees(first: 5) { nodes { login } }
-                      labels(first: 10) { nodes { name } }
                     }
                   }
                 }
@@ -784,22 +822,6 @@ public sealed partial class GitHubSyncService(
                     }
                     else
                     {
-                        var assignee = issue.TryGetProperty("assignees", out var asg) &&
-                                       asg.TryGetProperty("nodes", out var asgNodes) &&
-                                       asgNodes.GetArrayLength() > 0
-                            ? asgNodes[0].GetProperty("login").GetString()
-                            : null;
-                        var hasBotLabel = issue.TryGetProperty("labels", out var lbl) &&
-                                          lbl.TryGetProperty("nodes", out var lblNodes) &&
-                                          lblNodes.EnumerateArray().Any(l =>
-                                          {
-                                              var name = l.GetProperty("name").GetString() ?? "";
-                                              return name.Contains("factory", StringComparison.OrdinalIgnoreCase) ||
-                                                     name.StartsWith("agent:", StringComparison.OrdinalIgnoreCase) ||
-                                                     name.StartsWith("worker:", StringComparison.OrdinalIgnoreCase);
-                                          });
-                        var isBot = string.Equals(assignee, "cm-ai-ops-bot", StringComparison.OrdinalIgnoreCase) || hasBotLabel;
-
                         itemsById[id] = new WorkItemSnapshot
                         {
                             Id = id,
@@ -810,9 +832,7 @@ public sealed partial class GitHubSyncService(
                             State = issueState,
                             Column = statusCol ?? (issueState == "closed" ? "Done" : "Todo"),
                             ColumnSource = string.IsNullOrWhiteSpace(statusCol) ? "derived" : "project",
-                            WorkerKind = isBot ? "bot" : "team",
-                            Agent = assignee,
-                            Assignee = assignee,
+                            WorkerKind = "team",
                             CreatedAt = createdAt,
                             ClosedAt = closedAt,
                             UpdatedAt = updatedAt

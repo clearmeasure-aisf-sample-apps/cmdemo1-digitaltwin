@@ -12,6 +12,7 @@ public interface ITwinStore
 {
     Task<bool> AppendEventIfNewAsync(ObservedEvent observedEvent, CancellationToken ct);
     Task<int> AppendEventsIfNewAsync(IEnumerable<ObservedEvent> observedEvents, CancellationToken ct);
+    Task<IReadOnlyList<ObservedEvent>> AppendEventsReturnNewAsync(IEnumerable<ObservedEvent> observedEvents, CancellationToken ct);
     Task<IReadOnlyList<ObservedEvent>> QueryEventsAsync(
         DateTimeOffset? since,
         EventSourceKind? source,

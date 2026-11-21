@@ -15,7 +15,7 @@ public sealed class TwinOptions
     public string ConnectionString { get; set; } = "Data Source=twin.db";
     public bool UseSqlServer { get; set; }
     public bool EnableBackgroundWorkers { get; set; } = true;
-    public int GitHubPollSeconds { get; set; } = 60;
+    public int GitHubPollSeconds { get; set; } = 120;
     public int OctopusPollSeconds { get; set; } = 45;
     public int AzurePollSeconds { get; set; } = 60;
     public int ProbeIntervalSeconds { get; set; } = 45;
