@@ -1,13 +1,11 @@
+using System.Collections.Concurrent;
 using System.Globalization;
-using System.Net.Http.Headers;
-using System.Text;
 using System.Text.Json;
 using DigitalTwin.Application.Abstractions;
 using DigitalTwin.Application.Services;
 using DigitalTwin.Domain.BuildAndArtifact;
 using DigitalTwin.Domain.Hierarchy;
 using DigitalTwin.Domain.Observation;
-using DigitalTwin.Domain.ReliabilityAndDrift;
 using DigitalTwin.Domain.RuntimeAndPlatform;
 using DigitalTwin.Domain.SourceAndChange;
 using DigitalTwin.Domain.Work;
@@ -18,7 +16,7 @@ using Microsoft.Extensions.Options;
 namespace DigitalTwin.Infrastructure.Clients;
 
 public sealed partial class GitHubSyncService(
-    IHttpClientFactory httpClientFactory,
+    GitHubApiClient gh,
     ITwinStore store,
     EventIngestionService ingestion,
     IOptions<TwinOptions> options,
@@ -27,13 +25,25 @@ public sealed partial class GitHubSyncService(
 {
     private static readonly string[] ActiveStages = ["tdd", "uat", "prod"];
     private static readonly string[] AllWebhookEvents = ["*"];
-    private DateTimeOffset _lastBoardGraphQlSync = DateTimeOffset.MinValue;
+    private static readonly string[] ActiveIncrementalRepos =
+    [
+        "cmdemo1-workorders",
+        "cmdemo1-dashboard",
+        "cmdemo1-system",
+        "cmdemo1-scorecard-site",
+        "cmdemo1-digitaltwin"
+    ];
+
+    private readonly ConcurrentDictionary<string, DateTimeOffset> _lastRepoRefresh = new(StringComparer.OrdinalIgnoreCase);
 
     [LoggerMessage(Level = LogLevel.Warning, Message = "GitHub sync failed")]
     private partial void LogGitHubSyncFailed(Exception ex);
 
     [LoggerMessage(Level = LogLevel.Warning, Message = "Failed to register GitHub webhook on {Repo}")]
     private partial void LogWebhookRegistrationFailed(Exception ex, string repo);
+
+    [LoggerMessage(Level = LogLevel.Warning, Message = "Skipping webhook registration while GitHub REST is paused: {Reason}")]
+    private partial void LogWebhookRegistrationPaused(string reason);
 
     public async Task SyncAsync(bool fullBackfill, CancellationToken ct)
     {
@@ -45,97 +55,84 @@ public sealed partial class GitHubSyncService(
             Status = "running"
         };
 
-        // Check GitHub rate limit before burning shared token quota
-        if (!fullBackfill)
-        {
-            using var rateClient = CreateClient();
-            var rateJson = await GetStringOrNullAsync(rateClient, "rate_limit", ct);
-            if (!string.IsNullOrWhiteSpace(rateJson))
-            {
-                using var rateDoc = JsonDocument.Parse(rateJson);
-                if (rateDoc.RootElement.TryGetProperty("resources", out var res) &&
-                    res.TryGetProperty("core", out var core) &&
-                    core.TryGetProperty("remaining", out var rem) &&
-                    rem.TryGetInt32(out var remaining) &&
-                    remaining < 500)
-                {
-                    cursor.Status = "rate-limited-backoff";
-                    cursor.LastError = $"GitHub core rate limit low ({remaining} remaining); relying on webhooks";
-                    await store.UpsertCursorAsync(cursor, ct);
-                    return;
-                }
-            }
-        }
-
         try
         {
-            using var client = CreateClient();
+            // 1. Always sync public GitOps desired state via raw.githubusercontent.com (0 API quota!)
+            await SyncGitOpsDesiredStateAsync(now, ct);
 
-            // 1. Sync GitOps desired state from cmdemo1-system
-            await SyncGitOpsDesiredStateAsync(client, now, ct);
-
-            // 2. Sync repositories, commits, PRs, workflow runs, releases, and webhook statuses (4 concurrent)
-            var repos = await DiscoverCmdemo1RepositoriesAsync(client, ct);
-            var repoBag = new System.Collections.Concurrent.ConcurrentBag<RepositorySnapshot>();
-            var prBag = new System.Collections.Concurrent.ConcurrentBag<SourceChangeSnapshot>();
-            var runBag = new System.Collections.Concurrent.ConcurrentBag<PipelineRunSnapshot>();
-            var artifactBag = new System.Collections.Concurrent.ConcurrentBag<ArtifactPackageSnapshot>();
-            var eventBag = new System.Collections.Concurrent.ConcurrentBag<ObservedEvent>();
-            var hookBag = new System.Collections.Concurrent.ConcurrentBag<WebhookRegistrationStatus>();
-
-            using var repoGate = new SemaphoreSlim(4, 4);
-            await Task.WhenAll(repos.Select(async repoName =>
+            // Respect rate-limit guard before hitting api.github.com
+            if (!fullBackfill && gh.IsRestPaused(out var pauseReason))
             {
-                await repoGate.WaitAsync(ct);
-                try
-                {
-                    var rList = new List<RepositorySnapshot>();
-                    var pList = new List<SourceChangeSnapshot>();
-                    var rnList = new List<PipelineRunSnapshot>();
-                    var aList = new List<ArtifactPackageSnapshot>();
-                    var eList = new List<ObservedEvent>();
-                    var hList = new List<WebhookRegistrationStatus>();
-
-                    await SyncRepositoryAsync(client, repoName, fullBackfill, now, rList, pList, rnList, aList, eList, hList, ct);
-
-                    foreach (var x in rList) repoBag.Add(x);
-                    foreach (var x in pList) prBag.Add(x);
-                    foreach (var x in rnList) runBag.Add(x);
-                    foreach (var x in aList) artifactBag.Add(x);
-                    foreach (var x in eList) eventBag.Add(x);
-                    foreach (var x in hList) hookBag.Add(x);
-                }
-                finally
-                {
-                    repoGate.Release();
-                }
-            }));
-
-            var repoSnapshots = repoBag.ToList();
-            var prSnapshots = prBag.ToList();
-            var runSnapshots = runBag.ToList();
-            var artifactSnapshots = artifactBag.ToList();
-            var newEvents = eventBag.ToList();
-            var webhookStatuses = hookBag.ToList();
-
-            await store.UpsertRepositoriesAsync(repoSnapshots, ct);
-            await store.UpsertSourceChangesAsync(prSnapshots, ct);
-            await store.UpsertPipelineRunsAsync(runSnapshots, ct);
-            await store.UpsertArtifactsAsync(artifactSnapshots, ct);
-            await store.ReplaceWebhookStatusesAsync("github", webhookStatuses, ct);
-
-            // 3. Sync Work Items from status/workitems.json + throttled live Project 679 GraphQL (at most every 15 min)
-            var queryBoardGraphQl = fullBackfill || (now - _lastBoardGraphQlSync) >= TimeSpan.FromMinutes(15);
-            await SyncWorkItemsAsync(client, queryBoardGraphQl, now, ct);
-            if (queryBoardGraphQl)
-            {
-                _lastBoardGraphQlSync = now;
+                cursor.Status = "rate-limit-paused";
+                cursor.LastError = pauseReason;
+                await store.UpsertCursorAsync(cursor, ct);
+                return;
             }
 
-            var ingestedCount = await ingestion.IngestBatchAsync(newEvents, ct);
+            // 2. Single batched GraphQL call for repo metadata, default commits, recent PRs, and releases across all cmdemo1-* repos
+            var targetRepos = fullBackfill ? Cmdemo1PlatformCatalog.ObservedRepositories : ActiveIncrementalRepos;
+            var repoSnapshots = new List<RepositorySnapshot>();
+            var prSnapshots = new List<SourceChangeSnapshot>();
+            var artifactSnapshots = new List<ArtifactPackageSnapshot>();
+            var newEvents = new List<ObservedEvent>();
 
-            cursor.LastSuccessAt = timeProvider.GetUtcNow();
-            cursor.Status = "ok";
+            var gqlResult = await FetchBatchRepositoriesGraphQlAsync(targetRepos, fullBackfill, now, repoSnapshots, prSnapshots, artifactSnapshots, newEvents, ct);
+            var rateLimited = gqlResult.RateLimited;
+
+            // 3. ETag-cached REST calls for workflow runs (active repos only on incremental polls)
+            var runSnapshots = new List<PipelineRunSnapshot>();
+            var webhookStatuses = new List<WebhookRegistrationStatus>();
+            var checkHooks = fullBackfill || !gh.IsRestBackoff();
+
+            foreach (var repoName in targetRepos)
+            {
+                ct.ThrowIfCancellationRequested();
+                if (gh.IsRestPaused(out _))
+                {
+                    rateLimited = true;
+                    break;
+                }
+
+                await SyncWorkflowRunsForRepoAsync(repoName, fullBackfill, now, runSnapshots, newEvents, ct);
+
+                if (checkHooks)
+                {
+                    var hookStatus = await FetchWebhookStatusForRepoAsync(repoName, fullBackfill, now, ct);
+                    if (hookStatus is not null)
+                    {
+                        webhookStatuses.Add(hookStatus);
+                        var repoSnap = repoSnapshots.FirstOrDefault(r => r.Name.Equals(repoName, StringComparison.OrdinalIgnoreCase));
+                        if (repoSnap is not null)
+                        {
+                            repoSnap.WebhookRegistered = hookStatus.IsActive;
+                            repoSnap.WebhookId = long.TryParse(hookStatus.ExternalId, out var wid) ? wid : null;
+                            repoSnap.LastWebhookStatusCode = hookStatus.LastDeliveryStatusCode;
+                            repoSnap.LastWebhookDeliveryAt = hookStatus.LastDeliveryAt;
+                        }
+                    }
+                }
+            }
+
+            if (repoSnapshots.Count > 0) await store.UpsertRepositoriesAsync(repoSnapshots, ct);
+            if (prSnapshots.Count > 0) await store.UpsertSourceChangesAsync(prSnapshots, ct);
+            if (runSnapshots.Count > 0) await store.UpsertPipelineRunsAsync(runSnapshots, ct);
+            if (artifactSnapshots.Count > 0) await store.UpsertArtifactsAsync(artifactSnapshots, ct);
+
+            // Preserve last-known-good webhook statuses when rate limited or incomplete
+            if (fullBackfill && webhookStatuses.Count > 0 && !rateLimited)
+            {
+                await store.ReplaceWebhookStatusesAsync("github", webhookStatuses, ct);
+            }
+
+            // 4. Sync Work Items (status/workitems.json via 0-quota raw + Project 679 GraphQL)
+            await SyncWorkItemsAsync(queryBoardGraphQl: fullBackfill, now, ct);
+
+            var ingestedCount = await ingestion.IngestBatchAsync(newEvents, ct);
+            var quota = gh.GetStatus();
+
+            cursor.LastSuccessAt = rateLimited ? null : timeProvider.GetUtcNow();
+            cursor.Status = quota.Mode == "paused" ? "rate-limit-paused" : quota.Mode == "backoff" ? "rate-limit-backoff" : "ok";
+            cursor.LastError = rateLimited ? "GitHub API rate limit reached; preserving cached state until reset" : null;
             cursor.ItemsProcessed = repoSnapshots.Count + prSnapshots.Count + runSnapshots.Count + ingestedCount;
             cursor.LastCursor = now.ToString("O", CultureInfo.InvariantCulture);
             await store.UpsertCursorAsync(cursor, ct);
@@ -150,6 +147,58 @@ public sealed partial class GitHubSyncService(
         }
     }
 
+    public async Task SyncBoardOnlyAsync(CancellationToken ct)
+    {
+        var now = timeProvider.GetUtcNow();
+        if (gh.IsGraphQlPaused(out _))
+        {
+            return;
+        }
+
+        await SyncWorkItemsAsync(queryBoardGraphQl: true, now, ct);
+    }
+
+    public async Task SyncRepositoryAsync(string repositoryName, CancellationToken ct)
+    {
+        if (string.IsNullOrWhiteSpace(repositoryName))
+        {
+            return;
+        }
+
+        var now = timeProvider.GetUtcNow();
+        if (_lastRepoRefresh.TryGetValue(repositoryName, out var last) && (now - last) < TimeSpan.FromSeconds(15))
+        {
+            return; // Coalesce burst webhooks on the same repo
+        }
+        _lastRepoRefresh[repositoryName] = now;
+
+        if (repositoryName.Equals(Cmdemo1PlatformCatalog.SystemRepository, StringComparison.OrdinalIgnoreCase))
+        {
+            await SyncGitOpsDesiredStateAsync(now, ct);
+        }
+
+        if (gh.IsRestPaused(out _))
+        {
+            return;
+        }
+
+        var repoSnapshots = new List<RepositorySnapshot>();
+        var prSnapshots = new List<SourceChangeSnapshot>();
+        var artifactSnapshots = new List<ArtifactPackageSnapshot>();
+        var runSnapshots = new List<PipelineRunSnapshot>();
+        var newEvents = new List<ObservedEvent>();
+
+        await FetchBatchRepositoriesGraphQlAsync([repositoryName], fullBackfill: false, now, repoSnapshots, prSnapshots, artifactSnapshots, newEvents, ct);
+        await SyncWorkflowRunsForRepoAsync(repositoryName, fullBackfill: false, now, runSnapshots, newEvents, ct);
+
+        if (repoSnapshots.Count > 0) await store.UpsertRepositoriesAsync(repoSnapshots, ct);
+        if (prSnapshots.Count > 0) await store.UpsertSourceChangesAsync(prSnapshots, ct);
+        if (runSnapshots.Count > 0) await store.UpsertPipelineRunsAsync(runSnapshots, ct);
+        if (artifactSnapshots.Count > 0) await store.UpsertArtifactsAsync(artifactSnapshots, ct);
+
+        await ingestion.IngestBatchAsync(newEvents, ct);
+    }
+
     public async Task<IReadOnlyList<WebhookRegistrationStatus>> EnsureWebhooksRegisteredAsync(string twinPublicBaseUrl, CancellationToken ct)
     {
         var baseUrl = twinPublicBaseUrl.TrimEnd('/');
@@ -162,46 +211,69 @@ public sealed partial class GitHubSyncService(
             return results;
         }
 
-        using var client = CreateClient();
-        var repos = await DiscoverCmdemo1RepositoriesAsync(client, ct);
-        var now = timeProvider.GetUtcNow();
+        if (gh.IsRestPaused(out var pauseReason))
+        {
+            LogWebhookRegistrationPaused(pauseReason);
+            return await store.GetWebhookStatusesAsync(ct);
+        }
 
-        foreach (var repo in repos)
+        var now = timeProvider.GetUtcNow();
+        foreach (var repo in Cmdemo1PlatformCatalog.ObservedRepositories)
         {
             ct.ThrowIfCancellationRequested();
             try
             {
-                var repoMetaJson = await GetStringOrNullAsync(client, $"repos/{Cmdemo1PlatformCatalog.GitHubOrg}/{repo}", ct);
-                if (!string.IsNullOrWhiteSpace(repoMetaJson))
+                var meta = await gh.GetApiAsync($"repos/{Cmdemo1PlatformCatalog.GitHubOrg}/{repo}", bypassPause: false, ct);
+                if (meta.RateLimited) break;
+                if (meta.Success && !string.IsNullOrWhiteSpace(meta.Body))
                 {
-                    using var metaDoc = JsonDocument.Parse(repoMetaJson);
+                    using var metaDoc = JsonDocument.Parse(meta.Body);
                     if (metaDoc.RootElement.TryGetProperty("archived", out var arch) && arch.ValueKind == JsonValueKind.True)
                     {
                         continue;
                     }
                 }
 
-                var hooksJson = await GetStringOrNullAsync(client, $"repos/{Cmdemo1PlatformCatalog.GitHubOrg}/{repo}/hooks", ct);
+                var hooksRes = await gh.GetApiAsync($"repos/{Cmdemo1PlatformCatalog.GitHubOrg}/{repo}/hooks", bypassPause: false, ct);
+                if (hooksRes.RateLimited) break;
+
                 long? existingId = null;
-                if (!string.IsNullOrWhiteSpace(hooksJson))
+                bool alreadyActiveAndMatching = false;
+                if (hooksRes.Success && !string.IsNullOrWhiteSpace(hooksRes.Body))
                 {
-                    using var doc = JsonDocument.Parse(hooksJson);
+                    using var doc = JsonDocument.Parse(hooksRes.Body);
                     foreach (var hook in doc.RootElement.EnumerateArray())
                     {
-                        var url = hook.TryGetProperty("config", out var cfg) && cfg.TryGetProperty("url", out var u)
-                            ? u.GetString()
-                            : null;
+                        var url = hook.TryGetProperty("config", out var cfg) && cfg.TryGetProperty("url", out var u) ? u.GetString() : null;
+                        var active = hook.TryGetProperty("active", out var act) && act.ValueKind == JsonValueKind.True;
                         if (!string.IsNullOrWhiteSpace(url) &&
                             (url.Equals(targetUrl, StringComparison.OrdinalIgnoreCase) ||
-                             url.EndsWith("/hooks/github", StringComparison.OrdinalIgnoreCase) && url.Contains("cmdemo1-twin", StringComparison.OrdinalIgnoreCase)))
+                             (url.EndsWith("/hooks/github", StringComparison.OrdinalIgnoreCase) && url.Contains("cmdemo1-twin", StringComparison.OrdinalIgnoreCase))))
                         {
                             existingId = hook.GetProperty("id").GetInt64();
+                            alreadyActiveAndMatching = active && url.Equals(targetUrl, StringComparison.OrdinalIgnoreCase);
                             break;
                         }
                     }
                 }
 
-                var payload = JsonSerializer.Serialize(new
+                if (alreadyActiveAndMatching && existingId is not null)
+                {
+                    results.Add(new WebhookRegistrationStatus
+                    {
+                        Id = $"github:{repo}",
+                        Source = "github",
+                        Target = repo,
+                        EndpointUrl = targetUrl,
+                        IsActive = true,
+                        ExternalId = existingId.Value.ToString(CultureInfo.InvariantCulture),
+                        Detail = "active",
+                        CheckedAt = now
+                    });
+                    continue;
+                }
+
+                var payload = new
                 {
                     name = "web",
                     active = true,
@@ -213,12 +285,11 @@ public sealed partial class GitHubSyncService(
                         secret,
                         insecure_ssl = "0"
                     }
-                });
+                };
 
-                using var content = new StringContent(payload, Encoding.UTF8, "application/json");
-                HttpResponseMessage response = existingId is null
-                    ? await client.PostAsync($"repos/{Cmdemo1PlatformCatalog.GitHubOrg}/{repo}/hooks", content, ct)
-                    : await client.PatchAsync($"repos/{Cmdemo1PlatformCatalog.GitHubOrg}/{repo}/hooks/{existingId.Value}", content, ct);
+                using var response = existingId is null
+                    ? await gh.SendMutationAsync(HttpMethod.Post, $"repos/{Cmdemo1PlatformCatalog.GitHubOrg}/{repo}/hooks", payload, ct)
+                    : await gh.SendMutationAsync(HttpMethod.Patch, $"repos/{Cmdemo1PlatformCatalog.GitHubOrg}/{repo}/hooks/{existingId.Value}", payload, ct);
 
                 var respBody = await response.Content.ReadAsStringAsync(ct);
                 long? hookId = existingId;
@@ -239,57 +310,44 @@ public sealed partial class GitHubSyncService(
                     EndpointUrl = targetUrl,
                     IsActive = response.IsSuccessStatusCode,
                     ExternalId = hookId?.ToString(CultureInfo.InvariantCulture),
-                    Detail = response.IsSuccessStatusCode ? "registered" : $"HTTP {(int)response.StatusCode}: {respBody}",
+                    Detail = response.IsSuccessStatusCode ? "registered" : $"HTTP {(int)response.StatusCode}",
                     CheckedAt = now
                 });
             }
             catch (Exception ex) when (ex is not OperationCanceledException)
             {
                 LogWebhookRegistrationFailed(ex, repo);
-                results.Add(new WebhookRegistrationStatus
-                {
-                    Id = $"github:{repo}",
-                    Source = "github",
-                    Target = repo,
-                    EndpointUrl = targetUrl,
-                    IsActive = false,
-                    Detail = ex.Message,
-                    CheckedAt = now
-                });
             }
         }
 
-        await store.ReplaceWebhookStatusesAsync("github", results, ct);
+        if (results.Count > 0)
+        {
+            await store.ReplaceWebhookStatusesAsync("github", results, ct);
+        }
         return results;
     }
 
-    private async Task SyncGitOpsDesiredStateAsync(HttpClient client, DateTimeOffset now, CancellationToken ct)
+    private async Task SyncGitOpsDesiredStateAsync(DateTimeOffset now, CancellationToken ct)
     {
-        var systemJson = await FetchRawFileAsync(client, Cmdemo1PlatformCatalog.SystemRepository, "main", "system.json", ct) ?? "{}";
+        var systemJson = await gh.GetRawPublicAsync(Cmdemo1PlatformCatalog.GitHubOrg, Cmdemo1PlatformCatalog.SystemRepository, "main", "system.json", ct) ?? "{}";
         var pinned = new Dictionary<string, Dictionary<string, string>>(StringComparer.OrdinalIgnoreCase);
 
         foreach (var stage in ActiveStages)
         {
-            var vJson = await FetchRawFileAsync(client, Cmdemo1PlatformCatalog.SystemRepository, "main", $"environments/{stage}/versions.json", ct);
+            var vJson = await gh.GetRawPublicAsync(Cmdemo1PlatformCatalog.GitHubOrg, Cmdemo1PlatformCatalog.SystemRepository, "main", $"environments/{stage}/versions.json", ct);
             if (!string.IsNullOrWhiteSpace(vJson))
             {
                 try
                 {
                     var map = JsonSerializer.Deserialize<Dictionary<string, string>>(vJson);
-                    if (map is not null)
-                    {
-                        pinned[stage] = map;
-                    }
+                    if (map is not null) pinned[stage] = map;
                 }
-                catch (JsonException)
-                {
-                    // ignore malformed partial read
-                }
+                catch (JsonException) { }
             }
         }
 
-        var costJson = await FetchRawFileAsync(client, Cmdemo1PlatformCatalog.SystemRepository, "status", "cost.json", ct);
-        var containersJson = await FetchRawFileAsync(client, Cmdemo1PlatformCatalog.SystemRepository, "status", "containers.json", ct);
+        var costJson = await gh.GetRawPublicAsync(Cmdemo1PlatformCatalog.GitHubOrg, Cmdemo1PlatformCatalog.SystemRepository, "status", "cost.json", ct);
+        var containersJson = await gh.GetRawPublicAsync(Cmdemo1PlatformCatalog.GitHubOrg, Cmdemo1PlatformCatalog.SystemRepository, "status", "containers.json", ct);
 
         await store.UpsertDesiredConfigAsync(new DesiredSystemConfigSnapshot
         {
@@ -302,7 +360,6 @@ public sealed partial class GitHubSyncService(
             UpdatedAt = now
         }, ct);
 
-        // Seed EnvironmentInstanceSnapshots from cost.json if Azure hasn't populated yet
         if (!string.IsNullOrWhiteSpace(costJson))
         {
             var existingStages = (await store.GetEnvironmentInstancesAsync(ct))
@@ -342,141 +399,200 @@ public sealed partial class GitHubSyncService(
         }
     }
 
-    private static async Task<IReadOnlyList<string>> DiscoverCmdemo1RepositoriesAsync(HttpClient client, CancellationToken ct)
-    {
-        var names = new HashSet<string>(Cmdemo1PlatformCatalog.ObservedRepositories, StringComparer.OrdinalIgnoreCase);
-        var json = await GetStringOrNullAsync(client, $"search/repositories?q=org:{Cmdemo1PlatformCatalog.GitHubOrg}+cmdemo1-+in:name&per_page=100", ct);
-        if (!string.IsNullOrWhiteSpace(json))
-        {
-            using var doc = JsonDocument.Parse(json);
-            if (doc.RootElement.TryGetProperty("items", out var items) && items.ValueKind == JsonValueKind.Array)
-            {
-                foreach (var repo in items.EnumerateArray())
-                {
-                    var name = repo.TryGetProperty("name", out var n) ? n.GetString() : null;
-                    if (!string.IsNullOrWhiteSpace(name) && name.StartsWith("cmdemo1-", StringComparison.OrdinalIgnoreCase))
-                    {
-                        names.Add(name);
-                    }
-                }
-            }
-        }
-        return names.OrderBy(n => n, StringComparer.OrdinalIgnoreCase).ToList();
-    }
-
-    private static async Task SyncRepositoryAsync(
-        HttpClient client,
-        string repoName,
+    private async Task<GitHubFetchResult> FetchBatchRepositoriesGraphQlAsync(
+        IReadOnlyList<string> repos,
         bool fullBackfill,
         DateTimeOffset now,
         List<RepositorySnapshot> repoSnapshots,
         List<SourceChangeSnapshot> prSnapshots,
-        List<PipelineRunSnapshot> runSnapshots,
         List<ArtifactPackageSnapshot> artifactSnapshots,
         List<ObservedEvent> newEvents,
-        List<WebhookRegistrationStatus> webhookStatuses,
         CancellationToken ct)
     {
-        var repoJson = await GetStringOrNullAsync(client, $"repos/{Cmdemo1PlatformCatalog.GitHubOrg}/{repoName}", ct);
-        if (string.IsNullOrWhiteSpace(repoJson))
+        if (repos.Count == 0)
         {
-            return;
+            return new GitHubFetchResult(true, false, false, System.Net.HttpStatusCode.OK, null);
         }
 
-        using var repoDoc = JsonDocument.Parse(repoJson);
-        var root = repoDoc.RootElement;
-        var defaultBranch = root.TryGetProperty("default_branch", out var db) ? db.GetString() ?? "main" : "main";
-        var htmlUrl = root.TryGetProperty("html_url", out var hu) ? hu.GetString() ?? $"https://github.com/{Cmdemo1PlatformCatalog.GitHubOrg}/{repoName}" : "";
-        var isPrivate = root.TryGetProperty("private", out var priv) && priv.ValueKind == JsonValueKind.True;
-        var pipelineId = Cmdemo1PlatformCatalog.ResolvePipelineIdFromRepository(repoName);
-        var deployable = Cmdemo1PlatformCatalog.ResolveDeployableFromRepository(repoName);
-        var isTwin = repoName.Equals(Cmdemo1PlatformCatalog.TwinRepository, StringComparison.OrdinalIgnoreCase);
-        var isArchived = root.TryGetProperty("archived", out var arch) && arch.ValueKind == JsonValueKind.True;
-        var isRetired = isArchived || repoName is "cmdemo1-aisf" or "cmdemo1-fworker" or "cmdemo1-app2-ui" or "cmdemo1-scorecard";
+        var commitsCount = fullBackfill ? 6 : 2;
+        var prsCount = fullBackfill ? 15 : 6;
+        var aliases = string.Join("\n  ", repos.Select((r, i) =>
+            $"r{i}: repository(owner: \"{Cmdemo1PlatformCatalog.GitHubOrg}\", name: \"{r}\") {{ ...RepoFields }}"));
 
-        // Recent commits
-        var commitsCount = fullBackfill ? 10 : 4;
-        var commitsJson = await GetStringOrNullAsync(client, $"repos/{Cmdemo1PlatformCatalog.GitHubOrg}/{repoName}/commits?sha={Uri.EscapeDataString(defaultBranch)}&per_page={commitsCount}", ct);
-        string? latestSha = null;
-        string? latestMsg = null;
-        string? latestAuthor = null;
-        DateTimeOffset? latestCommitAt = null;
+        var query = $$"""
+        query {
+          {{aliases}}
+        }
+        fragment RepoFields on Repository {
+          name
+          url
+          isPrivate
+          isArchived
+          issues(states: OPEN) { totalCount }
+          defaultBranchRef {
+            name
+            target {
+              ... on Commit {
+                history(first: {{commitsCount}}) {
+                  nodes {
+                    oid
+                    messageHeadline
+                    committedDate
+                    url
+                    author { name }
+                  }
+                }
+              }
+            }
+          }
+          pullRequests(first: {{prsCount}}, states: [OPEN, CLOSED, MERGED], orderBy: { field: UPDATED_AT, direction: DESC }) {
+            nodes {
+              number
+              title
+              url
+              state
+              headRefName
+              baseRefName
+              createdAt
+              updatedAt
+              mergedAt
+              author { login __typename }
+              mergeCommit { oid }
+            }
+          }
+          deployments(first: 5, orderBy: { field: CREATED_AT, direction: DESC }) {
+            nodes {
+              id
+              environment
+              createdAt
+              commitOid
+              ref { name }
+            }
+          }
+        }
+        """;
 
-        if (!string.IsNullOrWhiteSpace(commitsJson))
+        var res = await gh.PostGraphQlAsync(query, null, ct);
+        if (!res.Success || string.IsNullOrWhiteSpace(res.Body))
         {
-            using var commitsDoc = JsonDocument.Parse(commitsJson);
-            if (commitsDoc.RootElement.ValueKind == JsonValueKind.Array)
+            return res;
+        }
+
+        var existingRepos = (await store.GetRepositoriesAsync(ct))
+            .ToDictionary(r => r.Name, StringComparer.OrdinalIgnoreCase);
+
+        using var doc = JsonDocument.Parse(res.Body);
+        if (!doc.RootElement.TryGetProperty("data", out var data) || data.ValueKind != JsonValueKind.Object)
+        {
+            return res;
+        }
+
+        for (var i = 0; i < repos.Count; i++)
+        {
+            if (!data.TryGetProperty($"r{i}", out var repoEl) || repoEl.ValueKind != JsonValueKind.Object)
             {
-                foreach (var c in commitsDoc.RootElement.EnumerateArray())
+                continue;
+            }
+
+            var repoName = repoEl.GetProperty("name").GetString() ?? repos[i];
+            var htmlUrl = repoEl.GetProperty("url").GetString() ?? "";
+            var isPrivate = repoEl.TryGetProperty("isPrivate", out var priv) && priv.ValueKind == JsonValueKind.True;
+            var isArchived = repoEl.TryGetProperty("isArchived", out var arch) && arch.ValueKind == JsonValueKind.True;
+            var openIssues = repoEl.TryGetProperty("issues", out var iss) && iss.TryGetProperty("totalCount", out var ic) ? ic.GetInt32() : 0;
+
+            var pipelineId = Cmdemo1PlatformCatalog.ResolvePipelineIdFromRepository(repoName);
+            var deployable = Cmdemo1PlatformCatalog.ResolveDeployableFromRepository(repoName);
+            var isTwin = repoName.Equals(Cmdemo1PlatformCatalog.TwinRepository, StringComparison.OrdinalIgnoreCase);
+            var isRetired = isArchived || repoName is "cmdemo1-aisf" or "cmdemo1-fworker" or "cmdemo1-app2-ui" or "cmdemo1-scorecard";
+
+            var defaultBranch = "main";
+            string? latestSha = null;
+            string? latestMsg = null;
+            string? latestAuthor = null;
+            DateTimeOffset? latestCommitAt = null;
+
+            if (repoEl.TryGetProperty("defaultBranchRef", out var dbr) && dbr.ValueKind == JsonValueKind.Object)
+            {
+                defaultBranch = dbr.TryGetProperty("name", out var bn) ? bn.GetString() ?? "main" : "main";
+                if (dbr.TryGetProperty("target", out var tgt) &&
+                    tgt.TryGetProperty("history", out var hist) &&
+                    hist.TryGetProperty("nodes", out var commitsArr))
                 {
-                    var sha = c.TryGetProperty("sha", out var s) ? s.GetString() ?? "" : "";
-                    var commitObj = c.GetProperty("commit");
-                    var msg = (commitObj.TryGetProperty("message", out var m) ? m.GetString() ?? "" : "").Split('\n')[0];
-                    var authorName = commitObj.TryGetProperty("author", out var a) && a.TryGetProperty("name", out var an) ? an.GetString() ?? "unknown" : "unknown";
-                    var dateStr = commitObj.TryGetProperty("committer", out var cm) && cm.TryGetProperty("date", out var d) ? d.GetString() : null;
-                    var commitAt = DateTimeOffset.TryParse(dateStr, out var dt) ? dt.ToUniversalTime() : now;
-                    var commitUrl = c.TryGetProperty("html_url", out var cu) ? cu.GetString() : htmlUrl;
-
-                    if (latestSha is null)
+                    foreach (var c in commitsArr.EnumerateArray())
                     {
-                        latestSha = sha;
-                        latestMsg = msg;
-                        latestAuthor = authorName;
-                        latestCommitAt = commitAt;
+                        var sha = c.GetProperty("oid").GetString() ?? "";
+                        var msg = c.TryGetProperty("messageHeadline", out var mh) ? mh.GetString() ?? "" : "";
+                        var authorName = c.TryGetProperty("author", out var au) && au.ValueKind == JsonValueKind.Object && au.TryGetProperty("name", out var an)
+                            ? an.GetString() ?? "unknown"
+                            : "unknown";
+                        var commitAt = c.TryGetProperty("committedDate", out var cd) && DateTimeOffset.TryParse(cd.GetString(), out var dt)
+                            ? dt.ToUniversalTime()
+                            : now;
+                        var commitUrl = c.TryGetProperty("url", out var cu) ? cu.GetString() : htmlUrl;
+
+                        if (latestSha is null)
+                        {
+                            latestSha = sha;
+                            latestMsg = msg;
+                            latestAuthor = authorName;
+                            latestCommitAt = commitAt;
+                        }
+
+                        var shortSha = sha.Length >= 7 ? sha[..7] : sha;
+                        newEvents.Add(new ObservedEvent
+                        {
+                            EventId = $"commit-{repoName}-{shortSha}",
+                            IdempotencyKey = $"gh-commit:{repoName}:{sha}",
+                            Source = EventSourceKind.GitHub,
+                            SourceEventId = sha,
+                            EventType = "dev.cdevents.repository.modified",
+                            SubjectType = "commit",
+                            SubjectId = $"{repoName}@{shortSha}",
+                            Predicate = "committed",
+                            OccurredAt = commitAt,
+                            IngestedAt = now,
+                            Channel = fullBackfill ? IngestionChannel.Backfill : IngestionChannel.Poll,
+                            CorrelationId = $"sha:{sha}",
+                            ChainId = $"sha:{sha}",
+                            PipelineId = pipelineId,
+                            DeployableName = deployable,
+                            Actor = authorName,
+                            Outcome = EventOutcome.Success,
+                            Summary = $"[{repoName}/{defaultBranch}] {shortSha}: {Truncate(msg, 85)}",
+                            SourceUrl = commitUrl,
+                            PayloadJson = c.GetRawText()
+                        });
                     }
-
-                    var shortSha = sha.Length >= 7 ? sha[..7] : sha;
-                    newEvents.Add(new ObservedEvent
-                    {
-                        EventId = $"commit-{repoName}-{shortSha}",
-                        IdempotencyKey = $"gh-commit:{repoName}:{sha}",
-                        Source = EventSourceKind.GitHub,
-                        SourceEventId = sha,
-                        EventType = "dev.cdevents.repository.modified",
-                        SubjectType = "commit",
-                        SubjectId = $"{repoName}@{shortSha}",
-                        Predicate = "committed",
-                        OccurredAt = commitAt,
-                        IngestedAt = now,
-                        Channel = fullBackfill ? IngestionChannel.Backfill : IngestionChannel.Poll,
-                        CorrelationId = $"sha:{sha}",
-                        ChainId = $"sha:{sha}",
-                        PipelineId = pipelineId,
-                        DeployableName = deployable,
-                        Actor = authorName,
-                        Outcome = EventOutcome.Success,
-                        Summary = $"[{repoName}/{defaultBranch}] {shortSha}: {Truncate(msg, 85)}",
-                        SourceUrl = commitUrl,
-                        PayloadJson = c.GetRawText()
-                    });
                 }
             }
-        }
 
-        // PRs
-        var prCount = fullBackfill ? 25 : 12;
-        var prsJson = await GetStringOrNullAsync(client, $"repos/{Cmdemo1PlatformCatalog.GitHubOrg}/{repoName}/pulls?state=all&sort=updated&direction=desc&per_page={prCount}", ct);
-        var openPrs = 0;
-        if (!string.IsNullOrWhiteSpace(prsJson))
-        {
-            using var prsDoc = JsonDocument.Parse(prsJson);
-            if (prsDoc.RootElement.ValueKind == JsonValueKind.Array)
+            var openPrs = 0;
+            if (repoEl.TryGetProperty("pullRequests", out var prsConn) &&
+                prsConn.TryGetProperty("nodes", out var prsArr))
             {
-                foreach (var pr in prsDoc.RootElement.EnumerateArray())
+                foreach (var pr in prsArr.EnumerateArray())
                 {
                     var num = pr.GetProperty("number").GetInt32();
-                    var state = pr.TryGetProperty("state", out var st) ? st.GetString() ?? "open" : "open";
-                    var mergedAtStr = pr.TryGetProperty("merged_at", out var ma) && ma.ValueKind == JsonValueKind.String ? ma.GetString() : null;
-                    var mergedAt = DateTimeOffset.TryParse(mergedAtStr, out var mdt) ? mdt.ToUniversalTime() : (DateTimeOffset?)null;
-                    if (mergedAt is not null) state = "merged";
+                    var state = (pr.GetProperty("state").GetString() ?? "OPEN").ToLowerInvariant();
                     if (state == "open") openPrs++;
 
-                    var title = pr.TryGetProperty("title", out var t) ? t.GetString() ?? "" : "";
-                    var author = pr.TryGetProperty("user", out var u) && u.TryGetProperty("login", out var ul) ? ul.GetString() ?? "unknown" : "unknown";
-                    var branch = pr.TryGetProperty("head", out var h) && h.TryGetProperty("ref", out var hr) ? hr.GetString() ?? "" : "";
-                    var mergeSha = pr.TryGetProperty("merge_commit_sha", out var ms) && ms.ValueKind == JsonValueKind.String ? ms.GetString() : null;
-                    var createdAt = pr.TryGetProperty("created_at", out var ca) && DateTimeOffset.TryParse(ca.GetString(), out var cdt) ? cdt.ToUniversalTime() : now;
-                    var updatedAt = pr.TryGetProperty("updated_at", out var ua) && DateTimeOffset.TryParse(ua.GetString(), out var udt) ? udt.ToUniversalTime() : now;
+                    var title = pr.GetProperty("title").GetString() ?? "";
+                    var author = pr.TryGetProperty("author", out var au) && au.ValueKind == JsonValueKind.Object && au.TryGetProperty("login", out var al)
+                        ? al.GetString() ?? "unknown"
+                        : "unknown";
+                    var authorType = pr.TryGetProperty("author", out var au2) && au2.ValueKind == JsonValueKind.Object && au2.TryGetProperty("__typename", out var at)
+                        ? at.GetString() ?? ""
+                        : "";
+                    var branch = pr.TryGetProperty("headRefName", out var hr) ? hr.GetString() ?? "" : "";
+                    var baseBranch = pr.TryGetProperty("baseRefName", out var br) ? br.GetString() ?? defaultBranch : defaultBranch;
+                    var mergeSha = pr.TryGetProperty("mergeCommit", out var mc) && mc.ValueKind == JsonValueKind.Object && mc.TryGetProperty("oid", out var oid)
+                        ? oid.GetString()
+                        : null;
+                    var createdAt = pr.TryGetProperty("createdAt", out var ca) && DateTimeOffset.TryParse(ca.GetString(), out var cdt) ? cdt.ToUniversalTime() : now;
+                    var updatedAt = pr.TryGetProperty("updatedAt", out var ua) && DateTimeOffset.TryParse(ua.GetString(), out var udt) ? udt.ToUniversalTime() : now;
+                    var mergedAt = pr.TryGetProperty("mergedAt", out var ma) && ma.ValueKind == JsonValueKind.String && DateTimeOffset.TryParse(ma.GetString(), out var mdt)
+                        ? mdt.ToUniversalTime()
+                        : (DateTimeOffset?)null;
 
                     prSnapshots.Add(new SourceChangeSnapshot
                     {
@@ -484,12 +600,12 @@ public sealed partial class GitHubSyncService(
                         Repository = repoName,
                         Number = num,
                         Title = title,
-                        Url = pr.TryGetProperty("html_url", out var pu) ? pu.GetString() ?? "" : "",
+                        Url = pr.TryGetProperty("url", out var pu) ? pu.GetString() ?? "" : "",
                         State = state,
                         HeadBranch = branch,
-                        BaseBranch = pr.TryGetProperty("base", out var b) && b.TryGetProperty("ref", out var br) ? br.GetString() ?? defaultBranch : defaultBranch,
+                        BaseBranch = baseBranch,
                         Author = author,
-                        IsBot = author.Contains("bot", StringComparison.OrdinalIgnoreCase) || author.Contains("cursor", StringComparison.OrdinalIgnoreCase) || author.Contains("copilot", StringComparison.OrdinalIgnoreCase),
+                        IsBot = authorType == "Bot" || author.Contains("bot", StringComparison.OrdinalIgnoreCase) || author.Contains("cursor", StringComparison.OrdinalIgnoreCase) || author.Contains("copilot", StringComparison.OrdinalIgnoreCase),
                         PipelineId = pipelineId,
                         LinkedIssueNumber = ExtractIssueNumber(title, branch),
                         MergeCommitSha = mergeSha,
@@ -499,109 +615,25 @@ public sealed partial class GitHubSyncService(
                     });
                 }
             }
-        }
 
-        // Workflow runs
-        var runsCount = fullBackfill ? 20 : 10;
-        var runsJson = await GetStringOrNullAsync(client, $"repos/{Cmdemo1PlatformCatalog.GitHubOrg}/{repoName}/actions/runs?per_page={runsCount}", ct);
-        if (!string.IsNullOrWhiteSpace(runsJson))
-        {
-            using var runsDoc = JsonDocument.Parse(runsJson);
-            if (runsDoc.RootElement.TryGetProperty("workflow_runs", out var runsArr) && runsArr.ValueKind == JsonValueKind.Array)
+            if (repoEl.TryGetProperty("deployments", out var depConn) &&
+                depConn.TryGetProperty("nodes", out var depArr))
             {
-                foreach (var r in runsArr.EnumerateArray())
-                {
-                    var runId = r.GetProperty("id").GetInt64();
-                    var runNumber = r.TryGetProperty("run_number", out var rn) ? rn.GetInt64() : runId;
-                    var workflowName = r.TryGetProperty("name", out var wn) ? wn.GetString() ?? "Workflow" : "Workflow";
-                    var displayTitle = r.TryGetProperty("display_title", out var dt) ? dt.GetString() ?? workflowName : workflowName;
-                    var eventName = r.TryGetProperty("event", out var ev) ? ev.GetString() ?? "push" : "push";
-                    var branch = r.TryGetProperty("head_branch", out var hb) ? hb.GetString() ?? "" : "";
-                    var headSha = r.TryGetProperty("head_sha", out var hs) ? hs.GetString() ?? "" : "";
-                    var status = r.TryGetProperty("status", out var st) ? st.GetString() ?? "completed" : "completed";
-                    var conclusion = r.TryGetProperty("conclusion", out var co) && co.ValueKind == JsonValueKind.String ? co.GetString() : null;
-                    var runUrl = r.TryGetProperty("html_url", out var ru) ? ru.GetString() ?? "" : "";
-                    var createdAt = r.TryGetProperty("created_at", out var ca) && DateTimeOffset.TryParse(ca.GetString(), out var cdt) ? cdt.ToUniversalTime() : now;
-                    var updatedAt = r.TryGetProperty("updated_at", out var ua) && DateTimeOffset.TryParse(ua.GetString(), out var udt) ? udt.ToUniversalTime() : now;
-                    var version = ExtractLeadingVersion(displayTitle);
-
-                    runSnapshots.Add(new PipelineRunSnapshot
-                    {
-                        Id = $"{repoName}:{runId}",
-                        RunId = runId,
-                        RunNumber = runNumber,
-                        Repository = repoName,
-                        PipelineId = pipelineId,
-                        WorkflowName = workflowName,
-                        DisplayTitle = displayTitle,
-                        Version = version,
-                        EventName = eventName,
-                        Branch = branch,
-                        HeadSha = headSha,
-                        Status = status,
-                        Conclusion = conclusion,
-                        Url = runUrl,
-                        CreatedAt = createdAt,
-                        UpdatedAt = updatedAt
-                    });
-
-                    if (status == "completed")
-                    {
-                        newEvents.Add(new ObservedEvent
-                        {
-                            EventId = $"ghrun-{runId}",
-                            IdempotencyKey = $"gh-run:{repoName}:{runId}:{status}",
-                            Source = EventSourceKind.GitHub,
-                            SourceEventId = runId.ToString(CultureInfo.InvariantCulture),
-                            EventType = "dev.cdevents.pipelineRun.finished",
-                            SubjectType = "pipelineRun",
-                            SubjectId = $"{repoName}:run:{runId}",
-                            Predicate = "finished",
-                            OccurredAt = updatedAt,
-                            IngestedAt = now,
-                            Channel = fullBackfill ? IngestionChannel.Backfill : IngestionChannel.Poll,
-                            CorrelationId = string.IsNullOrEmpty(headSha) ? null : $"sha:{headSha}",
-                            ChainId = string.IsNullOrEmpty(headSha) ? null : $"sha:{headSha}",
-                            PipelineId = pipelineId,
-                            DeployableName = deployable,
-                            Actor = "github-actions",
-                            Outcome = conclusion switch
-                            {
-                                "success" => EventOutcome.Success,
-                                "failure" or "timed_out" => EventOutcome.Failure,
-                                "cancelled" => EventOutcome.Canceled,
-                                "skipped" => EventOutcome.Skipped,
-                                _ => EventOutcome.None
-                            },
-                            Summary = $"[{repoName}/{branch}] {workflowName} #{runNumber} {conclusion ?? status}",
-                            SourceUrl = runUrl,
-                            PayloadJson = r.GetRawText()
-                        });
-                    }
-                }
-            }
-        }
-
-        // GitHub release deployments / packages
-        var deploymentsJson = await GetStringOrNullAsync(client, $"repos/{Cmdemo1PlatformCatalog.GitHubOrg}/{repoName}/deployments?per_page=10", ct);
-        if (!string.IsNullOrWhiteSpace(deploymentsJson))
-        {
-            using var depDoc = JsonDocument.Parse(deploymentsJson);
-            if (depDoc.RootElement.ValueKind == JsonValueKind.Array)
-            {
-                foreach (var dep in depDoc.RootElement.EnumerateArray())
+                foreach (var dep in depArr.EnumerateArray())
                 {
                     var env = dep.TryGetProperty("environment", out var e) ? e.GetString() ?? "release" : "release";
-                    var sha = dep.TryGetProperty("sha", out var s) ? s.GetString() ?? "" : "";
-                    var refName = dep.TryGetProperty("ref", out var rf) ? rf.GetString() ?? "" : "";
-                    var depId = dep.GetProperty("id").GetInt64();
-                    var createdAt = dep.TryGetProperty("created_at", out var ca) && DateTimeOffset.TryParse(ca.GetString(), out var cdt) ? cdt.ToUniversalTime() : now;
+                    var sha = dep.TryGetProperty("commitOid", out var s) ? s.GetString() ?? "" : "";
+                    var refName = dep.TryGetProperty("ref", out var rf) && rf.ValueKind == JsonValueKind.Object && rf.TryGetProperty("name", out var rn)
+                        ? rn.GetString() ?? ""
+                        : "";
+                    var depId = dep.GetProperty("id").GetString() ?? Guid.NewGuid().ToString("N");
+                    var createdAt = dep.TryGetProperty("createdAt", out var ca) && DateTimeOffset.TryParse(ca.GetString(), out var cdt) ? cdt.ToUniversalTime() : now;
                     artifactSnapshots.Add(new ArtifactPackageSnapshot
                     {
                         Id = $"GitHubDeployment:{repoName}:{depId}",
                         Kind = "GitHubReleaseDeployment",
                         Name = $"{repoName}/{env}",
-                        Version = string.IsNullOrEmpty(refName) ? (sha.Length >= 7 ? sha[..7] : depId.ToString(CultureInfo.InvariantCulture)) : refName,
+                        Version = string.IsNullOrEmpty(refName) ? (sha.Length >= 7 ? sha[..7] : depId) : refName,
                         RegistryOrFeed = "github-deployments",
                         CommitSha = sha,
                         PipelineId = pipelineId,
@@ -610,54 +642,190 @@ public sealed partial class GitHubSyncService(
                     });
                 }
             }
+
+            existingRepos.TryGetValue(repoName, out var prev);
+            repoSnapshots.Add(new RepositorySnapshot
+            {
+                Name = repoName,
+                FullName = $"{Cmdemo1PlatformCatalog.GitHubOrg}/{repoName}",
+                Url = htmlUrl,
+                DefaultBranch = defaultBranch,
+                IsPrivate = isPrivate,
+                IsRetired = isRetired,
+                IsTwinObserver = isTwin,
+                PipelineId = pipelineId,
+                LatestCommitSha = latestSha ?? prev?.LatestCommitSha,
+                LatestCommitMessage = latestMsg ?? prev?.LatestCommitMessage,
+                LatestCommitAuthor = latestAuthor ?? prev?.LatestCommitAuthor,
+                LatestCommitAt = latestCommitAt ?? prev?.LatestCommitAt,
+                OpenPullRequestCount = openPrs,
+                OpenIssueCount = openIssues,
+                WebhookRegistered = prev?.WebhookRegistered ?? false,
+                WebhookId = prev?.WebhookId,
+                LastWebhookStatusCode = prev?.LastWebhookStatusCode,
+                LastWebhookDeliveryAt = prev?.LastWebhookDeliveryAt,
+                UpdatedAt = now
+            });
         }
 
-        // Webhooks & recent delivery check
-        var hooksJson = await GetStringOrNullAsync(client, $"repos/{Cmdemo1PlatformCatalog.GitHubOrg}/{repoName}/hooks", ct);
+        return res;
+    }
+
+    private async Task SyncWorkflowRunsForRepoAsync(
+        string repoName,
+        bool fullBackfill,
+        DateTimeOffset now,
+        List<PipelineRunSnapshot> runSnapshots,
+        List<ObservedEvent> newEvents,
+        CancellationToken ct)
+    {
+        var runsCount = fullBackfill ? 15 : 8;
+        var res = await gh.GetApiAsync($"repos/{Cmdemo1PlatformCatalog.GitHubOrg}/{repoName}/actions/runs?per_page={runsCount}", bypassPause: false, ct);
+        if (!res.Success || string.IsNullOrWhiteSpace(res.Body))
+        {
+            return;
+        }
+
+        // If response came from 304 ETag cache during incremental poll, skip re-writing snapshots
+        if (res.FromCache304 && !fullBackfill)
+        {
+            return;
+        }
+
+        var pipelineId = Cmdemo1PlatformCatalog.ResolvePipelineIdFromRepository(repoName);
+        var deployable = Cmdemo1PlatformCatalog.ResolveDeployableFromRepository(repoName);
+
+        using var runsDoc = JsonDocument.Parse(res.Body);
+        if (!runsDoc.RootElement.TryGetProperty("workflow_runs", out var runsArr) || runsArr.ValueKind != JsonValueKind.Array)
+        {
+            return;
+        }
+
+        foreach (var r in runsArr.EnumerateArray())
+        {
+            var runId = r.GetProperty("id").GetInt64();
+            var runNumber = r.TryGetProperty("run_number", out var rn) ? rn.GetInt64() : runId;
+            var workflowName = r.TryGetProperty("name", out var wn) ? wn.GetString() ?? "Workflow" : "Workflow";
+            var displayTitle = r.TryGetProperty("display_title", out var dt) ? dt.GetString() ?? workflowName : workflowName;
+            var eventName = r.TryGetProperty("event", out var ev) ? ev.GetString() ?? "push" : "push";
+            var branch = r.TryGetProperty("head_branch", out var hb) ? hb.GetString() ?? "" : "";
+            var headSha = r.TryGetProperty("head_sha", out var hs) ? hs.GetString() ?? "" : "";
+            var status = r.TryGetProperty("status", out var st) ? st.GetString() ?? "completed" : "completed";
+            var conclusion = r.TryGetProperty("conclusion", out var co) && co.ValueKind == JsonValueKind.String ? co.GetString() : null;
+            var runUrl = r.TryGetProperty("html_url", out var ru) ? ru.GetString() ?? "" : "";
+            var createdAt = r.TryGetProperty("created_at", out var ca) && DateTimeOffset.TryParse(ca.GetString(), out var cdt) ? cdt.ToUniversalTime() : now;
+            var updatedAt = r.TryGetProperty("updated_at", out var ua) && DateTimeOffset.TryParse(ua.GetString(), out var udt) ? udt.ToUniversalTime() : now;
+            var version = ExtractLeadingVersion(displayTitle);
+
+            runSnapshots.Add(new PipelineRunSnapshot
+            {
+                Id = $"{repoName}:{runId}",
+                RunId = runId,
+                RunNumber = runNumber,
+                Repository = repoName,
+                PipelineId = pipelineId,
+                WorkflowName = workflowName,
+                DisplayTitle = displayTitle,
+                Version = version,
+                EventName = eventName,
+                Branch = branch,
+                HeadSha = headSha,
+                Status = status,
+                Conclusion = conclusion,
+                Url = runUrl,
+                CreatedAt = createdAt,
+                UpdatedAt = updatedAt
+            });
+
+            if (status == "completed")
+            {
+                newEvents.Add(new ObservedEvent
+                {
+                    EventId = $"ghrun-{runId}",
+                    IdempotencyKey = $"gh-run:{repoName}:{runId}:{status}",
+                    Source = EventSourceKind.GitHub,
+                    SourceEventId = runId.ToString(CultureInfo.InvariantCulture),
+                    EventType = "dev.cdevents.pipelineRun.finished",
+                    SubjectType = "pipelineRun",
+                    SubjectId = $"{repoName}:run:{runId}",
+                    Predicate = "finished",
+                    OccurredAt = updatedAt,
+                    IngestedAt = now,
+                    Channel = fullBackfill ? IngestionChannel.Backfill : IngestionChannel.Poll,
+                    CorrelationId = string.IsNullOrEmpty(headSha) ? null : $"sha:{headSha}",
+                    ChainId = string.IsNullOrEmpty(headSha) ? null : $"sha:{headSha}",
+                    PipelineId = pipelineId,
+                    DeployableName = deployable,
+                    Actor = "github-actions",
+                    Outcome = conclusion switch
+                    {
+                        "success" => EventOutcome.Success,
+                        "failure" or "timed_out" => EventOutcome.Failure,
+                        "cancelled" => EventOutcome.Canceled,
+                        "skipped" => EventOutcome.Skipped,
+                        _ => EventOutcome.None
+                    },
+                    Summary = $"[{repoName}/{branch}] {workflowName} #{runNumber} {conclusion ?? status}",
+                    SourceUrl = runUrl,
+                    PayloadJson = r.GetRawText()
+                });
+            }
+        }
+    }
+
+    private async Task<WebhookRegistrationStatus?> FetchWebhookStatusForRepoAsync(
+        string repoName,
+        bool includeDeliveries,
+        DateTimeOffset now,
+        CancellationToken ct)
+    {
+        var res = await gh.GetApiAsync($"repos/{Cmdemo1PlatformCatalog.GitHubOrg}/{repoName}/hooks", bypassPause: false, ct);
+        if (!res.Success || string.IsNullOrWhiteSpace(res.Body))
+        {
+            return null;
+        }
+
         var webhookRegistered = false;
         long? webhookId = null;
         int? lastDeliveryStatus = null;
         DateTimeOffset? lastDeliveryAt = null;
         string? hookUrl = null;
 
-        if (!string.IsNullOrWhiteSpace(hooksJson))
+        using var hooksDoc = JsonDocument.Parse(res.Body);
+        if (hooksDoc.RootElement.ValueKind == JsonValueKind.Array)
         {
-            using var hooksDoc = JsonDocument.Parse(hooksJson);
-            if (hooksDoc.RootElement.ValueKind == JsonValueKind.Array)
+            foreach (var hook in hooksDoc.RootElement.EnumerateArray())
             {
-                foreach (var hook in hooksDoc.RootElement.EnumerateArray())
+                var active = hook.TryGetProperty("active", out var act) && act.ValueKind == JsonValueKind.True;
+                var url = hook.TryGetProperty("config", out var cfg) && cfg.TryGetProperty("url", out var u) ? u.GetString() : null;
+                if (!string.IsNullOrWhiteSpace(url) && url.EndsWith("/hooks/github", StringComparison.OrdinalIgnoreCase))
                 {
-                    var active = hook.TryGetProperty("active", out var act) && act.ValueKind == JsonValueKind.True;
-                    var url = hook.TryGetProperty("config", out var cfg) && cfg.TryGetProperty("url", out var u) ? u.GetString() : null;
-                    if (!string.IsNullOrWhiteSpace(url) && url.EndsWith("/hooks/github", StringComparison.OrdinalIgnoreCase))
-                    {
-                        webhookRegistered = active;
-                        webhookId = hook.GetProperty("id").GetInt64();
-                        hookUrl = url;
+                    webhookRegistered = active;
+                    webhookId = hook.GetProperty("id").GetInt64();
+                    hookUrl = url;
 
-                        if (fullBackfill)
+                    if (includeDeliveries)
+                    {
+                        var delRes = await gh.GetApiAsync($"repos/{Cmdemo1PlatformCatalog.GitHubOrg}/{repoName}/hooks/{webhookId.Value}/deliveries?per_page=1", bypassPause: false, ct);
+                        if (delRes.Success && !string.IsNullOrWhiteSpace(delRes.Body))
                         {
-                            var deliveriesJson = await GetStringOrNullAsync(client, $"repos/{Cmdemo1PlatformCatalog.GitHubOrg}/{repoName}/hooks/{webhookId.Value}/deliveries?per_page=2", ct);
-                            if (!string.IsNullOrWhiteSpace(deliveriesJson))
+                            using var delDoc = JsonDocument.Parse(delRes.Body);
+                            if (delDoc.RootElement.ValueKind == JsonValueKind.Array && delDoc.RootElement.GetArrayLength() > 0)
                             {
-                                using var delDoc = JsonDocument.Parse(deliveriesJson);
-                                if (delDoc.RootElement.ValueKind == JsonValueKind.Array && delDoc.RootElement.GetArrayLength() > 0)
-                                {
-                                    var firstDel = delDoc.RootElement[0];
-                                    lastDeliveryStatus = firstDel.TryGetProperty("status_code", out var sc) && sc.TryGetInt32(out var scv) ? scv : null;
-                                    lastDeliveryAt = firstDel.TryGetProperty("delivered_at", out var da) && DateTimeOffset.TryParse(da.GetString(), out var ddt)
-                                        ? ddt.ToUniversalTime()
-                                        : null;
-                                }
+                                var firstDel = delDoc.RootElement[0];
+                                lastDeliveryStatus = firstDel.TryGetProperty("status_code", out var sc) && sc.TryGetInt32(out var scv) ? scv : null;
+                                lastDeliveryAt = firstDel.TryGetProperty("delivered_at", out var da) && DateTimeOffset.TryParse(da.GetString(), out var ddt)
+                                    ? ddt.ToUniversalTime()
+                                    : null;
                             }
                         }
-                        break;
                     }
+                    break;
                 }
             }
         }
 
-        webhookStatuses.Add(new WebhookRegistrationStatus
+        return new WebhookRegistrationStatus
         {
             Id = $"github:{repoName}",
             Source = "github",
@@ -669,40 +837,15 @@ public sealed partial class GitHubSyncService(
             LastDeliveryAt = lastDeliveryAt,
             Detail = webhookRegistered ? "active" : "not registered",
             CheckedAt = now
-        });
-
-        var openIssues = root.TryGetProperty("open_issues_count", out var oic) && oic.TryGetInt32(out var oi) ? Math.Max(0, oi - openPrs) : 0;
-
-        repoSnapshots.Add(new RepositorySnapshot
-        {
-            Name = repoName,
-            FullName = $"{Cmdemo1PlatformCatalog.GitHubOrg}/{repoName}",
-            Url = htmlUrl,
-            DefaultBranch = defaultBranch,
-            IsPrivate = isPrivate,
-            IsRetired = isRetired,
-            IsTwinObserver = isTwin,
-            PipelineId = pipelineId,
-            LatestCommitSha = latestSha,
-            LatestCommitMessage = latestMsg,
-            LatestCommitAuthor = latestAuthor,
-            LatestCommitAt = latestCommitAt,
-            OpenPullRequestCount = openPrs,
-            OpenIssueCount = openIssues,
-            WebhookRegistered = webhookRegistered,
-            WebhookId = webhookId,
-            LastWebhookStatusCode = lastDeliveryStatus,
-            LastWebhookDeliveryAt = lastDeliveryAt,
-            UpdatedAt = now
-        });
+        };
     }
 
-    private async Task SyncWorkItemsAsync(HttpClient client, bool queryBoardGraphQl, DateTimeOffset now, CancellationToken ct)
+    private async Task SyncWorkItemsAsync(bool queryBoardGraphQl, DateTimeOffset now, CancellationToken ct)
     {
         var itemsById = new Dictionary<string, WorkItemSnapshot>(StringComparer.OrdinalIgnoreCase);
 
-        // First hydrate rich history & environment deployment correlation from cmdemo1-system status/workitems.json
-        var workItemsJson = await FetchRawFileAsync(client, Cmdemo1PlatformCatalog.SystemRepository, "status", "workitems.json", ct);
+        // 0-quota raw read of cmdemo1-system status/workitems.json
+        var workItemsJson = await gh.GetRawPublicAsync(Cmdemo1PlatformCatalog.GitHubOrg, Cmdemo1PlatformCatalog.SystemRepository, "status", "workitems.json", ct);
         if (!string.IsNullOrWhiteSpace(workItemsJson))
         {
             using var doc = JsonDocument.Parse(workItemsJson);
@@ -751,13 +894,13 @@ public sealed partial class GitHubSyncService(
             }
         }
 
-        // Overlay authoritative live GitHub Projects v2 board (Project 679) columns via slim GraphQL (cost-efficient)
-        if (!queryBoardGraphQl)
+        if (!queryBoardGraphQl || gh.IsGraphQlPaused(out _))
         {
-            await store.UpsertWorkItemsAsync(itemsById.Values.ToList(), ct);
+            if (itemsById.Count > 0) await store.UpsertWorkItemsAsync(itemsById.Values.ToList(), ct);
             return;
         }
 
+        // Slim GraphQL query (2 pages max = 200 newest board items)
         var graphqlQuery = """
         query($nodeId: ID!, $cursor: String) {
           node(id: $nodeId) {
@@ -788,21 +931,15 @@ public sealed partial class GitHubSyncService(
         """;
 
         string? cursor = null;
-        for (var page = 0; page < 6; page++)
+        for (var page = 0; page < 3; page++)
         {
-            var body = JsonSerializer.Serialize(new
-            {
-                query = graphqlQuery,
-                variables = new { nodeId = Cmdemo1PlatformCatalog.WorkItemsProjectNodeId, cursor }
-            });
-            using var content = new StringContent(body, Encoding.UTF8, "application/json");
-            using var resp = await client.PostAsync("graphql", content, ct);
-            if (!resp.IsSuccessStatusCode)
+            var resp = await gh.PostGraphQlAsync(graphqlQuery, new { nodeId = Cmdemo1PlatformCatalog.WorkItemsProjectNodeId, cursor }, ct);
+            if (!resp.Success || string.IsNullOrWhiteSpace(resp.Body))
             {
                 break;
             }
-            var respJson = await resp.Content.ReadAsStringAsync(ct);
-            using var gDoc = JsonDocument.Parse(respJson);
+
+            using var gDoc = JsonDocument.Parse(resp.Body);
             if (!gDoc.RootElement.TryGetProperty("data", out var data) ||
                 !data.TryGetProperty("node", out var node) ||
                 node.ValueKind != JsonValueKind.Object ||
@@ -890,44 +1027,10 @@ public sealed partial class GitHubSyncService(
             }
         }
 
-        await store.UpsertWorkItemsAsync(itemsById.Values.ToList(), ct);
-    }
-
-    private HttpClient CreateClient()
-    {
-        var client = httpClientFactory.CreateClient("github");
-        client.BaseAddress = new Uri("https://api.github.com/");
-        client.DefaultRequestHeaders.UserAgent.ParseAdd("cmdemo1-digitaltwin/1.0");
-        client.DefaultRequestHeaders.Accept.Add(new MediaTypeWithQualityHeaderValue("application/vnd.github+json"));
-        client.DefaultRequestHeaders.Add("X-GitHub-Api-Version", "2022-11-28");
-        if (!string.IsNullOrWhiteSpace(options.Value.GitHubToken))
+        if (itemsById.Count > 0)
         {
-            client.DefaultRequestHeaders.Authorization = new AuthenticationHeaderValue("Bearer", options.Value.GitHubToken);
+            await store.UpsertWorkItemsAsync(itemsById.Values.ToList(), ct);
         }
-        return client;
-    }
-
-    private static async Task<string?> GetStringOrNullAsync(HttpClient client, string path, CancellationToken ct)
-    {
-        using var resp = await client.GetAsync(path, ct);
-        if (!resp.IsSuccessStatusCode)
-        {
-            return null;
-        }
-        return await resp.Content.ReadAsStringAsync(ct);
-    }
-
-    private static async Task<string?> FetchRawFileAsync(HttpClient client, string repo, string branch, string filePath, CancellationToken ct)
-    {
-        using var req = new HttpRequestMessage(HttpMethod.Get, $"repos/{Cmdemo1PlatformCatalog.GitHubOrg}/{repo}/contents/{filePath}?ref={Uri.EscapeDataString(branch)}");
-        req.Headers.Accept.Clear();
-        req.Headers.Accept.Add(new MediaTypeWithQualityHeaderValue("application/vnd.github.raw+json"));
-        using var resp = await client.SendAsync(req, ct);
-        if (!resp.IsSuccessStatusCode)
-        {
-            return null;
-        }
-        return await resp.Content.ReadAsStringAsync(ct);
     }
 
     private static int? ExtractIssueNumber(string title, string branch)

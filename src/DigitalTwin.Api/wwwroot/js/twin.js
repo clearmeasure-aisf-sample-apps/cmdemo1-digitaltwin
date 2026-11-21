@@ -112,6 +112,14 @@
     const ghActive = ghHooks.filter(w => w.isActive).length;
     setPill('gh', ghHooks.length ? `${ghActive}/${ghHooks.length}` : (cursors.github?.status || '--'), ghActive === ghHooks.length && ghHooks.length > 0 ? 'ok' : 'warn');
 
+    const q = s.gitHubQuota;
+    if (q) {
+      const rem = q.coreRemaining != null ? `${q.coreRemaining}/${q.coreLimit || 5000}` : `${q.twinRestCallsThisHour}/${q.budgetPerHourTarget}/h`;
+      const quotaText = q.mode === 'paused' ? `PAUSED (${rem})` : `${rem} · 304:${q.twinCache304HitsTotal}`;
+      const quotaCls = q.mode === 'paused' ? 'err' : q.mode === 'backoff' ? 'warn' : 'ok';
+      setPill('quota', quotaText, quotaCls);
+    }
+
     const octoHooks = (s.webhooks || []).filter(w => w.source === 'octopus');
     const octoOk = octoHooks.some(w => w.isActive);
     setPill('octo', octoOk ? 'SUB ON' : (cursors.octopus?.status || '--'), octoOk ? 'ok' : cursors.octopus?.status === 'ok' ? 'warn' : 'err');

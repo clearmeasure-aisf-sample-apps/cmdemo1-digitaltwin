@@ -83,7 +83,14 @@ public interface IRealtimeEventPublisher
 public interface IGitHubSyncService
 {
     Task SyncAsync(bool fullBackfill, CancellationToken ct);
+    Task SyncBoardOnlyAsync(CancellationToken ct);
+    Task SyncRepositoryAsync(string repositoryName, CancellationToken ct);
     Task<IReadOnlyList<WebhookRegistrationStatus>> EnsureWebhooksRegisteredAsync(string twinPublicBaseUrl, CancellationToken ct);
+}
+
+public interface IGitHubRateLimitProvider
+{
+    GitHubRateLimitStatus GetStatus();
 }
 
 public interface IOctopusSyncService

@@ -13,6 +13,7 @@ namespace DigitalTwin.Application.Services;
 
 public sealed class TwinQueryService(
     ITwinStore store,
+    IGitHubRateLimitProvider rateLimitProvider,
     TimeProvider timeProvider)
 {
     private static readonly string[] ActiveStageNames = ["tdd", "uat", "prod"];
@@ -102,6 +103,7 @@ public sealed class TwinQueryService(
             CriticalDriftCount: drifts.Count(d => d.Severity == DriftSeverity.Critical),
             IngestionCursors: cursors,
             Webhooks: webhooks,
+            GitHubQuota: rateLimitProvider.GetStatus(),
             CostMonthToDateUsd: costMtd,
             CostYesterdayUsd: costYesterday);
     }

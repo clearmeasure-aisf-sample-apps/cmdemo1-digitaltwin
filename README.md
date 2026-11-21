@@ -66,9 +66,9 @@ All terminology follows Domain-Driven Design across eight bounded contexts (usin
 ## How Ingestion Works (Hooks + Reconciliation Polls)
 
 1. **Startup Backfill & Full Rebuild**: On startup (and via `POST /api/admin/rebuild`), `BackfillCoordinator` hydrates desired state (`cmdemo1-system/system.json`, `environments/*/versions.json`, `status/*`), GitHub repos/PRs/runs/Project #679 board, Octopus `Spaces-355`, Azure Resource Graph + ARM revisions, and live HTTP probes, then evaluates drift.
-2. **GitHub**:
-   - **Webhook** `POST /hooks/github` verifies `X-Hub-Signature-256` (HMAC-SHA256 with `WEBHOOK_SECRET`), normalizes `push`, `pull_request`, `workflow_run`, `workflow_job`, `check_run`, `issues`, `release`, `deployment`, `package`, etc., and streams via SignalR/SSE.
-   - **Reconciliation Poller** (every 60s) syncs commits, PRs, runs, GitOps files, and Project #679 GraphQL status columns.
+2. **GitHub (Rate-Budgeted <= 1,500 REST calls/hr)**:
+   - **Webhook** `POST /hooks/github` verifies `X-Hub-Signature-256` (HMAC-SHA256 with `WEBHOOK_SECRET`), normalizes `push`, `pull_request`, `workflow_run`, `workflow_job`, `check_run`, `issues`, `release`, `deployment`, `package`, etc., streams via SignalR/SSE, and triggers a 15s-coalesced single-repo refresh.
+   - **Conditional & Batched Reconciliation**: Full backfill once at startup; incremental repo/workflow runs reconciliation every **10 minutes** using `If-None-Match` ETags (`304 Not Modified` = 0 quota), aliased GraphQL repo batching, and zero-quota `raw.githubusercontent.com` reads for `cmdemo1-system`; Project #679 GraphQL board check every **5 minutes**. Tracks `X-RateLimit-Remaining`, enters `backoff` below 1,000, pauses polling below 500, and exposes `gitHubQuota` on `/api/twin/summary`.
 3. **Octopus Deploy (`Spaces-355`)**:
    - **Webhook** `POST /hooks/octopus` verifies `X-Webhook-Secret` and ingests all event categories from the `cmdemo1-digitaltwin` subscription.
    - **Reconciliation Poller** (every 45s) syncs `/api/events`, releases, deployments, tasks, interruptions, runbooks, and deployment freezes.

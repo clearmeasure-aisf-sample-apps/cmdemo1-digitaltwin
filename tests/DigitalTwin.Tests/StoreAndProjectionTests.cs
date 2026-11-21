@@ -172,7 +172,7 @@ public sealed class StoreAndProjectionTests : IAsyncLifetime, IAsyncDisposable
             }
         ], CancellationToken.None);
 
-        var queries = new TwinQueryService(_store, TimeProvider.System);
+        var queries = new TwinQueryService(_store, new StubRateProvider(), TimeProvider.System);
         var explanation = await queries.ExplainItemAsync("1941", CancellationToken.None);
 
         Assert.True(explanation.Found);
@@ -193,5 +193,10 @@ public sealed class StoreAndProjectionTests : IAsyncLifetime, IAsyncDisposable
     {
         public Task PublishEventAsync(ObservedEvent observedEvent, CancellationToken ct) => Task.CompletedTask;
         public Task PublishStateRefreshedAsync(string reason, DateTimeOffset at, CancellationToken ct) => Task.CompletedTask;
+    }
+
+    private sealed class StubRateProvider : IGitHubRateLimitProvider
+    {
+        public GitHubRateLimitStatus GetStatus() => new(5000, 4800, 200, DateTimeOffset.UtcNow.AddHours(1), 5000, 4900, DateTimeOffset.UtcNow.AddHours(1), "normal", 0, 0, 0, 0, 0, 1500);
     }
 }

@@ -62,6 +62,8 @@ public static class DependencyInjection
         });
 
         services.AddSingleton<ITwinStore, EfTwinStore>();
+        services.AddSingleton<GitHubApiClient>();
+        services.AddSingleton<IGitHubRateLimitProvider>(sp => sp.GetRequiredService<GitHubApiClient>());
         services.AddSingleton<EventIngestionService>();
         services.AddSingleton<TwinQueryService>();
         services.AddSingleton<IGitHubSyncService, GitHubSyncService>();
