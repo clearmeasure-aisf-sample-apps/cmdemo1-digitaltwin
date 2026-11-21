@@ -155,8 +155,8 @@ Following the domain research in the prompt's prior-art references:
 
 ---
 
-## ADR-015: Event Grid Infra Deployment Is Opt-In
+## ADR-015: Event Grid System Topics Managed in Code
 
 - **Context**: `Microsoft.EventGrid` was registered on the subscription (by a subscription Owner) between 06:03 and 15:08 UTC on 2026-11-21. `register-hooks.sh` deployed `infra/eventgrid.bicep` automatically whenever it saw the provider as `Registered`, so the 15:08 and 15:40 deploys created and updated the Event Grid system topics and subscriptions in `rg-cmdemo1-nonprod` and `rg-cmdemo1-prod`, even though the instruction for this work was not to run Event Grid infra.
 - **Decision**: The deploy now only reports the provider state and the existing system topics (read-only). Deploying Event Grid infra requires `ENABLE_EVENT_GRID_DEPLOY=true`, and the script no longer attempts `az provider register`. The topics and subscriptions that already exist were left in place: they deliver to `/hooks/azure`, and those events go through the durable intake like every other webhook.
-- **Open**: Keeping or removing those resources is Jeffrey's call.
+- **Decision (Jeffrey, 2026-11-21)**: Keep `eg-twin-rg-cmdemo1-nonprod` and `eg-twin-rg-cmdemo1-prod` and manage them in code. `ENABLE_EVENT_GRID_DEPLOY` now defaults to `true` in `ci-deploy.yml` (a repo variable `ENABLE_EVENT_GRID_DEPLOY=false` turns it off). Before each deploy, `register-hooks.sh` runs `what-if` and refuses any Create/Delete of an existing topic. Afterwards it checks that the topic's resource ID and `systemData.createdAt` are unchanged (no recreate) and prints the subscription state and 24h delivery metrics. CI also proves the path end to end: a harmless tag change on the twin-owned `log-cmdemo1-twin` in `rg-cmdemo1-nonprod` must arrive through `/hooks/azure` and appear in the event journal.
