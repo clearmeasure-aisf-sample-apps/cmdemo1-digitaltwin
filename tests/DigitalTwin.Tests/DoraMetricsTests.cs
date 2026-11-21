@@ -1,5 +1,5 @@
-using DigitalTwin.Domain.Measurement;
-using DigitalTwin.Domain.ReleaseAndDelivery;
+using DigitalTwin.Core.Measurement;
+using DigitalTwin.Core.ReleaseAndDelivery;
 using Xunit;
 
 namespace DigitalTwin.Tests;

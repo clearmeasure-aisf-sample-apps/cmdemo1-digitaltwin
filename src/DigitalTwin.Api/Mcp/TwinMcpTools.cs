@@ -1,7 +1,7 @@
 using System.ComponentModel;
 using System.Text.Json;
 using DigitalTwin.Application.Services;
-using DigitalTwin.Domain.Observation;
+using DigitalTwin.Core.Observation;
 using ModelContextProtocol.Server;
 
 namespace DigitalTwin.Api.Mcp;
@@ -12,7 +12,7 @@ public sealed class TwinMcpTools(TwinQueryService queries)
     private static readonly JsonSerializerOptions JsonOptions = new(JsonSerializerDefaults.Web) { WriteIndented = true };
 
     [McpServerTool(Name = "get_summary", Title = "Get Digital Twin Summary", ReadOnly = true, Idempotent = true)]
-    [Description("Get the complete platform-level digital twin summary of cmdemo1: pipelines, deployment stages (tdd/uat/prod/pool), DORA metrics, active drift count, work board summary, and ingestion health.")]
+    [Description("Get the complete platform-level digital twin summary of cmdemo1: pipelines, deployment stages (tdd/uat/prod/pool), DORA metrics, active drift count, work board summary, ingestion health, GitHub quota, and durable intake queue (depth, oldest age, dead letters).")]
     public async Task<string> GetSummaryAsync(CancellationToken ct = default)
         => JsonSerializer.Serialize(await queries.GetSummaryAsync(ct), JsonOptions);
 
@@ -63,6 +63,11 @@ public sealed class TwinMcpTools(TwinQueryService queries)
             ? JsonSerializer.Serialize(new { error = $"Pipeline '{pipelineId}' not found." }, JsonOptions)
             : JsonSerializer.Serialize(match, JsonOptions);
     }
+
+    [McpServerTool(Name = "get_intake_queue", Title = "Get Durable Intake Queue Status", ReadOnly = true, Idempotent = true)]
+    [Description("Get the durable intake queue status: transport, queue depth (captured but not yet applied), oldest pending event age, dead-letter count, captured/processed totals.")]
+    public async Task<string> GetIntakeQueueAsync(CancellationToken ct = default)
+        => JsonSerializer.Serialize(await queries.GetIntakeQueueAsync(ct), JsonOptions);
 
     [McpServerTool(Name = "explain_item", Title = "Explain Item Causal Chain", ReadOnly = true, Idempotent = true)]
     [Description("Trace an issue number, PR number, release version (e.g. 2.4.2664), commit SHA, or Octopus task/deployment ID across Work -> PR -> Build -> Release -> Deployments -> Azure Runtime.")]

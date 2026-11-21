@@ -1,0 +1,7 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <RootNamespace>DigitalTwin.Core</RootNamespace>
+  </PropertyGroup>
+
+</Project>

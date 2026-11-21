@@ -1,12 +1,13 @@
-using DigitalTwin.Application.Abstractions;
+using DigitalTwin.Core.Ports;
 using DigitalTwin.Application.Services;
-using DigitalTwin.Domain.BuildAndArtifact;
-using DigitalTwin.Domain.Observation;
-using DigitalTwin.Domain.ReleaseAndDelivery;
-using DigitalTwin.Domain.RuntimeAndPlatform;
-using DigitalTwin.Domain.SourceAndChange;
-using DigitalTwin.Domain.Work;
-using DigitalTwin.Infrastructure.Persistence;
+using DigitalTwin.Core.BuildAndArtifact;
+using DigitalTwin.Core.Intake;
+using DigitalTwin.Core.Observation;
+using DigitalTwin.Core.ReleaseAndDelivery;
+using DigitalTwin.Core.RuntimeAndPlatform;
+using DigitalTwin.Core.SourceAndChange;
+using DigitalTwin.Core.Work;
+using DigitalTwin.Persistence;
 using Microsoft.Data.Sqlite;
 using Microsoft.EntityFrameworkCore;
 using Xunit;
@@ -43,7 +44,6 @@ public sealed class StoreAndProjectionTests : IAsyncLifetime, IAsyncDisposable
     [Fact]
     public async Task AppendEventDeduplicatesByIdempotencyKey()
     {
-        var ingestion = new EventIngestionService(_store, new NoopPublisher(), TimeProvider.System);
         var ev1 = new ObservedEvent
         {
             EventId = "ev-1",
@@ -74,11 +74,49 @@ public sealed class StoreAndProjectionTests : IAsyncLifetime, IAsyncDisposable
             Summary = "Duplicate Push 1"
         };
 
-        Assert.True(await ingestion.IngestAsync(ev1, CancellationToken.None));
-        Assert.False(await ingestion.IngestAsync(ev2, CancellationToken.None));
+        Assert.True(await _store.AppendEventIfNewAsync(ev1, CancellationToken.None));
+        Assert.False(await _store.AppendEventIfNewAsync(ev2, CancellationToken.None));
+        var existing = await _store.FindExistingIdempotencyKeysAsync(["github:delivery-abc", "github:unknown"], CancellationToken.None);
+        Assert.Equal(["github:delivery-abc"], existing);
 
         var all = await _store.QueryEventsAsync(null, null, null, null, null, 50, CancellationToken.None);
         Assert.Single(all);
+    }
+
+    [Fact]
+    public async Task DuplicateKeysKeepTheEarliestObservationRegardlessOfProcessingOrder()
+    {
+        static ObservedEvent Observation(DateTimeOffset ingestedAt, string summary) => new()
+        {
+            EventId = "redelivered-1",
+            IdempotencyKey = "github:redelivered-1",
+            Source = EventSourceKind.GitHub,
+            SourceEventId = "redelivered-1",
+            EventType = "dev.cdevents.repository.modified",
+            SubjectType = "repository",
+            SubjectId = "cmdemo1-digitaltwin",
+            Predicate = "pinged",
+            OccurredAt = ingestedAt,
+            IngestedAt = ingestedAt,
+            Summary = summary
+        };
+
+        var first = DateTimeOffset.Parse("2026-11-21T05:00:00Z", System.Globalization.CultureInfo.InvariantCulture);
+        var later = first.AddSeconds(3);
+
+        // Later redelivery processed first, original second
+        Assert.Single(await _store.AppendEventsReturnNewAsync([Observation(later, "redelivery")], CancellationToken.None));
+        Assert.Empty(await _store.AppendEventsReturnNewAsync([Observation(first, "original")], CancellationToken.None));
+
+        var stored = Assert.Single(await _store.QueryEventsAsync(null, null, null, null, null, 10, CancellationToken.None));
+        Assert.Equal("original", stored.Summary);
+        Assert.Equal(first, stored.IngestedAt);
+
+        // Opposite order converges on the same row
+        await _store.ClearEventJournalAsync(CancellationToken.None);
+        await _store.AppendEventsReturnNewAsync([Observation(first, "original")], CancellationToken.None);
+        await _store.AppendEventsReturnNewAsync([Observation(later, "redelivery")], CancellationToken.None);
+        Assert.Equal("original", Assert.Single(await _store.QueryEventsAsync(null, null, null, null, null, 10, CancellationToken.None)).Summary);
     }
 
     [Fact]
@@ -172,7 +210,7 @@ public sealed class StoreAndProjectionTests : IAsyncLifetime, IAsyncDisposable
             }
         ], CancellationToken.None);
 
-        var queries = new TwinQueryService(_store, new StubRateProvider(), TimeProvider.System);
+        var queries = new TwinQueryService(_store, new StubRateProvider(), new StubIntakeMonitor(), TimeProvider.System);
         var explanation = await queries.ExplainItemAsync("1941", CancellationToken.None);
 
         Assert.True(explanation.Found);
@@ -189,14 +227,16 @@ public sealed class StoreAndProjectionTests : IAsyncLifetime, IAsyncDisposable
         public TwinDbContext CreateDbContext() => new(options);
     }
 
-    private sealed class NoopPublisher : IRealtimeEventPublisher
+    private sealed class StubIntakeMonitor : IIntakeQueueMonitor
     {
-        public Task PublishEventAsync(ObservedEvent observedEvent, CancellationToken ct) => Task.CompletedTask;
-        public Task PublishStateRefreshedAsync(string reason, DateTimeOffset at, CancellationToken ct) => Task.CompletedTask;
+        public Task<IntakeQueueStatus> GetStatusAsync(CancellationToken ct)
+            => Task.FromResult(new IntakeQueueStatus("LocalDurable", true, 0, null, null, 0, 0, 0, null, null, 0, 0, null));
     }
 
     private sealed class StubRateProvider : IGitHubRateLimitProvider
     {
         public GitHubRateLimitStatus GetStatus() => new(5000, 4800, 200, DateTimeOffset.UtcNow.AddHours(1), 5000, 4900, DateTimeOffset.UtcNow.AddHours(1), "normal", 0, 0, 0, 0, 0, 1500);
+        public bool IsRestPaused(out string reason) { reason = string.Empty; return false; }
+        public bool IsRestBackoff() => false;
     }
 }

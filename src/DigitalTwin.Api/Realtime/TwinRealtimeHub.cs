@@ -2,8 +2,8 @@ using System.Collections.Concurrent;
 using System.Text.Json;
 using System.Text.Json.Serialization;
 using System.Threading.Channels;
-using DigitalTwin.Application.Abstractions;
-using DigitalTwin.Domain.Observation;
+using DigitalTwin.Core.Ports;
+using DigitalTwin.Core.Observation;
 using Microsoft.AspNetCore.SignalR;
 
 namespace DigitalTwin.Api.Realtime;

@@ -9,9 +9,14 @@
   </ItemGroup>
 
   <ItemGroup>
+    <ProjectReference Include="..\DigitalTwin.Core\DigitalTwin.Core.csproj" />
     <ProjectReference Include="..\DigitalTwin.Application\DigitalTwin.Application.csproj" />
-    <ProjectReference Include="..\DigitalTwin.Domain\DigitalTwin.Domain.csproj" />
-    <ProjectReference Include="..\DigitalTwin.Infrastructure\DigitalTwin.Infrastructure.csproj" />
+    <ProjectReference Include="..\DigitalTwin.GitHub\DigitalTwin.GitHub.csproj" />
+    <ProjectReference Include="..\DigitalTwin.Octopus\DigitalTwin.Octopus.csproj" />
+    <ProjectReference Include="..\DigitalTwin.Azure\DigitalTwin.Azure.csproj" />
+    <ProjectReference Include="..\DigitalTwin.Probes\DigitalTwin.Probes.csproj" />
+    <ProjectReference Include="..\DigitalTwin.Persistence\DigitalTwin.Persistence.csproj" />
+    <ProjectReference Include="..\DigitalTwin.Messaging\DigitalTwin.Messaging.csproj" />
   </ItemGroup>
 
 </Project>

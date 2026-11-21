@@ -1,7 +1,7 @@
 using System.Security.Cryptography;
 using System.Text;
-using DigitalTwin.Domain.Normalization;
-using DigitalTwin.Domain.Observation;
+using DigitalTwin.Core.Normalization;
+using DigitalTwin.Core.Observation;
 using Xunit;
 
 namespace DigitalTwin.Tests;

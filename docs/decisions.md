@@ -81,3 +81,62 @@ Following the domain research in the prompt's prior-art references:
   5. **Conservative Intervals**: Full backfill once at startup, incremental repo/actions reconciliation every **10 minutes** (`600s`, stretched 3x in backoff mode), and slim Project #679 GraphQL board reconciliation every **5 minutes** (`300s`).
   6. **Automatic Backoff & Pause**: Read `X-RateLimit-*` headers on every response. Below `1,000` remaining (or >= 900 twin calls/hr), enter `backoff` mode; below `500` remaining (or >= 1,400 twin calls/hr), enter `paused` mode until reset without clearing cached repository/webhook projections. Expose live quota metrics in `/api/twin/summary` (`gitHubQuota`) and the dashboard top bar.
   7. **CI/CD Restraint**: `scripts/register-hooks.sh` checks `/rate_limit` first, skips `PATCH` when an active hook already targets `/hooks/github`, and avoids tight polling loops in deployment scripts.
+
+---
+
+## ADR-009: Onion Architecture Project Layout
+
+- **Context**: The original `Domain` / `Application` / `Infrastructure` split put every adapter (EF Core, GitHub, Octopus, Azure) in one project, and ports lived in Application, so nothing stopped the domain or use cases from depending on integration code.
+- **Decision**:
+  - `DigitalTwin.Core` holds the domain model, the deterministic normalizers and domain services, the intake model, and every port. It has no project or package references (BCL only).
+  - `DigitalTwin.Application` holds use cases and references only Core (plus `Microsoft.Extensions.*` abstractions).
+  - Each external dependency gets its own adapter project referencing only Core: `GitHub`, `Octopus`, `Azure`, `Probes` (HTTP probes of cmdemo1 endpoints), `Persistence` (EF Core), and `Messaging` (Wolverine).
+  - `DigitalTwin.Api` is the only composition root. Each adapter exposes an `AddTwinXxx` registration plus its own options class (`GitHubOptions`, `OctopusOptions`, …), replacing the shared `TwinOptions`.
+  - `ArchitectureTests` checks both the csproj references and the compiled assembly references. It fails the build if Core references anything, if Application references an adapter or an integration package, if adapters reference each other, or if a new `src/` project isn't classified.
+- **Consequences**: The Application use cases depend only on ports, so the Wolverine handler calls the `IIntakeEventApplier` port (implemented in Application) instead of referencing Application from Messaging.
+
+---
+
+## ADR-010: Guaranteed Event Capture — Raw Intake Table + Wolverine Transactional Outbox
+
+- **Context**: Before this change, webhooks normalized and wrote straight into the journal and acknowledged afterwards. A crash, bug or redeploy between receipt and write lost the event, and webhook senders only redeliver on a non-2xx response.
+- **Decision**:
+  - Webhook receivers only verify the signature or shared secret, wrap the raw body in a `RawIntakeEvent` (headers allowlisted, so signatures and secrets are never stored), and call `IIntakePublisher`.
+  - `WolverineIntakePublisher` opens one SQL transaction. It inserts the gzipped raw row into `twin.raw_intake_events`, enlists Wolverine's outbox in the same transaction (`DatabaseEnvelopeTransaction`), publishes `TwinIntakeCaptured(rawEventId)`, and commits. The HTTP response is `200` only after the commit; any exception returns `503`.
+  - Pollers, probes and drift reconciliation publish through the same path via `ObservedEventIntake`, which first drops idempotency keys already in the journal so raw volume and SQL load stay small.
+  - `TwinIntakeCapturedHandler` → `IntakeEventApplier` normalizes deterministically, appends with dedupe on `IdempotencyKey`, pushes SignalR/SSE, and schedules coalesced follow-up refreshes (20s minimum per target, which keeps the GitHub rate budget unchanged).
+  - Failures get 3 retries with cooldown (1s, 5s, 15s), then `MoveToErrorQueue` (Wolverine dead-letter table); the raw row records attempts and `dead_lettered_at`. Admin endpoints replay dead letters and rebuild the journal from the raw table.
+- **Order independence**: when observations share an idempotency key, the journal keeps the earliest one (`ObservedEventPrecedence`: lowest `IngestedAt`, then a content tie-break). Live processing (parallel, retries, replays) and rebuild-in-capture-order therefore produce the same journal.
+- **Consequences**: The raw table is the system of record and the event journal is a pure projection of it. Reconciled snapshots (repos, runs, deployments, Azure resources) remain current-state reads written by pollers; losing one is self-healing on the next poll, so they are not part of the rebuild.
+
+---
+
+## ADR-011: Transport — SQL Server Transport Now, Azure Service Bus by Configuration Later
+
+- **Context**: `Microsoft.ServiceBus` is not registered on the subscription, and the deployment service principal is `Contributor` on the two resource groups only (it can't register providers or create role assignments).
+- **Decision**: `Twin:Messaging:Transport` selects the transport:
+  - `SqlServer`: Wolverine's SQL Server transport, a `wolverine.wolverine_queue_twin_intake` table in `sqldb-cmdemo1-twin`, polled every 1s. This is what the deployed twin uses.
+  - `LocalDurable`: an in-process durable local queue backed by the same SQL message store, for dev and integration tests.
+  - `AzureServiceBus`: queue `twin-intake` on `sb-cmdemo1-twin`, using a user-assigned managed identity (`id-cmdemo1-twin`, Service Bus Data Owner). `infra/servicebus.bicep` is deployed only when `deployServiceBus=true`, which also switches the container app's transport and identity. The emulator can be used through `ServiceBusConnectionString`.
+  - The outbox, inbox, raw table and dead letters stay in SQL Server for every transport. The message only carries the raw-row ID, so switching transports needs no code change.
+- **Consequences**: Enabling Service Bus requires a subscription Owner to run `az provider register --namespace Microsoft.ServiceBus` and grant `roleAssignments/write` (or pre-create the role assignment), then deploy with `deployServiceBus=true`.
+
+---
+
+## ADR-012: One Container App with Separated Hosted Services (Not Split Yet)
+
+- **Context**: Splitting intake and processor into two container apps in `cae-cmdemo1-twin` was considered.
+- **Decision**: Keep a single `ca-cmdemo1-twin` app. Intake (webhook endpoints), the processor (Wolverine listener), pollers (`TwinPollingHostedService`) and the follow-up scheduler run as separate hosted services, and `Twin:Messaging:ProcessorEnabled` / `Twin:EnableBackgroundWorkers` let the same image run as intake-only or processor-only.
+- **Why**:
+  - SignalR/SSE fan-out originates in the processor. A split would need a backplane (Azure SignalR or Redis, which means more providers and resources we can't register) or a notification queue back to the web app.
+  - The webhook URL registered on 9 GitHub repos and in Octopus belongs to the web app.
+  - The durability guarantee comes from commit-before-ack plus the SQL-backed queue, not from process isolation: a crashed processor loses nothing.
+  - A second always-on app roughly doubles compute cost.
+- **Consequences**: The split is configuration-only later (same image, two apps, different roles, `SqlServer` or `AzureServiceBus` transport). The integration test "processor down while webhooks arrive" already runs an intake-only host followed by a processor-only host against one database.
+
+---
+
+## ADR-013: Integration Tests on Real SQL Server via Testcontainers
+
+- **Decision**: The integration tests use Testcontainers SQL Server (one container per run, a fresh database per test host) and Wolverine tracked sessions (`TrackActivity().ExecuteAndWaitAsync`) to wait for processing. They run with no Azure credentials, and `TWIN_TEST_SQLSERVER` can point them at an existing server. EF unit tests still use in-memory SQLite.
+- **Covered**: duplicate delivery and webhook/poll overlap (captured 3 times, applied once); processor down while webhooks arrive (SQL Server transport, processed later); forced failure → 3 retries → dead letter → replay; rebuild from raw yields an identical journal; `503` when capture can't commit.

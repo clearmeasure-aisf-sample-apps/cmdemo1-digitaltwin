@@ -3,11 +3,14 @@ using DigitalTwin.Api.Auth;
 using DigitalTwin.Api.Endpoints;
 using DigitalTwin.Api.Mcp;
 using DigitalTwin.Api.Realtime;
-using DigitalTwin.Application.Abstractions;
-using DigitalTwin.Infrastructure;
-using DigitalTwin.Infrastructure.Options;
-using DigitalTwin.Infrastructure.Persistence;
-using Microsoft.EntityFrameworkCore;
+using DigitalTwin.Application;
+using DigitalTwin.Azure;
+using DigitalTwin.Core.Ports;
+using DigitalTwin.GitHub;
+using DigitalTwin.Messaging;
+using DigitalTwin.Octopus;
+using DigitalTwin.Persistence;
+using DigitalTwin.Probes;
 using Microsoft.Extensions.Options;
 
 var builder = WebApplication.CreateBuilder(args);
@@ -25,7 +28,24 @@ builder.Services.AddSignalR()
 builder.Services.AddSingleton<RealtimeEventPublisher>();
 builder.Services.AddSingleton<IRealtimeEventPublisher>(sp => sp.GetRequiredService<RealtimeEventPublisher>());
 
-builder.Services.AddDigitalTwinInfrastructure(builder.Configuration);
+// Composition root: the only place where outer adapters are bound to Core ports.
+builder.Services.Configure<TwinHostOptions>(opts =>
+{
+    opts.TwinApiKey = FirstNonEmpty(builder.Configuration["TWIN_API_KEY"], builder.Configuration["Twin:TwinApiKey"]);
+    opts.WebhookSecret = FirstNonEmpty(builder.Configuration["WEBHOOK_SECRET"], builder.Configuration["Twin:WebhookSecret"]);
+    opts.TwinPublicUrl = FirstNonEmpty(
+        builder.Configuration["TWIN_PUBLIC_URL"],
+        string.IsNullOrWhiteSpace(builder.Configuration["CONTAINER_APP_HOSTNAME"]) ? null : $"https://{builder.Configuration["CONTAINER_APP_HOSTNAME"]!.Trim()}",
+        builder.Configuration["Twin:TwinPublicUrl"]);
+});
+builder.Services
+    .AddTwinApplication(builder.Configuration)
+    .AddTwinPersistence(builder.Configuration)
+    .AddTwinGitHub(builder.Configuration)
+    .AddTwinOctopus(builder.Configuration)
+    .AddTwinAzure(builder.Configuration)
+    .AddTwinHealthProbes();
+builder.AddTwinMessaging();
 
 builder.Services.AddMcpServer(opts =>
 {
@@ -40,26 +60,11 @@ builder.Services.AddMcpServer(opts =>
 
 var app = builder.Build();
 
-// Ensure persistence database/tables exist across restarts (with startup retry for newly provisioned Azure SQL)
-using (var scope = app.Services.CreateScope())
-{
-    var dbFactory = scope.ServiceProvider.GetRequiredService<IDbContextFactory<TwinDbContext>>();
-    var startupLogger = scope.ServiceProvider.GetRequiredService<ILoggerFactory>().CreateLogger("Startup");
-    for (var attempt = 1; attempt <= 6; attempt++)
-    {
-        try
-        {
-            await using var db = await dbFactory.CreateDbContextAsync();
-            await db.Database.EnsureCreatedAsync();
-            break;
-        }
-        catch (Exception ex) when (attempt < 6)
-        {
-            startupLogger.LogDatabaseRetry(attempt, ex);
-            await Task.Delay(TimeSpan.FromSeconds(5));
-        }
-    }
-}
+// Order matters: model tables first (EF EnsureCreated is a no-op once any table exists), then raw intake;
+// Wolverine creates its own schema when the host starts.
+var startupLogger = app.Services.GetRequiredService<ILoggerFactory>().CreateLogger("Startup");
+await app.Services.InitializeTwinPersistenceAsync(startupLogger);
+await app.Services.InitializeTwinMessagingAsync();
 
 app.UseDefaultFiles();
 app.UseStaticFiles();
@@ -69,7 +74,7 @@ app.Use(async (context, next) =>
 {
     if (context.Request.Path.StartsWithSegments("/mcp", StringComparison.OrdinalIgnoreCase))
     {
-        var opts = context.RequestServices.GetRequiredService<IOptions<TwinOptions>>().Value;
+        var opts = context.RequestServices.GetRequiredService<IOptions<TwinHostOptions>>().Value;
         if (!TwinKeyAuth.IsAuthorized(context, opts, required: true))
         {
             context.Response.StatusCode = StatusCodes.Status401Unauthorized;
@@ -87,10 +92,8 @@ app.MapMcp("/mcp");
 
 app.Run();
 
-public partial class Program;
-
-internal static partial class StartupLog
+public partial class Program
 {
-    [LoggerMessage(Level = LogLevel.Warning, Message = "Database EnsureCreated attempt {Attempt} failed; retrying in 5s")]
-    public static partial void LogDatabaseRetry(this ILogger logger, int attempt, Exception ex);
+    private static string FirstNonEmpty(params string?[] candidates)
+        => candidates.FirstOrDefault(c => !string.IsNullOrWhiteSpace(c)) ?? string.Empty;
 }

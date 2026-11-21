@@ -1,7 +1,6 @@
 using System.Net;
 using System.Text;
-using DigitalTwin.Infrastructure.Clients;
-using DigitalTwin.Infrastructure.Options;
+using DigitalTwin.GitHub;
 using Microsoft.Extensions.Options;
 using Xunit;
 
@@ -44,7 +43,7 @@ public sealed class GitHubRateBudgetTests
         });
 
         var clientFactory = new StubHttpClientFactory(handler);
-        var opts = Microsoft.Extensions.Options.Options.Create(new TwinOptions { GitHubToken = "test-token" });
+        var opts = Microsoft.Extensions.Options.Options.Create(new GitHubOptions { Token = "test-token" });
         var gh = new GitHubApiClient(clientFactory, opts, TimeProvider.System);
 
         // 1. First request -> 200 OK, caches ETag
@@ -107,7 +106,7 @@ public sealed class GitHubRateBudgetTests
             return coreResp;
         });
 
-        var gh = new GitHubApiClient(new StubHttpClientFactory(handler), Microsoft.Extensions.Options.Options.Create(new TwinOptions { GitHubToken = "test" }), clock);
+        var gh = new GitHubApiClient(new StubHttpClientFactory(handler), Microsoft.Extensions.Options.Options.Create(new GitHubOptions { Token = "test" }), clock);
 
         var gql = await gh.PostGraphQlAsync("query { viewer { login } }", null, CancellationToken.None);
         Assert.True(gql.RateLimited);
