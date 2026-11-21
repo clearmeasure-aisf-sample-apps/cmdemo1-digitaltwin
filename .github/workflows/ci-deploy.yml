@@ -158,19 +158,29 @@ jobs:
           echo "twin_url=${TWIN_URL}" >> "$GITHUB_OUTPUT"
           echo "Deployed Digital Twin at ${TWIN_URL}"
 
-      - name: Wait for twin HTTPS healthcheck
+      - name: Wait for the new revision to be ready and serving this build
         env:
           TWIN_URL: ${{ steps.bicep.outputs.twin_url }}
+          EXPECTED_VERSION: 1.0.${{ github.run_number }}
         run: |
-          set -euo pipefail
-          for i in $(seq 1 30); do
-            if curl -fsS "${TWIN_URL}/_healthcheck" | grep -q "Healthy"; then
-              echo "Twin is healthy at ${TWIN_URL}"
+          set -uo pipefail
+          RG=rg-cmdemo1-nonprod; APP=ca-cmdemo1-twin
+          az extension add --name containerapp --upgrade --only-show-errors --output none
+          for i in $(seq 1 60); do
+            LATEST=$(az containerapp show -g "$RG" -n "$APP" --query properties.latestRevisionName -o tsv)
+            READY=$(az containerapp show -g "$RG" -n "$APP" --query properties.latestReadyRevisionName -o tsv)
+            SERVED=$(curl -fsS "${TWIN_URL}/health" 2>/dev/null | jq -r '.version // "unknown"')
+            echo "$(date -u +%T) latest=${LATEST} ready=${READY} served=${SERVED} expected=${EXPECTED_VERSION}"
+            if [ "$LATEST" = "$READY" ] && [ "$SERVED" = "$EXPECTED_VERSION" ]; then
+              echo "Revision ${LATEST} is ready and serving ${EXPECTED_VERSION}"
               exit 0
             fi
-            sleep 5
+            sleep 10
           done
-          echo "Timed out waiting for ${TWIN_URL}/_healthcheck" >&2
+          echo "::error::Revision ${LATEST} did not become ready serving ${EXPECTED_VERSION}"
+          az containerapp revision list -g "$RG" -n "$APP" --query "[?properties.active].{name:name, health:properties.healthState, running:properties.runningState, image:properties.template.containers[0].image}" -o table
+          az containerapp logs show -g "$RG" -n "$APP" --revision "$LATEST" --type console --tail 80 --format text 2>&1 \
+            | grep -viE "password|secret|pwd=|key=" | grep -E "fail:|crit:|Exception|Unhandled|Timeout" | head -40 || true
           exit 1
 
       - name: Register GitHub webhooks, Octopus subscription, and Azure Event Grid
@@ -265,5 +275,17 @@ jobs:
           done
 
           curl -fsS -H "X-Twin-Key: ${TWIN_API_KEY}" "${TWIN_URL}/api/intake" | jq '{transport, processorEnabled, depth, oldestPendingAgeSeconds, deadLetterCount, capturedTotal, processedTotal, lastCapturedAt, lastProcessedAt}'
-          curl -fsS -H "X-Twin-Key: ${TWIN_API_KEY}" "${TWIN_URL}/api/admin/deadletters" | jq 'length'
+
+          # A deploy usually ships the fix for whatever was dead-lettered, so replay and report what remains.
+          DL_BEFORE=$(curl -fsS -H "X-Twin-Key: ${TWIN_API_KEY}" "${TWIN_URL}/api/admin/deadletters" | jq 'length')
+          echo "Dead letters before replay: ${DL_BEFORE}"
+          if [ "$DL_BEFORE" -gt 0 ]; then
+            curl -fsS -H "X-Twin-Key: ${TWIN_API_KEY}" "${TWIN_URL}/api/admin/deadletters" | jq '[.[] | {rawEventId, exceptionType, exceptionMessage}] | .[:5]'
+            curl -fsS -X POST -H "X-Twin-Key: ${TWIN_API_KEY}" "${TWIN_URL}/api/admin/deadletters/replay" | jq .
+            sleep 45
+            DL_AFTER=$(curl -fsS -H "X-Twin-Key: ${TWIN_API_KEY}" "${TWIN_URL}/api/admin/deadletters" | jq 'length')
+            echo "Dead letters after replay: ${DL_AFTER}"
+            curl -fsS -H "X-Twin-Key: ${TWIN_API_KEY}" "${TWIN_URL}/api/intake" | jq '{depth, deadLetterCount, capturedTotal, processedTotal}'
+            echo "- Dead letters replayed: ${DL_BEFORE} -> ${DL_AFTER}" >> "$GITHUB_STEP_SUMMARY"
+          fi
           echo "- Durable intake: test webhook ${DELIVERY} captured and processed" >> "$GITHUB_STEP_SUMMARY"

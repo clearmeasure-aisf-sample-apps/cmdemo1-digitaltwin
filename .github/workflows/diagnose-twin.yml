@@ -1,0 +1,98 @@
+name: Diagnose Digital Twin Container App
+
+# Manual, read-only diagnostics for the twin container app and its SQL database (never prints secrets).
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  diagnose:
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Azure login
+        env:
+          ARM_CLIENT_ID: ${{ secrets.AZURE_CLIENT_ID }}
+          ARM_CLIENT_SECRET: ${{ secrets.AZURE_CLIENT_SECRET }}
+          ARM_TENANT_ID: ${{ secrets.AZURE_TENANT_ID }}
+          ARM_SUBSCRIPTION_ID: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
+        run: |
+          set -euo pipefail
+          az login --service-principal -u "$ARM_CLIENT_ID" -p "$ARM_CLIENT_SECRET" --tenant "$ARM_TENANT_ID" --output none
+          az account set --subscription "$ARM_SUBSCRIPTION_ID"
+          az extension add --name containerapp --upgrade --only-show-errors --output none
+
+      - name: Revisions and replicas (read-only)
+        run: |
+          RG=rg-cmdemo1-nonprod; APP=ca-cmdemo1-twin
+          az containerapp show -g "$RG" -n "$APP" --query "{latestRevision:properties.latestRevisionName, latestReady:properties.latestReadyRevisionName, provisioning:properties.provisioningState, running:properties.runningStatus, image:properties.template.containers[0].image}" -o jsonc
+          az containerapp revision list -g "$RG" -n "$APP" --all --query "[].{name:name, active:properties.active, health:properties.healthState, provisioning:properties.provisioningState, running:properties.runningState, replicas:properties.replicas, created:properties.createdTime, image:properties.template.containers[0].image}" -o table
+          LATEST=$(az containerapp show -g "$RG" -n "$APP" --query properties.latestRevisionName -o tsv)
+          echo "== Replicas of $LATEST"
+          az containerapp replica list -g "$RG" -n "$APP" --revision "$LATEST" --query "[].{name:name, running:properties.runningState, reason:properties.runningStateDetails, containers:properties.containers[].{name:name, ready:ready, restarts:restartCount, state:runningState, detail:runningStateDetails}}" -o jsonc || true
+
+      - name: Twin SQL database tier, size and DTU (read-only)
+        run: |
+          RG=rg-cmdemo1-nonprod
+          SERVER=$(az sql server list -g "$RG" --query "[?starts_with(name, 'sql-cmdemo1-twin')].name | [0]" -o tsv)
+          az sql db show -g "$RG" -s "$SERVER" -n sqldb-cmdemo1-twin --query "{sku:sku.name, tier:sku.tier, capacity:sku.capacity, maxSizeBytes:maxSizeBytes, status:status}" -o jsonc
+          az sql db list-usages -g "$RG" -s "$SERVER" -n sqldb-cmdemo1-twin -o table || true
+          DB_ID=$(az sql db show -g "$RG" -s "$SERVER" -n sqldb-cmdemo1-twin --query id -o tsv)
+          az monitor metrics list --resource "$DB_ID" --metric dtu_consumption_percent --interval PT5M --aggregation Average Maximum \
+            --start-time "$(date -u -d '-3 hours' +%Y-%m-%dT%H:%M:%SZ)" \
+            --query "value[0].timeseries[0].data[].{t:timeStamp, avg:average, max:maximum}" -o table || true
+
+      - name: System logs (revision lifecycle, probes)
+        run: |
+          az containerapp logs show -g rg-cmdemo1-nonprod -n ca-cmdemo1-twin --type system --tail 60 --format json 2>&1 | grep -viE "password|secret|key=" | tail -60 || true
+
+      - name: Console logs of latest revision (secrets filtered)
+        run: |
+          RG=rg-cmdemo1-nonprod; APP=ca-cmdemo1-twin
+          LATEST=$(az containerapp show -g "$RG" -n "$APP" --query properties.latestRevisionName -o tsv)
+          az containerapp logs show -g "$RG" -n "$APP" --revision "$LATEST" --type console --tail 300 --format text 2>&1 \
+            | grep -viE "password|secret|pwd=|key=" | grep -vE "^\s+\[|^\s+[a-z_]+\s+(varchar|nvarchar|int|bigint|datetimeoffset|uniqueidentifier|varbinary|bit)" | tail -150 || true
+
+      - name: SQL diagnostics (blocking, open transactions, wolverine schema) - read-only
+        run: |
+          set -euo pipefail
+          RG=rg-cmdemo1-nonprod
+          SERVER=$(az sql server list -g "$RG" --query "[?starts_with(name, 'sql-cmdemo1-twin')].name | [0]" -o tsv)
+          LOGIN=$(az sql server show -g "$RG" -n "$SERVER" --query administratorLogin -o tsv)
+          KV=$(az keyvault list -g "$RG" --query "[?tags.purpose=='digital-twin'].name | [0]" -o tsv)
+          SQLPASS=$(az keyvault secret show --vault-name "$KV" --name sql-admin-password --query value -o tsv)
+          echo "::add-mask::$SQLPASS"
+          export SQLCMDPASSWORD="$SQLPASS"
+          Q() { /opt/mssql-tools18/bin/sqlcmd -C -S "tcp:${SERVER}.database.windows.net,1433" -d sqldb-cmdemo1-twin -U "$LOGIN" -l 30 -t 120 -W -s '|' -Q "SET NOCOUNT ON; $1"; }
+          if [ ! -x /opt/mssql-tools18/bin/sqlcmd ]; then
+            curl -fsSL https://packages.microsoft.com/keys/microsoft.asc | sudo tee /etc/apt/trusted.gpg.d/microsoft.asc >/dev/null
+            curl -fsSL https://packages.microsoft.com/config/ubuntu/24.04/prod.list | sudo tee /etc/apt/sources.list.d/mssql-release.list >/dev/null
+            sudo apt-get update -qq && sudo ACCEPT_EULA=Y apt-get install -y -qq mssql-tools18 unixodbc-dev >/dev/null
+          fi
+          echo "== tables per schema"; Q "SELECT s.name AS [schema], COUNT(*) AS tables FROM sys.tables t JOIN sys.schemas s ON s.schema_id = t.schema_id GROUP BY s.name"
+          echo "== wolverine objects"; Q "SELECT o.type_desc, o.name FROM sys.objects o WHERE o.schema_id = SCHEMA_ID('wolverine') AND o.type IN ('U','P','FN','TT','IF','TF') ORDER BY o.type_desc, o.name"
+          echo "== table types"; Q "SELECT SCHEMA_NAME(schema_id) s, name FROM sys.table_types WHERE is_user_defined = 1"
+          echo "== active requests / blocking"; Q "SELECT r.session_id, r.status, r.command, r.wait_type, r.wait_time, r.blocking_session_id, LEFT(t.text, 120) AS sql FROM sys.dm_exec_requests r CROSS APPLY sys.dm_exec_sql_text(r.sql_handle) t WHERE r.session_id <> @@SPID"
+          echo "== open transactions"; Q "SELECT st.session_id, at.transaction_begin_time, at.name FROM sys.dm_tran_session_transactions st JOIN sys.dm_tran_active_transactions at ON at.transaction_id = st.transaction_id"
+          echo "== applocks"; Q "SELECT request_session_id, resource_type, resource_description, request_mode, request_status FROM sys.dm_tran_locks WHERE resource_type = 'APPLICATION'"
+          echo "== time a catalog introspection similar to schema migration"; START=$(date +%s.%N); Q "SELECT COUNT(*) FROM INFORMATION_SCHEMA.COLUMNS c JOIN INFORMATION_SCHEMA.TABLES t ON t.TABLE_NAME = c.TABLE_NAME AND t.TABLE_SCHEMA = c.TABLE_SCHEMA WHERE t.TABLE_SCHEMA = 'wolverine'"; echo "took $(python3 -c "import time; print(round(time.time()-$START,2))")s"
+
+      - name: Intake failures (raw table + dead letters)
+        env:
+          TWIN_API_KEY: ${{ secrets.TWIN_API_KEY }}
+        run: |
+          set -euo pipefail
+          TWIN_URL=https://ca-cmdemo1-twin.livelyhill-fa5709f5.southcentralus.azurecontainerapps.io
+          curl -fsS -H "X-Twin-Key: ${TWIN_API_KEY}" "${TWIN_URL}/api/intake" | jq .
+          curl -fsS -H "X-Twin-Key: ${TWIN_API_KEY}" "${TWIN_URL}/api/admin/deadletters" | jq '[.[] | {envelopeId, rawEventId, exceptionType, exceptionMessage, failedAt}]'
+          RG=rg-cmdemo1-nonprod
+          SERVER=$(az sql server list -g "$RG" --query "[?starts_with(name, 'sql-cmdemo1-twin')].name | [0]" -o tsv)
+          LOGIN=$(az sql server show -g "$RG" -n "$SERVER" --query administratorLogin -o tsv)
+          KV=$(az keyvault list -g "$RG" --query "[?tags.purpose=='digital-twin'].name | [0]" -o tsv)
+          SQLPASS=$(az keyvault secret show --vault-name "$KV" --name sql-admin-password --query value -o tsv)
+          echo "::add-mask::$SQLPASS"
+          export SQLCMDPASSWORD="$SQLPASS"
+          /opt/mssql-tools18/bin/sqlcmd -C -S "tcp:${SERVER}.database.windows.net,1433" -d sqldb-cmdemo1-twin -U "$LOGIN" -l 30 -t 120 -W -s '|' -Q "SET NOCOUNT ON;
+            SELECT kind, channel, COUNT(*) total, SUM(CASE WHEN processed_at IS NULL THEN 1 ELSE 0 END) pending, SUM(CASE WHEN last_error IS NOT NULL THEN 1 ELSE 0 END) errored FROM twin.raw_intake_events GROUP BY kind, channel;
+            SELECT TOP 10 id, kind, JSON_VALUE(headers_json, '$.\"X-GitHub-Event\"') gh_event, dedupe_key, attempts, dead_lettered_at, processed_at, LEFT(last_error, 400) last_error FROM twin.raw_intake_events WHERE last_error IS NOT NULL ORDER BY sequence DESC;"
