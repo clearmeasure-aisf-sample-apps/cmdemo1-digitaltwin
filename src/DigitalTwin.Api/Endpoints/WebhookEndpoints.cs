@@ -48,12 +48,16 @@ public static partial class WebhookEndpoints
 
         if (eventName is "push" or "pull_request" or "workflow_run" or "issues" or "release" or "deployment" or "deployment_status")
         {
+            var repoName = normalized.SubjectId.Split(':', '#')[0].Split('/').LastOrDefault();
             var logger = loggerFactory.CreateLogger("WebhookRefresh");
             _ = Task.Run(async () =>
             {
                 try
                 {
-                    await gitHubSync.SyncAsync(fullBackfill: false, CancellationToken.None);
+                    if (!string.IsNullOrWhiteSpace(repoName))
+                    {
+                        await gitHubSync.SyncRepositoryAsync(repoName, CancellationToken.None);
+                    }
                     await ingestion.EvaluateAndRecordDriftAsync(CancellationToken.None);
                 }
                 catch (Exception ex)

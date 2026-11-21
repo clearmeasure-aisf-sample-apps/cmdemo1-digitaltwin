@@ -67,3 +67,17 @@ Following the domain research in the prompt's prior-art references:
 - **Envelope & Idempotency**: Store every observation in an append-only `ObservedEvents` journal using a CloudEvents/CDEvents-style envelope keyed uniquely by `IdempotencyKey = "{source}:{sourceEventId}"`.
 - **DORA Rules**: Match Octopus Insights semantics — a deployment with `HasGuidedFailure == true` counts as a failure in Change Fail Rate even when the server task ends `Success`; exclude `Pull requests` channel runs from production DORA metrics; compute Failed Deployment Recovery Time from failed completion to next success in the same project + stage.
 - **Auth Boundaries**: Keep the dashboard (`/`, `/api/dashboard/state`, `/api/twin/summary`, `/api/twin/graph`, `/hubs/twin`, `/api/stream`, `/llms.txt`) public read for zero-friction wallboard viewing; protect query/admin endpoints (`/api/events`, `/api/pipelines`, `/api/environments/*`, `/api/drift`, `/api/workitems`, `/api/deployments`, `/api/metrics`, `/api/explain`, `/api/admin/*`) and the Streamable HTTP MCP endpoint (`/mcp`) with `X-Twin-Key: <TWIN_API_KEY>`; protect ingestion hooks with `WEBHOOK_SECRET` (HMAC-SHA256 for GitHub, `X-Webhook-Secret` header for Octopus, secret token for Azure Event Grid).
+
+---
+
+## ADR-008: GitHub Shared-Token Rate Budget (`<= 1,500 REST calls/hr`) & Conditional Caching
+
+- **Context**: `GH_PAT` (`cm-ai-ops-bot`) is shared with `cmdemo1-workorders`, `cmdemo1-dashboard`, `cmdemo1-system`, and other automation. Early naive polling across 10 repositories + full Project #679 GraphQL queries every 60-120s risked exhausting the 5,000/hr core REST and GraphQL pools.
+- **Decision**:
+  1. **Webhooks First**: Rely on `/hooks/github` as the primary real-time feed. Webhook follow-up refreshes coalesce per-repository (`15s` window) and sync only that repository rather than polling all 10 repos.
+  2. **Zero-Quota Public GitOps Reads**: Fetch `cmdemo1-system` files (`system.json`, `versions.json`, `status/*.json`) from `raw.githubusercontent.com` using `If-None-Match` ETags (0 `api.github.com` quota consumed).
+  3. **Conditional ETag Requests**: Every `api.github.com` GET sends `If-None-Match`; `304 Not Modified` responses consume zero GitHub rate-limit quota and reuse the cached body.
+  4. **GraphQL Batching**: Combine repository metadata, default branch head commits, recent PRs, open issue counts, and recent GitHub deployments across all repositories into a single aliased GraphQL query rather than ~40 separate REST calls.
+  5. **Conservative Intervals**: Full backfill once at startup, incremental repo/actions reconciliation every **10 minutes** (`600s`, stretched 3x in backoff mode), and slim Project #679 GraphQL board reconciliation every **5 minutes** (`300s`).
+  6. **Automatic Backoff & Pause**: Read `X-RateLimit-*` headers on every response. Below `1,000` remaining (or >= 900 twin calls/hr), enter `backoff` mode; below `500` remaining (or >= 1,400 twin calls/hr), enter `paused` mode until reset without clearing cached repository/webhook projections. Expose live quota metrics in `/api/twin/summary` (`gitHubQuota`) and the dashboard top bar.
+  7. **CI/CD Restraint**: `scripts/register-hooks.sh` checks `/rate_limit` first, skips `PATCH` when an active hook already targets `/hooks/github`, and avoids tight polling loops in deployment scripts.

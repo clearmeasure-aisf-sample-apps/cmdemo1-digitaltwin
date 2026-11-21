@@ -24,6 +24,7 @@ public sealed record TwinSummaryDto(
     int CriticalDriftCount,
     IReadOnlyList<IngestionCursor> IngestionCursors,
     IReadOnlyList<WebhookRegistrationStatus> Webhooks,
+    GitHubRateLimitStatus GitHubQuota,
     double? CostMonthToDateUsd,
     double? CostYesterdayUsd);
 

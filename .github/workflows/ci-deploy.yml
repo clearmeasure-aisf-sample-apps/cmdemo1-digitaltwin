@@ -190,7 +190,7 @@ jobs:
         run: |
           set -euo pipefail
           curl -fsS -m 120 -X POST -H "X-Twin-Key: ${TWIN_API_KEY}" "${TWIN_URL}/api/admin/rebuild" | jq '{gitHubOk, octopusOk, azureOk, probesOk, activeDriftCount}'
-          curl -fsS -H "X-Twin-Key: ${TWIN_API_KEY}" "${TWIN_URL}/api/twin/summary" | jq '{systemSlug, activeDriftCount, criticalDriftCount, pipelinesCount: (.pipelines | length), stagesCount: (.stages | length), costMonthToDateUsd}'
+          curl -fsS -H "X-Twin-Key: ${TWIN_API_KEY}" "${TWIN_URL}/api/twin/summary" | jq '{systemSlug, activeDriftCount, criticalDriftCount, pipelinesCount: (.pipelines | length), stagesCount: (.stages | length), costMonthToDateUsd, gitHubQuota}'
           curl -fsS "${TWIN_URL}/llms.txt" | head -n 5
           MCP_INIT='{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-03-26","capabilities":{},"clientInfo":{"name":"ci-smoke","version":"1.0"}}}'
           curl -fsS -X POST "${TWIN_URL}/mcp" \

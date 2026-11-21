@@ -1,5 +1,6 @@
 using DigitalTwin.Application.Abstractions;
 using DigitalTwin.Application.Services;
+using DigitalTwin.Infrastructure.Clients;
 using DigitalTwin.Infrastructure.Options;
 using Microsoft.Extensions.Hosting;
 using Microsoft.Extensions.Logging;
@@ -107,6 +108,7 @@ public sealed partial class BackfillCoordinator(
 public sealed partial class TwinPollingHostedService(
     IBackfillCoordinator backfill,
     IGitHubSyncService gitHub,
+    GitHubApiClient ghClient,
     IOctopusSyncService octopus,
     IAzureSyncService azure,
     IHealthProbeService probes,
@@ -145,16 +147,28 @@ public sealed partial class TwinPollingHostedService(
             LogBackfillError(ex);
         }
 
-        using var ghTimer = new PeriodicTimer(TimeSpan.FromSeconds(Math.Max(30, options.Value.GitHubPollSeconds)));
+        using var ghTimer = new PeriodicTimer(TimeSpan.FromSeconds(Math.Max(180, options.Value.GitHubPollSeconds)));
+        using var ghBoardTimer = new PeriodicTimer(TimeSpan.FromSeconds(Math.Max(180, options.Value.GitHubBoardPollSeconds)));
         using var octoTimer = new PeriodicTimer(TimeSpan.FromSeconds(Math.Max(20, options.Value.OctopusPollSeconds)));
         using var azTimer = new PeriodicTimer(TimeSpan.FromSeconds(Math.Max(30, options.Value.AzurePollSeconds)));
         using var probeTimer = new PeriodicTimer(TimeSpan.FromSeconds(Math.Max(20, options.Value.ProbeIntervalSeconds)));
 
+        var ghBackoffCounter = 0;
+
         await Task.WhenAll(
             RunLoopAsync(ghTimer, "GitHub", async ct =>
             {
+                // Stretch reconciliation 3x when in backoff mode (<1,000 remaining)
+                if (ghClient.IsRestBackoff() && (++ghBackoffCounter % 3) != 0)
+                {
+                    return;
+                }
                 await gitHub.SyncAsync(fullBackfill: false, ct);
                 await ingestion.EvaluateAndRecordDriftAsync(ct);
+            }, stoppingToken),
+            RunLoopAsync(ghBoardTimer, "GitHubBoard", async ct =>
+            {
+                await gitHub.SyncBoardOnlyAsync(ct);
             }, stoppingToken),
             RunLoopAsync(octoTimer, "Octopus", async ct =>
             {
