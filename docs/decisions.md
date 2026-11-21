@@ -152,3 +152,11 @@ Following the domain research in the prompt's prior-art references:
   - The journal fits values to column limits using EF model metadata. Over-long idempotency keys get a deterministic SHA-256 suffix (collision-free and rebuild-stable), and full detail stays in `PayloadJson`. Dead-letter records keep the innermost exception message.
   - CI waits until the latest revision is ready and `/health` reports the build version before verifying, dumps revision logs if it isn't, and replays dead letters after a successful deploy.
   - The `Diagnose Digital Twin Container App` workflow (manual, read-only, secrets masked) is kept for revision status, logs, SQL tier/DTU and intake failures.
+
+---
+
+## ADR-015: Event Grid Infra Deployment Is Opt-In
+
+- **Context**: `Microsoft.EventGrid` was registered on the subscription (by a subscription Owner) between 06:03 and 15:08 UTC on 2026-11-21. `register-hooks.sh` deployed `infra/eventgrid.bicep` automatically whenever it saw the provider as `Registered`, so the 15:08 and 15:40 deploys created and updated the Event Grid system topics and subscriptions in `rg-cmdemo1-nonprod` and `rg-cmdemo1-prod`, even though the instruction for this work was not to run Event Grid infra.
+- **Decision**: The deploy now only reports the provider state and the existing system topics (read-only). Deploying Event Grid infra requires `ENABLE_EVENT_GRID_DEPLOY=true`, and the script no longer attempts `az provider register`. The topics and subscriptions that already exist were left in place: they deliver to `/hooks/azure`, and those events go through the durable intake like every other webhook.
+- **Open**: Keeping or removing those resources is Jeffrey's call.
