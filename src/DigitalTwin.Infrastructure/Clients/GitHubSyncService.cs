@@ -45,6 +45,28 @@ public sealed partial class GitHubSyncService(
             Status = "running"
         };
 
+        // Check GitHub rate limit before burning shared token quota
+        if (!fullBackfill)
+        {
+            using var rateClient = CreateClient();
+            var rateJson = await GetStringOrNullAsync(rateClient, "rate_limit", ct);
+            if (!string.IsNullOrWhiteSpace(rateJson))
+            {
+                using var rateDoc = JsonDocument.Parse(rateJson);
+                if (rateDoc.RootElement.TryGetProperty("resources", out var res) &&
+                    res.TryGetProperty("core", out var core) &&
+                    core.TryGetProperty("remaining", out var rem) &&
+                    rem.TryGetInt32(out var remaining) &&
+                    remaining < 500)
+                {
+                    cursor.Status = "rate-limited-backoff";
+                    cursor.LastError = $"GitHub core rate limit low ({remaining} remaining); relying on webhooks";
+                    await store.UpsertCursorAsync(cursor, ct);
+                    return;
+                }
+            }
+        }
+
         try
         {
             using var client = CreateClient();
@@ -613,17 +635,20 @@ public sealed partial class GitHubSyncService(
                         webhookId = hook.GetProperty("id").GetInt64();
                         hookUrl = url;
 
-                        var deliveriesJson = await GetStringOrNullAsync(client, $"repos/{Cmdemo1PlatformCatalog.GitHubOrg}/{repoName}/hooks/{webhookId.Value}/deliveries?per_page=3", ct);
-                        if (!string.IsNullOrWhiteSpace(deliveriesJson))
+                        if (fullBackfill)
                         {
-                            using var delDoc = JsonDocument.Parse(deliveriesJson);
-                            if (delDoc.RootElement.ValueKind == JsonValueKind.Array && delDoc.RootElement.GetArrayLength() > 0)
+                            var deliveriesJson = await GetStringOrNullAsync(client, $"repos/{Cmdemo1PlatformCatalog.GitHubOrg}/{repoName}/hooks/{webhookId.Value}/deliveries?per_page=2", ct);
+                            if (!string.IsNullOrWhiteSpace(deliveriesJson))
                             {
-                                var firstDel = delDoc.RootElement[0];
-                                lastDeliveryStatus = firstDel.TryGetProperty("status_code", out var sc) && sc.TryGetInt32(out var scv) ? scv : null;
-                                lastDeliveryAt = firstDel.TryGetProperty("delivered_at", out var da) && DateTimeOffset.TryParse(da.GetString(), out var ddt)
-                                    ? ddt.ToUniversalTime()
-                                    : null;
+                                using var delDoc = JsonDocument.Parse(deliveriesJson);
+                                if (delDoc.RootElement.ValueKind == JsonValueKind.Array && delDoc.RootElement.GetArrayLength() > 0)
+                                {
+                                    var firstDel = delDoc.RootElement[0];
+                                    lastDeliveryStatus = firstDel.TryGetProperty("status_code", out var sc) && sc.TryGetInt32(out var scv) ? scv : null;
+                                    lastDeliveryAt = firstDel.TryGetProperty("delivered_at", out var da) && DateTimeOffset.TryParse(da.GetString(), out var ddt)
+                                        ? ddt.ToUniversalTime()
+                                        : null;
+                                }
                             }
                         }
                         break;
