@@ -1,6 +1,6 @@
-using DigitalTwin.Domain.ReliabilityAndDrift;
-using DigitalTwin.Domain.RuntimeAndPlatform;
-using DigitalTwin.Domain.SourceAndChange;
+using DigitalTwin.Core.ReliabilityAndDrift;
+using DigitalTwin.Core.RuntimeAndPlatform;
+using DigitalTwin.Core.SourceAndChange;
 using Xunit;
 
 namespace DigitalTwin.Tests;

@@ -65,6 +65,22 @@
     return `${Math.floor(sec / 86400)}d`;
   }
 
+  function renderIntake(iq) {
+    if (!iq) return;
+    if (iq.error) { setPill('intake', 'ERR', 'err'); return; }
+    const age = iq.oldestPendingAgeSeconds != null ? `${Math.round(iq.oldestPendingAgeSeconds)}s` : '0s';
+    const text = `${iq.depth} q · ${age} · DLQ ${iq.deadLetterCount}`;
+    const cls = iq.deadLetterCount > 0 ? 'err' : (iq.depth > 0 && (iq.oldestPendingAgeSeconds || 0) > 60) ? 'warn' : 'ok';
+    setPill('intake', text, cls);
+    const pill = document.querySelector('[data-source="intake"]');
+    if (pill) pill.title = `Durable intake (${iq.transport}): ${iq.capturedTotal} captured, ${iq.processedTotal} processed, depth ${iq.depth}, oldest pending ${age}, dead letters ${iq.deadLetterCount}`;
+  }
+
+  async function fetchIntake() {
+    const res = await fetch('/api/intake/status', { cache: 'no-store' });
+    if (res.ok) renderIntake(await res.json());
+  }
+
   async function fetchState() {
     const res = await fetch('/api/dashboard/state', { cache: 'no-store' });
     if (!res.ok) throw new Error(`HTTP ${res.status}`);
@@ -130,6 +146,8 @@
     setPill('az', azEgOk ? 'EG+ARG' : (cursors.azure?.status === 'ok' ? 'ARG POLL' : '--'), cursors.azure?.status === 'ok' ? 'ok' : 'warn');
 
     setPill('probes', cursors.probes?.status === 'ok' ? `${cursors.probes.itemsProcessed} OK` : '--', cursors.probes?.status === 'ok' ? 'ok' : 'warn');
+
+    renderIntake(s.intakeQueue);
 
     // Observer bar
     const twinPipe = (s.pipelines || []).find(p => p.definition.isTwinObserver);
@@ -726,6 +744,7 @@
   }, 4500);
 
   setInterval(() => fetchState().catch(() => {}), 30000);
+  setInterval(() => fetchIntake().catch(() => {}), 5000);
 
   fetchState()
     .then(setupRealtime)

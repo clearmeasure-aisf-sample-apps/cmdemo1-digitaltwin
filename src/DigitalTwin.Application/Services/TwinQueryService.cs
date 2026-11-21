@@ -1,19 +1,21 @@
 using System.Globalization;
 using System.Text.Json;
-using DigitalTwin.Application.Abstractions;
+using DigitalTwin.Core.Ports;
 using DigitalTwin.Application.Models;
-using DigitalTwin.Domain.Hierarchy;
-using DigitalTwin.Domain.Measurement;
-using DigitalTwin.Domain.Observation;
-using DigitalTwin.Domain.ReleaseAndDelivery;
-using DigitalTwin.Domain.ReliabilityAndDrift;
-using DigitalTwin.Domain.Work;
+using DigitalTwin.Core.Hierarchy;
+using DigitalTwin.Core.Intake;
+using DigitalTwin.Core.Measurement;
+using DigitalTwin.Core.Observation;
+using DigitalTwin.Core.ReleaseAndDelivery;
+using DigitalTwin.Core.ReliabilityAndDrift;
+using DigitalTwin.Core.Work;
 
 namespace DigitalTwin.Application.Services;
 
 public sealed class TwinQueryService(
     ITwinStore store,
     IGitHubRateLimitProvider rateLimitProvider,
+    IIntakeQueueMonitor intakeMonitor,
     TimeProvider timeProvider)
 {
     private static readonly string[] ActiveStageNames = ["tdd", "uat", "prod"];
@@ -35,6 +37,7 @@ public sealed class TwinQueryService(
         var workItems = await store.GetWorkItemsAsync(ct);
         var cursors = await store.GetCursorsAsync(ct);
         var webhooks = await store.GetWebhookStatusesAsync(ct);
+        var intakeQueue = await intakeMonitor.GetStatusAsync(ct);
 
         var pipelines = Cmdemo1PlatformCatalog.Pipelines.Select(def =>
         {
@@ -104,9 +107,12 @@ public sealed class TwinQueryService(
             IngestionCursors: cursors,
             Webhooks: webhooks,
             GitHubQuota: rateLimitProvider.GetStatus(),
+            IntakeQueue: intakeQueue,
             CostMonthToDateUsd: costMtd,
             CostYesterdayUsd: costYesterday);
     }
+
+    public Task<IntakeQueueStatus> GetIntakeQueueAsync(CancellationToken ct) => intakeMonitor.GetStatusAsync(ct);
 
     public async Task<TwinGraphDto> GetGraphAsync(CancellationToken ct)
     {

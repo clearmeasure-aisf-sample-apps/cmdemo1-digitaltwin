@@ -1,16 +1,22 @@
 using System.Text;
-using DigitalTwin.Application.Abstractions;
-using DigitalTwin.Application.Services;
-using DigitalTwin.Domain.Normalization;
-using DigitalTwin.Infrastructure.Options;
+using DigitalTwin.Api.Auth;
+using DigitalTwin.Core.Intake;
+using DigitalTwin.Core.Normalization;
+using DigitalTwin.Core.Observation;
+using DigitalTwin.Core.Ports;
 using Microsoft.Extensions.Options;
 
 namespace DigitalTwin.Api.Endpoints;
 
+/// <summary>
+/// Webhook receivers only authenticate, wrap the raw body and durably capture it. Processing happens in the
+/// intake processor. 200 is returned only after the capture transaction committed; failures return 503 so the
+/// sender redelivers.
+/// </summary>
 public static partial class WebhookEndpoints
 {
-    [LoggerMessage(Level = LogLevel.Warning, Message = "Background webhook follow-up refresh failed for {Source}")]
-    private static partial void LogFollowUpFailed(ILogger logger, Exception ex, string source);
+    [LoggerMessage(Level = LogLevel.Error, Message = "Failed to durably capture {Source} webhook; returning 503 for redelivery")]
+    private static partial void LogCaptureFailed(ILogger logger, Exception ex, EventSourceKind source);
 
     public static void MapWebhookEndpoints(this WebApplication app)
     {
@@ -22,59 +28,26 @@ public static partial class WebhookEndpoints
 
     private static async Task<IResult> HandleGitHubAsync(
         HttpContext context,
-        IOptions<TwinOptions> options,
-        EventIngestionService ingestion,
-        IGitHubSyncService gitHubSync,
+        IOptions<TwinHostOptions> options,
+        IIntakePublisher intake,
         ILoggerFactory loggerFactory,
         TimeProvider timeProvider,
         CancellationToken ct)
     {
         var rawBytes = await ReadRawBodyAsync(context.Request, ct);
         var signature = context.Request.Headers["X-Hub-Signature-256"].FirstOrDefault();
-        var secret = options.Value.WebhookSecret;
-
-        if (!WebhookSignatureVerifier.VerifyGitHubSignature(rawBytes, signature, secret))
+        if (!WebhookSignatureVerifier.VerifyGitHubSignature(rawBytes, signature, options.Value.WebhookSecret))
         {
             return Results.Unauthorized();
         }
 
-        var eventName = context.Request.Headers["X-GitHub-Event"].FirstOrDefault() ?? "unknown";
-        var deliveryId = context.Request.Headers["X-GitHub-Delivery"].FirstOrDefault();
-        var rawJson = Encoding.UTF8.GetString(rawBytes);
-        var now = timeProvider.GetUtcNow();
-
-        var normalized = GitHubEventNormalizer.NormalizeWebhook(eventName, deliveryId, rawJson, now);
-        var accepted = await ingestion.IngestAsync(normalized, ct);
-
-        if (eventName is "push" or "pull_request" or "workflow_run" or "issues" or "release" or "deployment" or "deployment_status")
-        {
-            var repoName = normalized.SubjectId.Split(':', '#')[0].Split('/').LastOrDefault();
-            var logger = loggerFactory.CreateLogger("WebhookRefresh");
-            _ = Task.Run(async () =>
-            {
-                try
-                {
-                    if (!string.IsNullOrWhiteSpace(repoName))
-                    {
-                        await gitHubSync.SyncRepositoryAsync(repoName, CancellationToken.None);
-                    }
-                    await ingestion.EvaluateAndRecordDriftAsync(CancellationToken.None);
-                }
-                catch (Exception ex)
-                {
-                    LogFollowUpFailed(logger, ex, "GitHub");
-                }
-            }, CancellationToken.None);
-        }
-
-        return Results.Ok(new { accepted, eventId = normalized.EventId, idempotencyKey = normalized.IdempotencyKey });
+        return await CaptureAsync(context, intake, loggerFactory, EventSourceKind.GitHub, IntakeKind.GitHubWebhook, rawBytes, timeProvider, ct);
     }
 
     private static async Task<IResult> HandleOctopusAsync(
         HttpContext context,
-        IOptions<TwinOptions> options,
-        EventIngestionService ingestion,
-        IOctopusSyncService octopusSync,
+        IOptions<TwinHostOptions> options,
+        IIntakePublisher intake,
         ILoggerFactory loggerFactory,
         TimeProvider timeProvider,
         CancellationToken ct)
@@ -82,38 +55,13 @@ public static partial class WebhookEndpoints
         var provided = context.Request.Headers["X-Webhook-Secret"].FirstOrDefault()
             ?? context.Request.Headers.Authorization.FirstOrDefault()
             ?? context.Request.Query["token"].FirstOrDefault();
-
         if (!WebhookSignatureVerifier.VerifySharedSecret(provided, options.Value.WebhookSecret))
         {
             return Results.Unauthorized();
         }
 
         var rawBytes = await ReadRawBodyAsync(context.Request, ct);
-        var rawJson = Encoding.UTF8.GetString(rawBytes);
-        var now = timeProvider.GetUtcNow();
-
-        var normalized = OctopusEventNormalizer.NormalizeSubscriptionPayload(rawJson, null, null, now);
-        if (normalized is null)
-        {
-            return Results.Ok(new { accepted = false, skipped = "filtered_or_unrecognized" });
-        }
-
-        var accepted = await ingestion.IngestAsync(normalized, ct);
-        var logger = loggerFactory.CreateLogger("WebhookRefresh");
-        _ = Task.Run(async () =>
-        {
-            try
-            {
-                await octopusSync.SyncAsync(fullBackfill: false, CancellationToken.None);
-                await ingestion.EvaluateAndRecordDriftAsync(CancellationToken.None);
-            }
-            catch (Exception ex)
-            {
-                LogFollowUpFailed(logger, ex, "Octopus");
-            }
-        }, CancellationToken.None);
-
-        return Results.Ok(new { accepted, eventId = normalized.EventId, idempotencyKey = normalized.IdempotencyKey });
+        return await CaptureAsync(context, intake, loggerFactory, EventSourceKind.Octopus, IntakeKind.OctopusWebhook, rawBytes, timeProvider, ct);
     }
 
     private static IResult HandleAzureOptions(HttpContext context)
@@ -126,21 +74,20 @@ public static partial class WebhookEndpoints
 
     private static async Task<IResult> HandleAzureAsync(
         HttpContext context,
-        IOptions<TwinOptions> options,
-        EventIngestionService ingestion,
-        IAzureSyncService azureSync,
+        IOptions<TwinHostOptions> options,
+        IIntakePublisher intake,
         ILoggerFactory loggerFactory,
         TimeProvider timeProvider,
         CancellationToken ct)
     {
         var rawBytes = await ReadRawBodyAsync(context.Request, ct);
         var rawJson = Encoding.UTF8.GetString(rawBytes);
-        var now = timeProvider.GetUtcNow();
 
-        var parsed = AzureEventNormalizer.NormalizeEventGridWebhook(rawJson, now);
-        if (!string.IsNullOrWhiteSpace(parsed.ValidationResponse))
+        // The Event Grid subscription handshake is answered synchronously and is not an observation.
+        var validation = AzureEventNormalizer.NormalizeEventGridWebhook(rawJson, timeProvider.GetUtcNow()).ValidationResponse;
+        if (!string.IsNullOrWhiteSpace(validation))
         {
-            return Results.Ok(new { validationResponse = parsed.ValidationResponse });
+            return Results.Ok(new { validationResponse = validation });
         }
 
         if (!string.IsNullOrWhiteSpace(options.Value.WebhookSecret))
@@ -153,25 +100,31 @@ public static partial class WebhookEndpoints
             }
         }
 
-        var ingested = await ingestion.IngestBatchAsync(parsed.Events, ct);
-        if (parsed.Events.Count > 0)
-        {
-            var logger = loggerFactory.CreateLogger("WebhookRefresh");
-            _ = Task.Run(async () =>
-            {
-                try
-                {
-                    await azureSync.SyncAsync(fullBackfill: false, CancellationToken.None);
-                    await ingestion.EvaluateAndRecordDriftAsync(CancellationToken.None);
-                }
-                catch (Exception ex)
-                {
-                    LogFollowUpFailed(logger, ex, "Azure");
-                }
-            }, CancellationToken.None);
-        }
+        return await CaptureAsync(context, intake, loggerFactory, EventSourceKind.Azure, IntakeKind.AzureWebhook, rawBytes, timeProvider, ct);
+    }
 
-        return Results.Ok(new { ingested, received = parsed.Events.Count });
+    private static async Task<IResult> CaptureAsync(
+        HttpContext context,
+        IIntakePublisher intake,
+        ILoggerFactory loggerFactory,
+        EventSourceKind source,
+        IntakeKind kind,
+        byte[] rawBytes,
+        TimeProvider timeProvider,
+        CancellationToken ct)
+    {
+        var headers = context.Request.Headers.Select(h => new KeyValuePair<string, string?>(h.Key, h.Value.ToString()));
+        var raw = RawIntakeEvent.ForWebhook(source, kind, Encoding.UTF8.GetString(rawBytes), headers, timeProvider.GetUtcNow());
+        try
+        {
+            var receipt = await intake.CaptureAsync(raw, ct);
+            return Results.Ok(new { captured = true, rawEventId = receipt.RawEventId, dedupeKey = raw.DedupeKey });
+        }
+        catch (Exception ex) when (ex is not OperationCanceledException)
+        {
+            LogCaptureFailed(loggerFactory.CreateLogger("WebhookIntake"), ex, source);
+            return Results.Problem("Event could not be durably captured; please redeliver.", statusCode: StatusCodes.Status503ServiceUnavailable);
+        }
     }
 
     private static async Task<byte[]> ReadRawBodyAsync(HttpRequest request, CancellationToken ct)

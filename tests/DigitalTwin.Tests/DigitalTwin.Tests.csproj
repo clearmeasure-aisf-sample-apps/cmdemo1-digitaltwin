@@ -9,15 +9,21 @@
     <PackageReference Include="Microsoft.AspNetCore.Mvc.Testing" Version="11.0.0" />
     <PackageReference Include="Microsoft.EntityFrameworkCore.Sqlite" Version="11.0.0" />
     <PackageReference Include="Microsoft.NET.Test.Sdk" Version="18.12.0" />
+    <PackageReference Include="Testcontainers.MsSql" Version="4.17.0" />
     <PackageReference Include="xunit" Version="2.9.3" />
     <PackageReference Include="xunit.runner.visualstudio" Version="4.0.1" />
   </ItemGroup>
 
   <ItemGroup>
     <ProjectReference Include="..\..\src\DigitalTwin.Api\DigitalTwin.Api.csproj" />
+    <ProjectReference Include="..\..\src\DigitalTwin.Core\DigitalTwin.Core.csproj" />
     <ProjectReference Include="..\..\src\DigitalTwin.Application\DigitalTwin.Application.csproj" />
-    <ProjectReference Include="..\..\src\DigitalTwin.Domain\DigitalTwin.Domain.csproj" />
-    <ProjectReference Include="..\..\src\DigitalTwin.Infrastructure\DigitalTwin.Infrastructure.csproj" />
+    <ProjectReference Include="..\..\src\DigitalTwin.GitHub\DigitalTwin.GitHub.csproj" />
+    <ProjectReference Include="..\..\src\DigitalTwin.Octopus\DigitalTwin.Octopus.csproj" />
+    <ProjectReference Include="..\..\src\DigitalTwin.Azure\DigitalTwin.Azure.csproj" />
+    <ProjectReference Include="..\..\src\DigitalTwin.Probes\DigitalTwin.Probes.csproj" />
+    <ProjectReference Include="..\..\src\DigitalTwin.Persistence\DigitalTwin.Persistence.csproj" />
+    <ProjectReference Include="..\..\src\DigitalTwin.Messaging\DigitalTwin.Messaging.csproj" />
   </ItemGroup>
 
 </Project>

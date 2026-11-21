@@ -1,0 +1,32 @@
+using DigitalTwin.Application.Intake;
+using DigitalTwin.Application.Services;
+using DigitalTwin.Application.Workers;
+using DigitalTwin.Core.Intake;
+using DigitalTwin.Core.Ports;
+using Microsoft.Extensions.Configuration;
+using Microsoft.Extensions.DependencyInjection;
+
+namespace DigitalTwin.Application;
+
+public static class ApplicationServiceCollectionExtensions
+{
+    public static IServiceCollection AddTwinApplication(this IServiceCollection services, IConfiguration configuration)
+    {
+        services.AddSingleton(TimeProvider.System);
+        services.Configure<PollingOptions>(configuration.GetSection("Twin"));
+
+        services.AddSingleton<ObservedEventIntake>();
+        services.AddSingleton<DriftReconciliationService>();
+        services.AddSingleton<TwinQueryService>();
+
+        services.AddSingleton<IntakeEventApplier>();
+        services.AddSingleton<IIntakeEventApplier>(sp => sp.GetRequiredService<IntakeEventApplier>());
+        services.AddSingleton<IntakeRebuildService>();
+        services.AddSingleton<FollowUpRefreshScheduler>();
+        services.AddHostedService(sp => sp.GetRequiredService<FollowUpRefreshScheduler>());
+
+        services.AddSingleton<IBackfillCoordinator, BackfillCoordinator>();
+        services.AddHostedService<TwinPollingHostedService>();
+        return services;
+    }
+}

@@ -2,11 +2,14 @@ using System.Globalization;
 using System.Text;
 using DigitalTwin.Api.Auth;
 using DigitalTwin.Api.Realtime;
-using DigitalTwin.Application.Abstractions;
+using DigitalTwin.Core.Ports;
+using DigitalTwin.Application.Intake;
 using DigitalTwin.Application.Services;
-using DigitalTwin.Domain.Hierarchy;
-using DigitalTwin.Domain.Observation;
-using DigitalTwin.Infrastructure.Options;
+using DigitalTwin.Application.Workers;
+using DigitalTwin.Core.Hierarchy;
+using DigitalTwin.Core.Observation;
+using Microsoft.AspNetCore.Mvc;
+using Microsoft.AspNetCore.Mvc.ModelBinding;
 using Microsoft.Extensions.Options;
 
 namespace DigitalTwin.Api.Endpoints;
@@ -30,6 +33,9 @@ public static class TwinApiEndpoints
         app.MapGet("/api/twin/graph", async (TwinQueryService queries, CancellationToken ct)
             => Results.Ok(await queries.GetGraphAsync(ct)))
             .AddEndpointFilter(TwinKeyAuth.ValidateOptionalTwinKey());
+
+        app.MapGet("/api/intake/status", async (TwinQueryService queries, CancellationToken ct)
+            => Results.Ok(await queries.GetIntakeQueueAsync(ct)));
 
         app.MapGet("/api/stream", async (HttpContext context, RealtimeEventPublisher publisher, CancellationToken ct) =>
         {
@@ -109,9 +115,27 @@ public static class TwinApiEndpoints
         protectedApi.MapPost("/admin/rebuild", async (IBackfillCoordinator backfill, CancellationToken ct)
             => Results.Ok(await backfill.RebuildAllAsync("manual-admin-rebuild", ct)));
 
+        protectedApi.MapGet("/intake", async (TwinQueryService queries, CancellationToken ct)
+            => Results.Ok(await queries.GetIntakeQueueAsync(ct)));
+
+        protectedApi.MapGet("/admin/deadletters", async (int? limit, IDeadLetterAdmin deadLetters, CancellationToken ct)
+            => Results.Ok(await deadLetters.ListAsync(limit ?? 100, ct)));
+
+        protectedApi.MapPost("/admin/deadletters/replay", async (
+            [FromBody(EmptyBodyBehavior = EmptyBodyBehavior.Allow)] DeadLetterReplayRequest? request,
+            IDeadLetterAdmin deadLetters,
+            CancellationToken ct) =>
+        {
+            var replayed = await deadLetters.ReplayAsync(request?.Ids, ct);
+            return Results.Ok(new { replayed });
+        });
+
+        protectedApi.MapPost("/admin/rebuild-from-raw", async (IntakeRebuildService rebuild, CancellationToken ct)
+            => Results.Ok(await rebuild.RebuildFromRawAsync(ct)));
+
         protectedApi.MapPost("/admin/register-hooks", async (
             string? publicBaseUrl,
-            IOptions<TwinOptions> options,
+            IOptions<TwinHostOptions> options,
             IGitHubSyncService gitHub,
             IOctopusSyncService octopus,
             IAzureSyncService azure,
@@ -149,7 +173,7 @@ public static class TwinApiEndpoints
             ## Architecture Intent
             This digital twin sits ONE LEVEL ABOVE cmdemo1 (it observes cmdemo1 and is not a cmdemo1 deployable).
             Hierarchy: Platform > System (cmdemo1) > Pipelines > DeploymentStages (tdd, uat, prod, pool) > HostingBoundaries > Workloads/Revisions/AzureResources.
-            Ingestion combines real-time webhooks (/hooks/github, /hooks/octopus, /hooks/azure) with scheduled reconciliation polls and live endpoint health probes.
+            Every webhook and poller observation is durably captured in a raw intake table plus a Wolverine queue (transactional outbox) before it is acknowledged, then applied idempotently by a separate processor.
 
             ## Authentication
             - Dashboard (`/`, `/api/dashboard/state`, `/api/twin/summary`, `/api/twin/graph`, `/llms.txt`) is public read.
@@ -166,10 +190,16 @@ public static class TwinApiEndpoints
             - GET {{baseUrl}}/api/deployments?stage=&deployable=&limit= — Octopus releases, deployments, sign-offs, guided failures [X-Twin-Key]
             - GET {{baseUrl}}/api/metrics?windowDays=7&stage=prod — DORA 5-metric delivery scorecard [X-Twin-Key]
             - GET {{baseUrl}}/api/explain?q=<issue|pr|version|sha|task> — Causal trace across work -> PR -> build -> release -> deploy -> runtime [X-Twin-Key]
+            - GET {{baseUrl}}/api/intake — Durable intake queue: depth, oldest pending age, dead letters, transport [X-Twin-Key]
+            - GET {{baseUrl}}/api/admin/deadletters — Dead-lettered intake messages [X-Twin-Key]
+            - POST {{baseUrl}}/api/admin/deadletters/replay — Replay dead letters (all, or ids in the JSON body) [X-Twin-Key]
+            - POST {{baseUrl}}/api/admin/rebuild-from-raw — Rebuild the event journal from the raw intake table [X-Twin-Key]
 
             ## MCP Server (Streamable HTTP)
             Endpoint: {{baseUrl}}/mcp (requires `X-Twin-Key` header)
-            Tools: get_summary, query_events, get_environment, get_drift, get_pipeline, explain_item
+            Tools: get_summary, query_events, get_environment, get_drift, get_pipeline, explain_item, get_intake_queue
             """);
     }
 }
+
+public sealed record DeadLetterReplayRequest(Guid[]? Ids);

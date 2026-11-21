@@ -1,12 +1,13 @@
-using DigitalTwin.Domain.BuildAndArtifact;
-using DigitalTwin.Domain.Hierarchy;
-using DigitalTwin.Domain.Measurement;
-using DigitalTwin.Domain.Observation;
-using DigitalTwin.Domain.ReleaseAndDelivery;
-using DigitalTwin.Domain.ReliabilityAndDrift;
-using DigitalTwin.Domain.RuntimeAndPlatform;
-using DigitalTwin.Domain.SourceAndChange;
-using DigitalTwin.Domain.Work;
+using DigitalTwin.Core.BuildAndArtifact;
+using DigitalTwin.Core.Hierarchy;
+using DigitalTwin.Core.Intake;
+using DigitalTwin.Core.Measurement;
+using DigitalTwin.Core.Observation;
+using DigitalTwin.Core.ReleaseAndDelivery;
+using DigitalTwin.Core.ReliabilityAndDrift;
+using DigitalTwin.Core.RuntimeAndPlatform;
+using DigitalTwin.Core.SourceAndChange;
+using DigitalTwin.Core.Work;
 
 namespace DigitalTwin.Application.Models;
 
@@ -25,6 +26,7 @@ public sealed record TwinSummaryDto(
     IReadOnlyList<IngestionCursor> IngestionCursors,
     IReadOnlyList<WebhookRegistrationStatus> Webhooks,
     GitHubRateLimitStatus GitHubQuota,
+    IntakeQueueStatus IntakeQueue,
     double? CostMonthToDateUsd,
     double? CostYesterdayUsd);
 

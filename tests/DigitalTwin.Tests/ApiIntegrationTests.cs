@@ -3,23 +3,24 @@ using System.Net.Http.Headers;
 using System.Security.Cryptography;
 using System.Text;
 using System.Text.Json;
-using Microsoft.AspNetCore.Hosting;
-using Microsoft.AspNetCore.Mvc.Testing;
-using Microsoft.Extensions.Configuration;
+using DigitalTwin.Tests.Infrastructure;
+using Wolverine.Tracking;
 using Xunit;
 
 namespace DigitalTwin.Tests;
 
-public sealed class ApiIntegrationTests : IClassFixture<ApiIntegrationTests.TwinTestFactory>
+[Collection(SqlServerTests.Name)]
+public sealed class ApiIntegrationTests(SqlServerFixture sql) : IAsyncLifetime, IDisposable
 {
-    private const string TestApiKey = "test-twin-api-key-123";
-    private const string TestWebhookSecret = "test-webhook-secret-456";
-    private readonly TwinTestFactory _factory;
+    private const string TestApiKey = TwinAppFactory.ApiKey;
+    private const string TestWebhookSecret = TwinAppFactory.WebhookSecret;
+    private TwinAppFactory _factory = null!;
 
-    public ApiIntegrationTests(TwinTestFactory factory)
-    {
-        _factory = factory;
-    }
+    public async Task InitializeAsync() => _factory = new TwinAppFactory(await sql.CreateDatabaseAsync());
+
+    public async Task DisposeAsync() => await _factory.DisposeAsync();
+
+    public void Dispose() => _factory?.Dispose();
 
     [Fact]
     public async Task PublicEndpointsSucceedAndProtectedEndpointsEnforceTwinKey()
@@ -42,6 +43,14 @@ public sealed class ApiIntegrationTests : IClassFixture<ApiIntegrationTests.Twin
 
         var summaryNoKey = await client.GetAsync("/api/twin/summary");
         Assert.Equal(HttpStatusCode.OK, summaryNoKey.StatusCode);
+        var summaryBody = await summaryNoKey.Content.ReadAsStringAsync();
+        Assert.Contains("\"intakeQueue\"", summaryBody, StringComparison.Ordinal);
+        Assert.Contains("\"deadLetterCount\"", summaryBody, StringComparison.Ordinal);
+
+        Assert.Equal(HttpStatusCode.OK, (await client.GetAsync("/api/intake/status")).StatusCode);
+        Assert.Equal(HttpStatusCode.Unauthorized, (await client.GetAsync("/api/admin/deadletters")).StatusCode);
+        Assert.Equal(HttpStatusCode.Unauthorized, (await client.PostAsync("/api/admin/rebuild-from-raw", null)).StatusCode);
+        Assert.Equal(HttpStatusCode.Unauthorized, (await client.PostAsync("/api/admin/deadletters/replay", null)).StatusCode);
 
         var graphNoKey = await client.GetAsync("/api/twin/graph");
         Assert.Equal(HttpStatusCode.OK, graphNoKey.StatusCode);
@@ -82,7 +91,9 @@ public sealed class ApiIntegrationTests : IClassFixture<ApiIntegrationTests.Twin
         ghReq.Headers.Add("X-GitHub-Event", "ping");
         ghReq.Headers.Add("X-GitHub-Delivery", "integration-ping-1");
         ghReq.Headers.Add("X-Hub-Signature-256", $"sha256={sig}");
-        var ghResp = await client.SendAsync(ghReq);
+        HttpResponseMessage ghResp = null!;
+        await _factory.Services.TrackActivity().Timeout(TimeSpan.FromSeconds(30))
+            .ExecuteAndWaitAsync((Func<Wolverine.IMessageContext, Task>)(async _ => ghResp = await client.SendAsync(ghReq)));
         Assert.Equal(HttpStatusCode.OK, ghResp.StatusCode);
 
         // Octopus valid secret -> 200
@@ -92,7 +103,10 @@ public sealed class ApiIntegrationTests : IClassFixture<ApiIntegrationTests.Twin
             Content = new StringContent(octoPayload, Encoding.UTF8, "application/json")
         };
         octoReq.Headers.Add("X-Webhook-Secret", TestWebhookSecret);
-        Assert.Equal(HttpStatusCode.OK, (await client.SendAsync(octoReq)).StatusCode);
+        HttpResponseMessage octoResp = null!;
+        await _factory.Services.TrackActivity().Timeout(TimeSpan.FromSeconds(30))
+            .ExecuteAndWaitAsync((Func<Wolverine.IMessageContext, Task>)(async _ => octoResp = await client.SendAsync(octoReq)));
+        Assert.Equal(HttpStatusCode.OK, octoResp.StatusCode);
 
         // Azure Event Grid validation handshake -> 200 with validationResponse
         var azVal = """[{"id":"v1","eventType":"Microsoft.EventGrid.SubscriptionValidationEvent","data":{"validationCode":"abc-123"}}]""";
@@ -165,6 +179,7 @@ public sealed class ApiIntegrationTests : IClassFixture<ApiIntegrationTests.Twin
         Assert.Equal(HttpStatusCode.OK, listResp.StatusCode);
         var listBody = await listResp.Content.ReadAsStringAsync();
         Assert.Contains("get_summary", listBody, StringComparison.Ordinal);
+        Assert.Contains("get_intake_queue", listBody, StringComparison.Ordinal);
         Assert.Contains("explain_item", listBody, StringComparison.Ordinal);
 
         var callPayload = """
@@ -190,34 +205,5 @@ public sealed class ApiIntegrationTests : IClassFixture<ApiIntegrationTests.Twin
         var callBody = await callResp.Content.ReadAsStringAsync();
         Assert.Contains("cmdemo1", callBody, StringComparison.Ordinal);
         Assert.DoesNotContain("fleet", callBody, StringComparison.OrdinalIgnoreCase);
-    }
-
-    public sealed class TwinTestFactory : WebApplicationFactory<Program>, IDisposable
-    {
-        private readonly string _dbPath = Path.Combine(Path.GetTempPath(), $"twin-test-{Guid.NewGuid():N}.db");
-
-        protected override void ConfigureWebHost(IWebHostBuilder builder)
-        {
-            builder.UseEnvironment("Testing");
-            builder.ConfigureAppConfiguration((_, cfg) =>
-            {
-                cfg.AddInMemoryCollection(new Dictionary<string, string?>
-                {
-                    ["ConnectionStrings:TwinDb"] = $"Data Source={_dbPath}",
-                    ["TWIN_API_KEY"] = TestApiKey,
-                    ["WEBHOOK_SECRET"] = TestWebhookSecret,
-                    ["Twin:EnableBackgroundWorkers"] = "false"
-                });
-            });
-        }
-
-        protected override void Dispose(bool disposing)
-        {
-            base.Dispose(disposing);
-            if (File.Exists(_dbPath))
-            {
-                try { File.Delete(_dbPath); } catch { /* best effort cleanup */ }
-            }
-        }
     }
 }
