@@ -122,11 +122,15 @@ public static class TwinApiEndpoints
             => Results.Ok(await queries.GetStateAtAsync(asOf, ct)));
 
         // Full rebuild of the journal and every read model from the raw intake store.
-        protectedApi.MapPost("/admin/rebuild", async (bool? wait, IntakeRebuildService rebuild) =>
+        // Refuses (Aborted) when the raw store cannot reproduce every live row, unless force=true.
+        protectedApi.MapPost("/admin/rebuild", async (bool? wait, bool? force, IntakeRebuildService rebuild) =>
         {
-            var running = rebuild.StartOrJoin();
+            var running = rebuild.StartOrJoin(force ?? false);
             return wait == false ? Results.Accepted("/api/admin/rebuild/status", rebuild.GetStatus()) : Results.Ok(await running);
         });
+
+        protectedApi.MapGet("/admin/rebuild/preflight", async (RebuildPreflight preflight, CancellationToken ct)
+            => Results.Ok(await preflight.RunAsync(ct)));
 
         protectedApi.MapGet("/admin/rebuild/status", (IntakeRebuildService rebuild) => Results.Ok(rebuild.GetStatus()));
 
@@ -216,7 +220,8 @@ public static class TwinApiEndpoints
             - GET {{baseUrl}}/api/intake — Durable intake queue: depth, oldest pending age, dead letters, transport [X-Twin-Key]
             - GET {{baseUrl}}/api/admin/deadletters — Dead-lettered intake messages [X-Twin-Key]
             - POST {{baseUrl}}/api/admin/deadletters/replay — Replay dead letters (all, or ids in the JSON body) [X-Twin-Key]
-            - POST {{baseUrl}}/api/admin/rebuild — Rebuild the journal and ALL read models from the raw intake table; reports before/after fingerprints [X-Twin-Key]
+            - POST {{baseUrl}}/api/admin/rebuild[?force=true] — Rebuild the journal and ALL read models from the raw intake table; refuses when raw events cannot reproduce every live row; reports before/after fingerprints [X-Twin-Key]
+            - GET {{baseUrl}}/api/admin/rebuild/preflight — What a rebuild would produce versus the live read models, per kind [X-Twin-Key]
             - POST {{baseUrl}}/api/admin/backfill — Re-poll GitHub, Octopus, Azure and probes now [X-Twin-Key]
 
             ## Time Travel

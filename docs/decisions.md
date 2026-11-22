@@ -210,3 +210,14 @@ Following the domain research in the prompt's prior-art references:
   - The live rebuild check runs only on a manual `verify_rebuild` run, in two passes: read models identical, then identical everywhere.
 - **Open**: the raw intake table has no retention yet (about 86 MB after a day); it is the source of truth for rebuilds, so retention needs snapshots first.
 
+## ADR-021: A Rebuild Never Drops State the Raw Store Cannot Reproduce
+
+- **Context**: the first live rebuild that actually cleared tables (2026-11-22 01:57 UTC) came back with fewer rows than it started with, for example 1,216 to 282 pipeline runs. Two causes:
+  - The baseline seeder used "no projection versions yet" as its "not seeded" signal. Webhook-driven refreshes had projected state before it ran, so rows from before event sourcing never reached the raw store.
+  - Eight backfill batches were dead-lettered while an earlier rebuild held the projection gate (before deferral existed), so they were never processed.
+- **Decision**:
+  - The seeder records an explicit `projection-baseline` marker. It publishes only rows whose content hash differs from the projection, so running it late is safe.
+  - Every rebuild first folds the raw store's state observations in memory, using the time-travel fold, and compares entity keys per kind with the live read models. It aborts without clearing anything if a live row cannot be reproduced, unless `force=true`.
+  - `GET /api/admin/rebuild/preflight` exposes the same comparison read-only.
+- **Recovery**: the lost rows are re-observed by the deploy's full backfill and the dead-letter replay. History older than the sources' API windows is no longer in the twin's read models, though the sources still hold it.
+
