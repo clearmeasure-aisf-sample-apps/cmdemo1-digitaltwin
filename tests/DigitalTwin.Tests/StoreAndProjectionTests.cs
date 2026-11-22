@@ -79,7 +79,7 @@ public sealed class StoreAndProjectionTests : IAsyncLifetime, IAsyncDisposable
         var existing = await _store.FindExistingIdempotencyKeysAsync(["github:delivery-abc", "github:unknown"], CancellationToken.None);
         Assert.Equal(["github:delivery-abc"], existing);
 
-        var all = await _store.QueryEventsAsync(null, null, null, null, null, 50, CancellationToken.None);
+        var all = await _store.QueryEventsAsync(null, null, null, null, null, null, 50, CancellationToken.None);
         Assert.Single(all);
     }
 
@@ -108,7 +108,7 @@ public sealed class StoreAndProjectionTests : IAsyncLifetime, IAsyncDisposable
         Assert.Single(await _store.AppendEventsReturnNewAsync([Observation(later, "redelivery")], CancellationToken.None));
         Assert.Empty(await _store.AppendEventsReturnNewAsync([Observation(first, "original")], CancellationToken.None));
 
-        var stored = Assert.Single(await _store.QueryEventsAsync(null, null, null, null, null, 10, CancellationToken.None));
+        var stored = Assert.Single(await _store.QueryEventsAsync(null, null, null, null, null, null, 10, CancellationToken.None));
         Assert.Equal("original", stored.Summary);
         Assert.Equal(first, stored.IngestedAt);
 
@@ -116,7 +116,7 @@ public sealed class StoreAndProjectionTests : IAsyncLifetime, IAsyncDisposable
         await _store.ClearEventJournalAsync(CancellationToken.None);
         await _store.AppendEventsReturnNewAsync([Observation(first, "original")], CancellationToken.None);
         await _store.AppendEventsReturnNewAsync([Observation(later, "redelivery")], CancellationToken.None);
-        Assert.Equal("original", Assert.Single(await _store.QueryEventsAsync(null, null, null, null, null, 10, CancellationToken.None)).Summary);
+        Assert.Equal("original", Assert.Single(await _store.QueryEventsAsync(null, null, null, null, null, null, 10, CancellationToken.None)).Summary);
     }
 
     [Fact]
@@ -243,8 +243,8 @@ public sealed class StoreAndProjectionTests : IAsyncLifetime, IAsyncDisposable
             }
         ], CancellationToken.None);
 
-        var queries = new TwinQueryService(_store, new StubRateProvider(), new StubIntakeMonitor(), TimeProvider.System);
-        var explanation = await queries.ExplainItemAsync("1941", CancellationToken.None);
+        var queries = new TwinQueryService(_store, new TwinTimeTravel(_store, TimeProvider.System), new StubRateProvider(), new StubIntakeMonitor());
+        var explanation = await queries.ExplainItemAsync("1941", null, CancellationToken.None);
 
         Assert.True(explanation.Found);
         Assert.NotNull(explanation.WorkItem);

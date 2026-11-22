@@ -21,6 +21,7 @@ public static class ApplicationServiceCollectionExtensions
         services.AddSingleton<ProjectionGate>();
         services.AddSingleton<ProjectionBaselineSeeder>();
         services.AddSingleton<DriftReconciliationService>();
+        services.AddSingleton<TwinTimeTravel>();
         services.AddSingleton<TwinQueryService>();
 
         services.AddSingleton<IntakeEventApplier>();

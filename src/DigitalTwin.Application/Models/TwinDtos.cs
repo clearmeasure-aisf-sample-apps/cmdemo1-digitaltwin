@@ -28,7 +28,8 @@ public sealed record TwinSummaryDto(
     GitHubRateLimitStatus GitHubQuota,
     IntakeQueueStatus IntakeQueue,
     double? CostMonthToDateUsd,
-    double? CostYesterdayUsd);
+    double? CostYesterdayUsd,
+    DateTimeOffset? AsOf = null);
 
 public sealed record PipelineSummaryDto(
     PipelineDefinition Definition,
@@ -76,7 +77,8 @@ public sealed record DashboardStateDto(
     IReadOnlyList<DeploymentFreezeSnapshot> Freezes,
     IReadOnlyList<DriftFinding> ActiveDrifts,
     IReadOnlyList<AzureResourceSnapshot> AzureResources,
-    IReadOnlyList<ArtifactPackageSnapshot> Artifacts);
+    IReadOnlyList<ArtifactPackageSnapshot> Artifacts,
+    DateTimeOffset? HistoryStartsAt = null);
 
 public sealed record CausalExplanationDto(
     string Query,
@@ -89,3 +91,26 @@ public sealed record CausalExplanationDto(
     IReadOnlyList<DeliveryExecutionSnapshot> Deliveries,
     IReadOnlyList<WorkloadRevisionSnapshot> Workloads,
     IReadOnlyList<ObservedEvent> TimelineEvents);
+
+/// <summary>Compact answer to "what did the twin know at this instant?"</summary>
+public sealed record PointInTimeStateDto(
+    DateTimeOffset AsOf,
+    DateTimeOffset? HistoryStartsAt,
+    bool BeforeHistory,
+    IReadOnlyList<StageAtDto> Environments,
+    IReadOnlyList<AzureResourceAtDto> AzureResources,
+    IReadOnlyDictionary<string, int> BoardColumns,
+    int OpenWorkItems,
+    IReadOnlyList<string> ActiveDrift);
+
+public sealed record StageAtDto(
+    string Stage,
+    IReadOnlyDictionary<string, string?> DeployedVersions,
+    IReadOnlyList<WorkloadAtDto> Workloads,
+    DeliveryAtDto? LastDeployment);
+
+public sealed record WorkloadAtDto(string Deployable, string? RunningVersion, string? Revision, string? Health);
+
+public sealed record DeliveryAtDto(string Release, string? Deployable, string State, DateTimeOffset QueuedAt, DateTimeOffset? FinishedAt);
+
+public sealed record AzureResourceAtDto(string Name, string Type, string ResourceGroup);

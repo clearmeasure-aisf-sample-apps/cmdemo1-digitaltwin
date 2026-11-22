@@ -96,7 +96,7 @@ public sealed class ProjectionRebuildTests(SqlServerFixture sql)
             ["probes"] = J(await store.GetHealthProbesAsync(default), r => r.TargetKey),
             ["drift"] = J(await store.GetDriftFindingsAsync(includeResolved: true, default), r => r.DriftKey),
             ["webhooks"] = J(await store.GetWebhookStatusesAsync(default), r => r.Id),
-            ["journal"] = J((await store.QueryEventsAsync(null, null, null, null, null, int.MaxValue, default)).Select(e => { e.Id = 0; return e; }), e => e.IdempotencyKey)
+            ["journal"] = J((await store.QueryEventsAsync(null, null, null, null, null, null, int.MaxValue, default)).Select(e => { e.Id = 0; return e; }), e => e.IdempotencyKey)
         };
     }
 

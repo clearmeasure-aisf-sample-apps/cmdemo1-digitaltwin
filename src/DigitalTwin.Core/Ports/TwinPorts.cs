@@ -8,30 +8,9 @@ using DigitalTwin.Core.Work;
 
 namespace DigitalTwin.Core.Ports;
 
-public interface ITwinStore
+/// <summary>Current-state read models: the live projection tables, or a point-in-time reconstruction of them.</summary>
+public interface ITwinReadModel
 {
-    Task<bool> AppendEventIfNewAsync(ObservedEvent observedEvent, CancellationToken ct);
-    Task<int> AppendEventsIfNewAsync(IEnumerable<ObservedEvent> observedEvents, CancellationToken ct);
-    Task<IReadOnlyList<ObservedEvent>> AppendEventsReturnNewAsync(IEnumerable<ObservedEvent> observedEvents, CancellationToken ct);
-    Task<IReadOnlySet<string>> FindExistingIdempotencyKeysAsync(IReadOnlyCollection<string> idempotencyKeys, CancellationToken ct);
-    Task<int> ClearEventJournalAsync(CancellationToken ct);
-
-    // Event-sourced read models: only the projector (applying state observation events) changes them.
-    Task<IReadOnlyDictionary<string, string>> GetProjectionHashesAsync(string kind, CancellationToken ct);
-    Task<int> ApplyStateObservationsAsync(IReadOnlyList<ObservedEvent> stateEvents, CancellationToken ct);
-    Task ClearReadModelsAsync(CancellationToken ct);
-    Task<int> CountProjectionVersionsAsync(CancellationToken ct);
-    Task<IReadOnlyDictionary<string, string>> GetReadModelFingerprintAsync(CancellationToken ct);
-    Task<IReadOnlyList<ObservedEvent>> QueryEventsAsync(
-        DateTimeOffset? since,
-        EventSourceKind? source,
-        string? pipelineId,
-        string? stageName,
-        string? eventType,
-        int limit,
-        CancellationToken ct);
-
-    Task UpsertCursorAsync(IngestionCursor cursor, CancellationToken ct);
     Task<IReadOnlyList<IngestionCursor>> GetCursorsAsync(CancellationToken ct);
 
     Task<IReadOnlyList<WebhookRegistrationStatus>> GetWebhookStatusesAsync(CancellationToken ct);
@@ -65,6 +44,42 @@ public interface ITwinStore
     Task<IReadOnlyList<HealthProbeSnapshot>> GetHealthProbesAsync(CancellationToken ct);
 
     Task<IReadOnlyList<DriftFinding>> GetDriftFindingsAsync(bool includeResolved, CancellationToken ct);
+}
+
+public interface ITwinStore : ITwinReadModel
+{
+    Task<bool> AppendEventIfNewAsync(ObservedEvent observedEvent, CancellationToken ct);
+    Task<int> AppendEventsIfNewAsync(IEnumerable<ObservedEvent> observedEvents, CancellationToken ct);
+    Task<IReadOnlyList<ObservedEvent>> AppendEventsReturnNewAsync(IEnumerable<ObservedEvent> observedEvents, CancellationToken ct);
+    Task<IReadOnlySet<string>> FindExistingIdempotencyKeysAsync(IReadOnlyCollection<string> idempotencyKeys, CancellationToken ct);
+    Task<int> ClearEventJournalAsync(CancellationToken ct);
+
+    // Event-sourced read models: only the projector (applying state observation events) changes them.
+    Task<IReadOnlyDictionary<string, string>> GetProjectionHashesAsync(string kind, CancellationToken ct);
+    Task<int> ApplyStateObservationsAsync(IReadOnlyList<ObservedEvent> stateEvents, CancellationToken ct);
+    Task ClearReadModelsAsync(CancellationToken ct);
+    Task<int> CountProjectionVersionsAsync(CancellationToken ct);
+    Task<IReadOnlyDictionary<string, string>> GetReadModelFingerprintAsync(CancellationToken ct);
+
+    // Time travel: the journal's state observations as they stood at a point in time.
+    /// <summary>The newest state observation per (kind, subject) that occurred at or before <paramref name="asOf"/>.</summary>
+    Task<IReadOnlyList<ObservedEvent>> GetLatestStateEventsAsync(DateTimeOffset asOf, CancellationToken ct);
+    /// <summary>Every state observation of one kind that occurred at or before <paramref name="asOf"/>, oldest first.</summary>
+    Task<IReadOnlyList<ObservedEvent>> GetStateEventHistoryAsync(string kind, DateTimeOffset asOf, CancellationToken ct);
+    /// <summary>When the oldest state observation occurred: point-in-time state is empty before it.</summary>
+    Task<DateTimeOffset?> GetStateHistoryStartAsync(CancellationToken ct);
+
+    Task<IReadOnlyList<ObservedEvent>> QueryEventsAsync(
+        DateTimeOffset? since,
+        DateTimeOffset? until,
+        EventSourceKind? source,
+        string? pipelineId,
+        string? stageName,
+        string? eventType,
+        int limit,
+        CancellationToken ct);
+
+    Task UpsertCursorAsync(IngestionCursor cursor, CancellationToken ct);
 }
 
 public interface IRealtimeEventPublisher

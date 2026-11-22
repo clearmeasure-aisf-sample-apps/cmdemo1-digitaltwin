@@ -9,12 +9,22 @@ namespace DigitalTwin.Api.Mcp;
 [McpServerToolType]
 public sealed class TwinMcpTools(TwinQueryService queries)
 {
+    private const string AsOfDescription = "Optional ISO-8601 UTC timestamp: answer from the twin's state as it was at that instant (time travel). Omit for live state.";
     private static readonly JsonSerializerOptions JsonOptions = new(JsonSerializerDefaults.Web) { WriteIndented = true };
 
     [McpServerTool(Name = "get_summary", Title = "Get Digital Twin Summary", ReadOnly = true, Idempotent = true)]
     [Description("Get the complete platform-level digital twin summary of cmdemo1: pipelines, deployment stages (tdd/uat/prod/pool), DORA metrics, active drift count, work board summary, ingestion health, GitHub quota, and durable intake queue (depth, oldest age, dead letters).")]
-    public async Task<string> GetSummaryAsync(CancellationToken ct = default)
-        => JsonSerializer.Serialize(await queries.GetSummaryAsync(ct), JsonOptions);
+    public async Task<string> GetSummaryAsync(
+        [Description(AsOfDescription)] DateTimeOffset? asOf = null,
+        CancellationToken ct = default)
+        => JsonSerializer.Serialize(await queries.GetSummaryAsync(asOf, ct), JsonOptions);
+
+    [McpServerTool(Name = "get_state_at", Title = "Get Point-in-Time State", ReadOnly = true, Idempotent = true)]
+    [Description("Time travel: what version was deployed to each environment (tdd/uat/prod), which Azure resources existed, the work board columns, and active drift at a given instant, reconstructed from the event journal.")]
+    public async Task<string> GetStateAtAsync(
+        [Description("ISO-8601 UTC timestamp to reconstruct state at, e.g. 2026-11-21T12:00:00Z")] DateTimeOffset asOf,
+        CancellationToken ct = default)
+        => JsonSerializer.Serialize(await queries.GetStateAtAsync(asOf, ct), JsonOptions);
 
     [McpServerTool(Name = "query_events", Title = "Query Normalized Event Journal", ReadOnly = true, Idempotent = true)]
     [Description("Query the append-only normalized CloudEvents/CDEvents domain event journal across GitHub, Octopus Deploy, Azure, and live health probes.")]
@@ -25,16 +35,18 @@ public sealed class TwinMcpTools(TwinQueryService queries)
         [Description("Optional stage filter: tdd, uat, prod, pool")] string? stage = null,
         [Description("Optional CDEvents/twin event type")] string? eventType = null,
         [Description("Maximum number of events to return (1-500, default 50)")] int limit = 50,
+        [Description("Optional ISO-8601 UTC end timestamp: only events that occurred at or before it")] DateTimeOffset? asOf = null,
         CancellationToken ct = default)
-        => JsonSerializer.Serialize(await queries.QueryEventsAsync(since, source, pipeline, stage, eventType, limit, ct), JsonOptions);
+        => JsonSerializer.Serialize(await queries.QueryEventsAsync(since, asOf, source, pipeline, stage, eventType, limit, ct), JsonOptions);
 
     [McpServerTool(Name = "get_environment", Title = "Get Environment Stage State", ReadOnly = true, Idempotent = true)]
     [Description("Get detailed runtime, hosting boundary, Container App revisions, health probes, recent deployments, and active drift for a deployment stage (tdd, uat, prod, or pool).")]
     public async Task<string> GetEnvironmentAsync(
         [Description("Deployment stage name: tdd, uat, prod, or pool")] string stage,
+        [Description(AsOfDescription)] DateTimeOffset? asOf = null,
         CancellationToken ct = default)
     {
-        var env = await queries.GetEnvironmentAsync(stage, ct);
+        var env = await queries.GetEnvironmentAsync(stage, asOf, ct);
         return env is null
             ? JsonSerializer.Serialize(new { error = $"Stage '{stage}' not found." }, JsonOptions)
             : JsonSerializer.Serialize(env, JsonOptions);
@@ -44,16 +56,18 @@ public sealed class TwinMcpTools(TwinQueryService queries)
     [Description("List active (or historical resolved) desired-vs-observed drift findings comparing cmdemo1-system GitOps pins against live Azure and Octopus state.")]
     public async Task<string> GetDriftAsync(
         [Description("Include resolved drift findings (default false)")] bool includeResolved = false,
+        [Description(AsOfDescription)] DateTimeOffset? asOf = null,
         CancellationToken ct = default)
-        => JsonSerializer.Serialize(await queries.GetDriftAsync(includeResolved, ct), JsonOptions);
+        => JsonSerializer.Serialize(await queries.GetDriftAsync(includeResolved, asOf, ct), JsonOptions);
 
     [McpServerTool(Name = "get_pipeline", Title = "Get Pipeline Details", ReadOnly = true, Idempotent = true)]
     [Description("Inspect a cmdemo1 pipeline (app-ui, app-dashboard, system-gitops, measurement-scorecard, factory-agentic, twin-observer) with pinned stage versions, latest CI run, open PRs, and active deliveries.")]
     public async Task<string> GetPipelineAsync(
         [Description("Pipeline ID or deployable/repo name")] string pipelineId,
+        [Description(AsOfDescription)] DateTimeOffset? asOf = null,
         CancellationToken ct = default)
     {
-        var summary = await queries.GetSummaryAsync(ct);
+        var summary = await queries.GetSummaryAsync(asOf, ct);
         var match = summary.Pipelines.FirstOrDefault(p =>
             p.Definition.Id.Equals(pipelineId, StringComparison.OrdinalIgnoreCase) ||
             string.Equals(p.Definition.DeployableName, pipelineId, StringComparison.OrdinalIgnoreCase) ||
@@ -73,6 +87,7 @@ public sealed class TwinMcpTools(TwinQueryService queries)
     [Description("Trace an issue number, PR number, release version (e.g. 2.4.2664), commit SHA, or Octopus task/deployment ID across Work -> PR -> Build -> Release -> Deployments -> Azure Runtime.")]
     public async Task<string> ExplainItemAsync(
         [Description("Issue number, PR number, version string, commit SHA prefix, or Octopus task/deployment ID")] string query,
+        [Description(AsOfDescription)] DateTimeOffset? asOf = null,
         CancellationToken ct = default)
-        => JsonSerializer.Serialize(await queries.ExplainItemAsync(query, ct), JsonOptions);
+        => JsonSerializer.Serialize(await queries.ExplainItemAsync(query, asOf, ct), JsonOptions);
 }

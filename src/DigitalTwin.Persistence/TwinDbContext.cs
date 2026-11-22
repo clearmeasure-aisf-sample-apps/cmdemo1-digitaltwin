@@ -11,6 +11,8 @@ namespace DigitalTwin.Persistence;
 
 public sealed class TwinDbContext(DbContextOptions<TwinDbContext> options) : DbContext(options)
 {
+    public const string StateAsOfIndexName = "IX_ObservedEvents_StateAsOf";
+
     public DbSet<ObservedEvent> ObservedEvents => Set<ObservedEvent>();
     public DbSet<IngestionCursor> IngestionCursors => Set<IngestionCursor>();
     public DbSet<WebhookRegistrationStatus> WebhookRegistrationStatuses => Set<WebhookRegistrationStatus>();
@@ -39,6 +41,7 @@ public sealed class TwinDbContext(DbContextOptions<TwinDbContext> options) : DbC
             e.HasIndex(x => x.IdempotencyKey).IsUnique();
             e.HasIndex(x => x.OccurredAt);
             e.HasIndex(x => new { x.Source, x.OccurredAt });
+            e.HasIndex(x => new { x.EventType, x.SubjectType, x.SubjectId, x.OccurredAt }).HasDatabaseName(StateAsOfIndexName);
             e.Property(x => x.IdempotencyKey).HasMaxLength(256);
             e.Property(x => x.EventId).HasMaxLength(128);
             e.Property(x => x.SourceEventId).HasMaxLength(200);

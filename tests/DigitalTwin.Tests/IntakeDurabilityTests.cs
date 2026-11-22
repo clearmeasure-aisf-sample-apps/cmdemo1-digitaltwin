@@ -178,7 +178,7 @@ public sealed class IntakeDurabilityTests(SqlServerFixture sql)
         }));
 
         var store = app.Services.GetRequiredService<ITwinStore>();
-        var before = Fingerprint(await store.QueryEventsAsync(null, null, null, null, null, 10_000, CancellationToken.None));
+        var before = Fingerprint(await store.QueryEventsAsync(null, null, null, null, null, null, 10_000, CancellationToken.None));
         Assert.Equal(4, before.Count);
 
         var response = await client.PostAsync("/api/admin/rebuild", null);
@@ -188,7 +188,7 @@ public sealed class IntakeDurabilityTests(SqlServerFixture sql)
         Assert.Equal(5, report.RawEventsReplayed);
         Assert.Equal(0, report.RawEventsFailed);
 
-        var after = Fingerprint(await store.QueryEventsAsync(null, null, null, null, null, 10_000, CancellationToken.None));
+        var after = Fingerprint(await store.QueryEventsAsync(null, null, null, null, null, null, 10_000, CancellationToken.None));
         Assert.Equal(before, after);
     }
 
