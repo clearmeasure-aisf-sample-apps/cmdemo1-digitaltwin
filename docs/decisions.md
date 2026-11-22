@@ -250,3 +250,13 @@ Following the domain research in the prompt's prior-art references:
 
   The fallback now keeps the board's fields, payloads are canonicalized (`StableJson`), and `lastDeliveryAt` is volatile.
 
+## ADR-023: Side-Table Rebuilds With an Atomic Swap
+
+- **Context**: rebuilding in place paused live intake for the whole rebuild (about 7 minutes per pass on the Basic tier). Projections went stale meanwhile, every poll re-published changed state against stale hashes, and a deploy that landed mid-rebuild left tables half rebuilt.
+- **Decision**:
+  - The rebuild writes a fresh copy of the journal and read models into the `shadow` schema, created from the EF model (`ShadowTwinDbContext`), so keys and indexes match.
+  - Live intake keeps applying to dbo. Rows processed meanwhile are replayed into the shadow in catch-up rounds; journal appends are earliest-wins and projections latest-wins, so order doesn't matter.
+  - The final round runs under the projection gate, compares shadow and live fingerprints, and swaps all rebuilt tables into dbo with `ALTER SCHEMA … TRANSFER` in one transaction. Ingestion cursors stay put.
+  - The swap happens only when the read models are identical, or with `force`; otherwise the shadow is discarded. This supersedes the preflight as the safety guard; the preflight remains available read-only.
+- **Interruptions**: a cancel, an exception or a restart before the swap leaves live state untouched. The startup discards leftover shadow tables, and CI defers deploys while a rebuild runs.
+

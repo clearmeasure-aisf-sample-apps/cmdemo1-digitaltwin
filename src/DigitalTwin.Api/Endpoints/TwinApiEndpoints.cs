@@ -151,6 +151,9 @@ public static class TwinApiEndpoints
         protectedApi.MapGet("/admin/rebuild/preflight", async (RebuildPreflight preflight, CancellationToken ct)
             => Results.Ok(await preflight.RunAsync(ct)));
 
+        protectedApi.MapPost("/admin/rebuild/cancel", (IntakeRebuildService rebuild)
+            => Results.Ok(new { cancelled = rebuild.Cancel() }));
+
         protectedApi.MapGet("/admin/rebuild/status", (IntakeRebuildService rebuild) => Results.Ok(rebuild.GetStatus()));
 
         // Re-poll every source now (publishes state observations through the intake).
@@ -239,9 +242,10 @@ public static class TwinApiEndpoints
             - GET {{baseUrl}}/api/intake — Durable intake queue: depth, oldest pending age, dead letters, transport [X-Twin-Key]
             - GET {{baseUrl}}/api/admin/deadletters — Dead-lettered intake messages [X-Twin-Key]
             - POST {{baseUrl}}/api/admin/deadletters/replay — Replay dead letters (all, or ids in the JSON body) [X-Twin-Key]
-            - POST {{baseUrl}}/api/admin/rebuild[?force=true] — Rebuild the journal and ALL read models from the raw intake table; refuses when raw events cannot reproduce every live row; reports before/after fingerprints [X-Twin-Key]
+            - POST {{baseUrl}}/api/admin/rebuild[?force=true&wait=false] — Rebuild the journal and ALL read models from the raw history into shadow tables without pausing intake; swaps them in atomically only when the read models match live (or force); reports fingerprints [X-Twin-Key]
             - POST {{baseUrl}}/api/admin/retention/run[?olderThanDays=&wait=false] — Archive whole days of processed raw events to Blob Storage, then prune them from SQL [X-Twin-Key]
             - GET {{baseUrl}}/api/admin/storage — Database usage, raw intake counts, archive days, last retention run [X-Twin-Key]
+            - POST {{baseUrl}}/api/admin/rebuild/cancel — Stop a running rebuild; its shadow tables are discarded and live state is untouched [X-Twin-Key]
             - GET {{baseUrl}}/api/admin/rebuild/preflight — What a rebuild would produce versus the live read models, per kind [X-Twin-Key]
             - POST {{baseUrl}}/api/admin/backfill — Re-poll GitHub, Octopus, Azure and probes now [X-Twin-Key]
 

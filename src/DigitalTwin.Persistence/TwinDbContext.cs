@@ -9,8 +9,19 @@ using Microsoft.EntityFrameworkCore;
 
 namespace DigitalTwin.Persistence;
 
-public sealed class TwinDbContext(DbContextOptions<TwinDbContext> options) : DbContext(options)
+public class TwinDbContext : DbContext
 {
+    public TwinDbContext(DbContextOptions<TwinDbContext> options) : base(options)
+    {
+    }
+
+    protected TwinDbContext(DbContextOptions options) : base(options)
+    {
+    }
+
+    /// <summary>Schema of every table; null is the provider default (dbo). Shadow rebuilds use their own schema.</summary>
+    protected virtual string? Schema => null;
+
     public const string StateAsOfIndexName = "IX_ObservedEvents_StateAsOf";
     public const string ChainIndexName = "IX_ObservedEvents_ChainId";
 
@@ -36,6 +47,10 @@ public sealed class TwinDbContext(DbContextOptions<TwinDbContext> options) : DbC
 
     protected override void OnModelCreating(ModelBuilder modelBuilder)
     {
+        if (Schema is not null)
+        {
+            modelBuilder.HasDefaultSchema(Schema);
+        }
         modelBuilder.Entity<ObservedEvent>(e =>
         {
             e.HasKey(x => x.Id);
@@ -173,4 +188,12 @@ public sealed class TwinDbContext(DbContextOptions<TwinDbContext> options) : DbC
             e.Property(x => x.DriftKey).HasMaxLength(200);
         });
     }
+}
+
+/// <summary>The same model in the <c>shadow</c> schema: a rebuild writes here, then swaps the tables into dbo.</summary>
+public sealed class ShadowTwinDbContext(DbContextOptions<ShadowTwinDbContext> options) : TwinDbContext(options)
+{
+    public const string SchemaName = "shadow";
+
+    protected override string Schema => SchemaName;
 }

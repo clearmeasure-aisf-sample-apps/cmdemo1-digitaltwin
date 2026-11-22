@@ -88,6 +88,19 @@ public interface ITwinStore : ITwinReadModel
     Task<DatabaseUsage> GetDatabaseUsageAsync(CancellationToken ct);
 }
 
+/// <summary>
+/// Where a rebuild writes: a fresh, empty copy of the journal and read models beside the live ones. Live state is
+/// replaced only by <see cref="SwapAsync"/>, atomically; until then an interrupted rebuild leaves it untouched.
+/// </summary>
+public interface IRebuildTarget
+{
+    bool IsSupported { get; }
+    /// <summary>Discards any previous shadow and returns a store bound to new, empty shadow tables.</summary>
+    Task<ITwinStore> CreateAsync(CancellationToken ct);
+    Task SwapAsync(CancellationToken ct);
+    Task DiscardAsync(CancellationToken ct);
+}
+
 public sealed record DatabaseUsage(double UsedMb, double AllocatedMb, double MaxMb, IReadOnlyDictionary<string, double> LargestTablesMb);
 
 public interface IRealtimeEventPublisher

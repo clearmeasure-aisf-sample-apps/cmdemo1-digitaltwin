@@ -19,14 +19,11 @@ public sealed partial class EfTwinStore
         }
 
         // RANK keeps every row tied at the newest instant; the fold breaks ties by idempotency key (ordinal).
-        return await db.ObservedEvents.FromSql($"""
-            SELECT e.* FROM dbo.ObservedEvents e WHERE e.Id IN (
-                SELECT r.Id FROM (
-                    SELECT Id, RANK() OVER (PARTITION BY SubjectType, SubjectId ORDER BY OccurredAt DESC) AS Rk
-                    FROM dbo.ObservedEvents
-                    WHERE EventType = {StateKinds.EventType} AND OccurredAt <= {asOf}
-                ) r WHERE r.Rk = 1)
-            """).AsNoTracking().ToListAsync(ct);
+        var table = JournalTable(db);
+        var sql = "SELECT e.* FROM " + table + " e WHERE e.Id IN (SELECT r.Id FROM (" +
+                  "SELECT Id, RANK() OVER (PARTITION BY SubjectType, SubjectId ORDER BY OccurredAt DESC) AS Rk FROM " + table +
+                  " WHERE EventType = {0} AND OccurredAt <= {1}) r WHERE r.Rk = 1)";
+        return await db.ObservedEvents.FromSqlRaw(sql, StateKinds.EventType, asOf).AsNoTracking().ToListAsync(ct);
     }
 
     public async Task<DateTimeOffset?> GetStateHistoryStartAsync(CancellationToken ct)

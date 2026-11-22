@@ -96,6 +96,13 @@ public sealed partial class EfTwinStore(IDbContextFactory<TwinDbContext> factory
         return inserted;
     }
 
+    /// <summary>The journal table in this context's schema (dbo, or shadow during a rebuild). From the model, never input.</summary>
+    private static string JournalTable(TwinDbContext db)
+    {
+        var entity = db.Model.FindEntityType(typeof(ObservedEvent))!;
+        return "[" + (entity.GetSchema() ?? "dbo") + "].[" + entity.GetTableName() + "]";
+    }
+
     private IReadOnlyDictionary<string, int>? _observedEventColumnLimits;
 
     private async Task<IReadOnlyDictionary<string, int>> GetObservedEventColumnLimitsAsync(CancellationToken ct)
@@ -192,7 +199,7 @@ public sealed partial class EfTwinStore(IDbContextFactory<TwinDbContext> factory
             return await db.ObservedEvents.ExecuteDeleteAsync(ct);
         }
         var count = await db.ObservedEvents.CountAsync(ct);
-        await db.Database.ExecuteSqlRawAsync("TRUNCATE TABLE dbo.ObservedEvents", ct);
+        await ClearAsync(db, db.ObservedEvents, ct);
         return count;
     }
 
