@@ -21,7 +21,8 @@ public sealed class ArchitectureTests
         "DigitalTwin.Azure",
         "DigitalTwin.Probes",
         "DigitalTwin.Persistence",
-        "DigitalTwin.Messaging"
+        "DigitalTwin.Messaging",
+        "DigitalTwin.Archive"
     ];
 
     private static readonly string[] IntegrationAssemblyPrefixes =

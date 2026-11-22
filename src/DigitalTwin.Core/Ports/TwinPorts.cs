@@ -83,7 +83,12 @@ public interface ITwinStore : ITwinReadModel
     Task<IReadOnlyList<ObservedEvent>> GetEventsByChainAsync(IReadOnlyCollection<string> chainIds, DateTimeOffset? until, int limit, CancellationToken ct);
 
     Task UpsertCursorAsync(IngestionCursor cursor, CancellationToken ct);
+
+    /// <summary>Space used by the twin database (SQL Server; zeros elsewhere), for keeping well under the tier cap.</summary>
+    Task<DatabaseUsage> GetDatabaseUsageAsync(CancellationToken ct);
 }
+
+public sealed record DatabaseUsage(double UsedMb, double AllocatedMb, double MaxMb, IReadOnlyDictionary<string, double> LargestTablesMb);
 
 public interface IRealtimeEventPublisher
 {

@@ -11,6 +11,7 @@ COPY src/DigitalTwin.Azure/DigitalTwin.Azure.csproj src/DigitalTwin.Azure/
 COPY src/DigitalTwin.Probes/DigitalTwin.Probes.csproj src/DigitalTwin.Probes/
 COPY src/DigitalTwin.Persistence/DigitalTwin.Persistence.csproj src/DigitalTwin.Persistence/
 COPY src/DigitalTwin.Messaging/DigitalTwin.Messaging.csproj src/DigitalTwin.Messaging/
+COPY src/DigitalTwin.Archive/DigitalTwin.Archive.csproj src/DigitalTwin.Archive/
 COPY src/DigitalTwin.Api/DigitalTwin.Api.csproj src/DigitalTwin.Api/
 
 RUN dotnet restore src/DigitalTwin.Api/DigitalTwin.Api.csproj

@@ -26,6 +26,11 @@ public static class ApplicationServiceCollectionExtensions
 
         services.AddSingleton<IntakeEventApplier>();
         services.AddSingleton<IIntakeEventApplier>(sp => sp.GetRequiredService<IntakeEventApplier>());
+        services.Configure<RetentionOptions>(configuration.GetSection("Twin:Retention"));
+        services.AddSingleton<MaintenanceLock>();
+        services.AddSingleton<RawIntakeHistory>();
+        services.AddSingleton<RawIntakeRetentionService>();
+        services.AddHostedService<RawIntakeRetentionHostedService>();
         services.AddSingleton<RebuildPreflight>();
         services.AddSingleton<IntakeRebuildService>();
         services.AddSingleton<FollowUpRefreshScheduler>();

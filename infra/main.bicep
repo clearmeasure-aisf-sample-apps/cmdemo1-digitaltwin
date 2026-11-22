@@ -49,6 +49,12 @@ param intakeTransport string = 'SqlServer'
 @description('Deploy sb-cmdemo1-twin and switch the intake to Azure Service Bus with managed identity. Requires Microsoft.ServiceBus to be registered and roleAssignments/write; disabled until a subscription Owner enables it.')
 param deployServiceBus bool = false
 
+@description('Archive raw intake events older than the retention window as compressed daily files in a private Blob container.')
+param deployArchive bool = true
+
+@description('Days raw intake events stay in SQL before they move to the archive.')
+param retentionDays int = 30
+
 var suffix = take(uniqueString(subscription().id, resourceGroup().id, 'cmdemo1-twin'), 5)
 var tags = {
   system: 'cmdemo1'
@@ -170,6 +176,56 @@ resource sqlDatabase 'Microsoft.Sql/servers/databases@2023-08-01' = {
   }
 }
 
+var archiveAccountName = take('stcmdemo1twin${suffix}', 24)
+var archiveContainerName = 'raw-intake-archive'
+
+resource archiveAccount 'Microsoft.Storage/storageAccounts@2023-05-01' = if (deployArchive) {
+  name: archiveAccountName
+  location: location
+  tags: tags
+  sku: {
+    name: 'Standard_LRS'
+  }
+  kind: 'StorageV2'
+  properties: {
+    accessTier: 'Cool'
+    minimumTlsVersion: 'TLS1_2'
+    supportsHttpsTrafficOnly: true
+    allowBlobPublicAccess: false
+  }
+}
+
+resource archiveBlobService 'Microsoft.Storage/storageAccounts/blobServices@2023-05-01' = if (deployArchive) {
+  parent: archiveAccount
+  name: 'default'
+}
+
+resource archiveContainer 'Microsoft.Storage/storageAccounts/blobServices/containers@2023-05-01' = if (deployArchive) {
+  parent: archiveBlobService
+  name: archiveContainerName
+  properties: {
+    publicAccess: 'None'
+  }
+}
+
+// Shared key via listKeys (Contributor-compatible: no role assignment needed); passed only as a Container App secret.
+var archiveConnectionString = deployArchive
+  ? 'DefaultEndpointsProtocol=https;AccountName=${archiveAccountName};AccountKey=${archiveAccount!.listKeys().keys[0].value};EndpointSuffix=${environment().suffixes.storage}'
+  : ''
+
+var archiveSecrets = deployArchive ? [{ name: 'archive-connection', value: archiveConnectionString }] : []
+
+var archiveEnv = deployArchive
+  ? [
+      { name: 'Twin__Archive__Provider', value: 'AzureBlob' }
+      { name: 'Twin__Archive__Container', value: archiveContainerName }
+      { name: 'Twin__Archive__ConnectionString', secretRef: 'archive-connection' }
+      { name: 'Twin__Retention__Days', value: string(retentionDays) }
+    ]
+  : [
+      { name: 'Twin__Archive__Provider', value: 'None' }
+    ]
+
 var twinIdentityName = 'id-cmdemo1-twin'
 
 module serviceBus 'servicebus.bicep' = if (deployServiceBus) {
@@ -200,6 +256,7 @@ resource twinApp 'Microsoft.App/containerApps@2025-01-01' = {
   dependsOn: [
     sqlDatabase
     allowAzureServices
+    archiveContainer
   ]
   identity: deployServiceBus
     ? {
@@ -229,7 +286,7 @@ resource twinApp 'Microsoft.App/containerApps@2025-01-01' = {
           passwordSecretRef: 'acr-password'
         }
       ]
-      secrets: [
+      secrets: concat([
         { name: 'acr-password', value: acrPassword }
         #disable-next-line use-secure-value-for-secure-inputs
         { name: 'twin-db-connection', value: sqlConnectionString }
@@ -238,7 +295,7 @@ resource twinApp 'Microsoft.App/containerApps@2025-01-01' = {
         { name: 'gh-pat', value: gitHubPat }
         { name: 'webhook-secret', value: webhookSecret }
         { name: 'twin-api-key', value: twinApiKey }
-      ]
+      ], archiveSecrets)
     }
     template: {
       containers: [
@@ -262,7 +319,7 @@ resource twinApp 'Microsoft.App/containerApps@2025-01-01' = {
             { name: 'GH_PAT', secretRef: 'gh-pat' }
             { name: 'WEBHOOK_SECRET', secretRef: 'webhook-secret' }
             { name: 'TWIN_API_KEY', secretRef: 'twin-api-key' }
-          ], intakeEnv)
+          ], intakeEnv, archiveEnv)
           probes: [
             {
               type: 'Startup'
@@ -306,4 +363,5 @@ output managedEnvironmentName string = managedEnvironment.name
 output keyVaultName string = keyVault.name
 output sqlServerName string = sqlServer.name
 output sqlDatabaseName string = sqlDatabase.name
+output archiveAccountName string = deployArchive ? archiveAccountName : ''
 output intakeTransport string = deployServiceBus ? 'AzureServiceBus' : intakeTransport

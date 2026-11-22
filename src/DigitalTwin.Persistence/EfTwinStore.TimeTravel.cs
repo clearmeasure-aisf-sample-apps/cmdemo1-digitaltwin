@@ -1,3 +1,4 @@
+using DigitalTwin.Core.Ports;
 using DigitalTwin.Core.Observation;
 using DigitalTwin.Core.Projections;
 using Microsoft.EntityFrameworkCore;
@@ -67,4 +68,34 @@ public sealed partial class EfTwinStore
             .Take(limit)
             .ToList();
     }
+
+    public async Task<DatabaseUsage> GetDatabaseUsageAsync(CancellationToken ct)
+    {
+        await using var db = await factory.CreateDbContextAsync(ct);
+        if (!db.Database.IsSqlServer())
+        {
+            return new DatabaseUsage(0, 0, 0, new Dictionary<string, double>());
+        }
+        var files = await db.Database.SqlQueryRaw<FileUsage>("""
+            SELECT CAST(SUM(FILEPROPERTY(name, 'SpaceUsed')) * 8 / 1024.0 AS float) AS UsedMb,
+                   CAST(SUM(size) * 8 / 1024.0 AS float) AS AllocatedMb,
+                   CAST(ISNULL(CAST(DATABASEPROPERTYEX(DB_NAME(), 'MaxSizeInBytes') AS bigint), 0) / 1048576.0 AS float) AS MaxMb
+            FROM sys.database_files WHERE type = 0
+            """).SingleAsync(ct);
+        var tables = await db.Database.SqlQueryRaw<TableUsage>("""
+            SELECT TOP 8 s.name + '.' + t.name AS Name, CAST(SUM(a.used_pages) * 8 / 1024.0 AS float) AS UsedMb
+            FROM sys.tables t
+            JOIN sys.schemas s ON s.schema_id = t.schema_id
+            JOIN sys.partitions p ON p.object_id = t.object_id
+            JOIN sys.allocation_units a ON a.container_id = p.partition_id
+            GROUP BY s.name, t.name
+            ORDER BY UsedMb DESC
+            """).ToListAsync(ct);
+        return new DatabaseUsage(Math.Round(files.UsedMb, 1), Math.Round(files.AllocatedMb, 1), Math.Round(files.MaxMb, 1),
+            tables.ToDictionary(t => t.Name, t => Math.Round(t.UsedMb, 1), StringComparer.Ordinal));
+    }
+
+    private sealed record FileUsage(double UsedMb, double AllocatedMb, double MaxMb);
+
+    private sealed record TableUsage(string Name, double UsedMb);
 }

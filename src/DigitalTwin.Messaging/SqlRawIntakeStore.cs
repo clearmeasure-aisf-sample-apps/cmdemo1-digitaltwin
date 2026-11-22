@@ -159,6 +159,67 @@ public sealed class SqlRawIntakeStore(IOptions<MessagingOptions> options) : IRaw
             LastProcessedAt: reader.IsDBNull(6) ? null : reader.GetDateTimeOffset(6));
     }
 
+    public async Task<IReadOnlyList<DateOnly>> GetArchivableDaysAsync(DateTimeOffset before, CancellationToken ct)
+    {
+        await using var conn = new SqlConnection(ConnectionString);
+        await conn.OpenAsync(ct);
+        await using var cmd = new SqlCommand("""
+            SELECT DISTINCT CAST(SWITCHOFFSET(received_at, '+00:00') AS date)
+            FROM twin.raw_intake_events
+            WHERE processed_at IS NOT NULL AND received_at < @before
+            """, conn);
+        cmd.Parameters.AddWithValue("@before", before);
+        var days = new List<DateOnly>();
+        await using var reader = await cmd.ExecuteReaderAsync(ct);
+        while (await reader.ReadAsync(ct))
+        {
+            var day = DateOnly.FromDateTime(reader.GetDateTime(0));
+            if (new DateTimeOffset(day.AddDays(1).ToDateTime(TimeOnly.MinValue), TimeSpan.Zero) <= before)
+            {
+                days.Add(day);
+            }
+        }
+        return days.Order().ToList();
+    }
+
+    public async Task<IReadOnlyList<RawIntakeEvent>> ReadProcessedDayPageAsync(DateOnly day, long afterSequence, int take, CancellationToken ct)
+    {
+        await using var conn = new SqlConnection(ConnectionString);
+        await conn.OpenAsync(ct);
+        await using var cmd = new SqlCommand($"""
+            SELECT TOP (@take) {Columns} FROM twin.raw_intake_events
+            WHERE processed_at IS NOT NULL AND received_at >= @start AND received_at < @end AND sequence > @after
+            ORDER BY sequence
+            """, conn);
+        var start = new DateTimeOffset(day.ToDateTime(TimeOnly.MinValue), TimeSpan.Zero);
+        cmd.Parameters.AddWithValue("@take", take);
+        cmd.Parameters.AddWithValue("@start", start);
+        cmd.Parameters.AddWithValue("@end", start.AddDays(1));
+        cmd.Parameters.AddWithValue("@after", afterSequence);
+        var list = new List<RawIntakeEvent>();
+        await using var reader = await cmd.ExecuteReaderAsync(ct);
+        while (await reader.ReadAsync(ct))
+        {
+            list.Add(Read(reader));
+        }
+        return list;
+    }
+
+    public async Task<int> DeleteAsync(IReadOnlyCollection<Guid> ids, CancellationToken ct)
+    {
+        var deleted = 0;
+        await using var conn = new SqlConnection(ConnectionString);
+        await conn.OpenAsync(ct);
+        foreach (var chunk in ids.Chunk(500))
+        {
+            await using var cmd = new SqlCommand(
+                "DELETE FROM twin.raw_intake_events WHERE id IN (SELECT CAST(value AS uniqueidentifier) FROM OPENJSON(@ids))", conn);
+            cmd.Parameters.AddWithValue("@ids", JsonSerializer.Serialize(chunk));
+            deleted += await cmd.ExecuteNonQueryAsync(ct);
+        }
+        return deleted;
+    }
+
     private static RawIntakeEvent Read(SqlDataReader r)
         => new()
         {

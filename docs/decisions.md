@@ -230,3 +230,15 @@ Following the domain research in the prompt's prior-art references:
   - Every rebuild first folds the raw store's state observations in memory, using the time-travel fold, and compares entity keys per kind with the live read models. It aborts without clearing anything if a live row cannot be reproduced, unless `force=true`.
   - `GET /api/admin/rebuild/preflight` exposes the same comparison read-only.
 - **Recovery**: the lost rows are re-observed by the deploy's full backfill and the dead-letter replay. History older than the sources' API windows is no longer in the twin's read models, though the sources still hold it.
+
+## ADR-022: Raw Intake Retention With a Blob Archive
+
+- **Context**: the raw intake table is the system of record for rebuilds and grows by roughly 20k events a day. The database stays on the Basic tier, capped at 2 GB.
+- **Decision**:
+  - A daily retention job moves whole UTC days of processed raw events older than 30 days into a private, cool-tier Blob container (`stcmdemo1twin*`, `raw-intake-archive`), one gzip JSON-lines file per day.
+  - Each day file is merged with any earlier file for that day, written completely before it replaces the old one, then read back and checked. Only after that are its rows deleted from SQL, so an interrupted run never loses events.
+  - `RawIntakeHistory` feeds rebuilds and preflights from the archive first, then SQL, reading each event once.
+  - Retention and rebuild never overlap: they share a `MaintenanceLock`.
+- **Credentials**: the deploy principal has no `roleAssignments/write`, so Bicep reads the account key with `listKeys()` and passes it only as a Container App secret. It never appears in logs or the repository.
+- **Locally**: the archive is a directory (`FileSystem` provider), so integration tests need no Azure.
+

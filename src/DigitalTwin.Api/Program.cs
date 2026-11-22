@@ -2,6 +2,7 @@ using System.Text.Json.Serialization;
 using DigitalTwin.Api.Auth;
 using DigitalTwin.Api.Endpoints;
 using DigitalTwin.Api.Mcp;
+using DigitalTwin.Archive;
 using DigitalTwin.Api.Realtime;
 using DigitalTwin.Application;
 using DigitalTwin.Azure;
@@ -44,6 +45,7 @@ builder.Services
     .AddTwinGitHub(builder.Configuration)
     .AddTwinOctopus(builder.Configuration)
     .AddTwinAzure(builder.Configuration)
+    .AddTwinArchive(builder.Configuration)
     .AddTwinHealthProbes();
 builder.AddTwinMessaging();
 
