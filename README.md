@@ -141,6 +141,7 @@ flowchart LR
 
 - `GET /api/events?since=&until=&source=&pipeline=&stage=&eventType=&limit=`
 - `GET /api/state-at?asOf=<ISO-8601>`: time travel (see below)
+- `GET /api/dora?windowDays=28&deployable=&asOf=`: DORA keys from change chains
 - `GET /api/reconciliation` (latest) and `POST /api/admin/reconciliation/run`: daily accuracy check of the twin against GitHub and Octopus
 - `GET /api/config-changes?since=&limit=&asOf=`: Octopus deployment process, variable, project, trigger and runbook changes, with who made them
 - `GET /api/change-chains?q=<issue|pr|sha|version|release>&limit=&asOf=`: change chains (see below)
@@ -162,6 +163,7 @@ Pass header `X-Twin-Key: <TWIN_API_KEY>`:
 
 - `get_summary`
 - `get_change_chain` (by issue, PR, commit, release or version)
+- `get_dora_metrics` (DORA keys from change chains, with `asOf`)
 - `get_reconciliation` (twin accuracy versus GitHub and Octopus)
 - `get_config_changes` (Octopus process, variable, project, trigger and runbook changes)
 - `get_state_at` (time travel)
@@ -186,6 +188,16 @@ A change chain follows one change end to end: work item, branch/PR, CI build, re
 - **Query**: `q` accepts an issue or PR number, a commit SHA prefix, a version, an Octopus release, deployment or task id, or a chain id such as `ui@2.4.2664`. Omit it for the most recent chains. `asOf` works here too.
 - **Signals**: each chain carries the journal facts that explain it, attached to their stage. These are PR reviews, failed workflow jobs and check runs, manual interventions, who took and signed them off (with notes), guided failures and failed deployments.
 - **Dashboard**: the change-chains panel shows up to six recent changes as animated paths with stage durations. Failed stages are red, retried stages have a red dot, and the running stage pulses. Click a row for the stage details.
+
+### DORA Metrics From Change Chains
+
+One change chain is one change, so the four DORA keys come straight from the chains:
+- **Deployment frequency**: chains delivered to prod, per day.
+- **Lead time for changes**: commit to prod, median and p85.
+- **Change failure rate**: prod deployments with a failed attempt, or a guided-failure or failed-deploy signal.
+- **Time to restore**: from a failed prod change to the next successful prod delivery of the same deployable.
+
+Each key carries its DORA performance band (elite, high, medium, low) and a per-deployable breakdown. They are available from `GET /api/dora`, MCP `get_dora_metrics` and the dashboard's metric strip (7D/28D), all honoring `asOf`.
 
 ### Time Travel (`asOf`)
 

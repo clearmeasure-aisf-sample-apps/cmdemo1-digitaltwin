@@ -122,6 +122,9 @@ public static class TwinApiEndpoints
         protectedApi.MapGet("/change-chains", async (string? q, int? limit, DateTimeOffset? asOf, TwinQueryService queries, CancellationToken ct)
             => Results.Ok(await queries.GetChangeChainsAsync(q, limit ?? 20, asOf, ct)));
 
+        protectedApi.MapGet("/dora", async (int? windowDays, string? deployable, DateTimeOffset? asOf, TwinQueryService queries, CancellationToken ct)
+            => Results.Ok(await queries.GetChainDoraAsync(windowDays ?? 28, deployable, asOf, ct)));
+
         protectedApi.MapGet("/reconciliation", (ReconciliationService reconciliation)
             => Results.Ok(reconciliation.LastReport is { } report ? report : new { message = "No reconciliation has run yet; POST /api/admin/reconciliation/run." }));
 
@@ -251,6 +254,7 @@ public static class TwinApiEndpoints
             - GET {{baseUrl}}/api/metrics?windowDays=7&stage=prod — DORA 5-metric delivery scorecard [X-Twin-Key]
             - GET {{baseUrl}}/api/explain?q=<issue|pr|version|sha|task> — Causal trace across work -> PR -> build -> release -> deploy -> runtime [X-Twin-Key]
             - GET {{baseUrl}}/api/change-chains?q=<issue|pr|sha|version|release>&limit=&asOf= — Change chains: work item -> PR -> build -> RC -> Octopus release -> tdd -> uat -> prod with stage timings and failures [X-Twin-Key]
+            - GET {{baseUrl}}/api/dora?windowDays=28&deployable=&asOf= — DORA keys from change chains: deployment frequency, lead time, change failure rate, time to restore, with performance bands [X-Twin-Key]
             - GET {{baseUrl}}/api/reconciliation — Latest daily comparison of the twin against GitHub and Octopus: drifted checks with what the twin is missing [X-Twin-Key]
             - POST {{baseUrl}}/api/admin/reconciliation/run — Reconcile now (drifted repositories and Octopus are refreshed) [X-Twin-Key]
             - GET {{baseUrl}}/api/config-changes?since=&limit=&asOf= — Octopus deployment process, variable, project, trigger and runbook changes [X-Twin-Key]
@@ -271,7 +275,7 @@ public static class TwinApiEndpoints
 
             ## MCP Server (Streamable HTTP)
             Endpoint: {{baseUrl}}/mcp (requires `X-Twin-Key` header)
-            Tools: get_summary, get_change_chain, get_config_changes, get_reconciliation, get_state_at, query_events, get_environment, get_drift, get_pipeline, explain_item, get_intake_queue (read tools accept `asOf`)
+            Tools: get_summary, get_dora_metrics, get_change_chain, get_config_changes, get_reconciliation, get_state_at, query_events, get_environment, get_drift, get_pipeline, explain_item, get_intake_queue (read tools accept `asOf`)
             """);
     }
 }

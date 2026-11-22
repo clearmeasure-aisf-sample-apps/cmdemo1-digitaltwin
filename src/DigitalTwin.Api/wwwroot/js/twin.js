@@ -141,6 +141,20 @@
     document.getElementById('m-mttr').textContent = dora.failedDeploymentRecoveryHours != null ? `${dora.failedDeploymentRecoveryHours}h` : '0h';
     document.getElementById('m-rework').textContent = dora.reworkRatePercent != null ? `${dora.reworkRatePercent}%` : '--';
 
+    // DORA keys from change chains (one chain = one change), with DORA performance bands.
+    const cd = state.windowDays === 28 ? state.data.chainDora28Days : state.data.chainDora7Days;
+    if (cd) {
+      const fmt = (m, suffix) => m && m.value != null ? `${m.value}${suffix}` : '--';
+      document.getElementById('m-freq').textContent = fmt(cd.deploymentFrequency, '/d');
+      document.getElementById('m-freq-sub').textContent = `${cd.deployments} prod changes · ${cd.deploymentFrequency.rating}`;
+      document.getElementById('m-lead').textContent = fmt(cd.leadTimeForChanges, 'h');
+      document.getElementById('m-lead-sub').textContent = `p85 ${fmt(cd.leadTimeP85, 'h')} · ${cd.leadTimeForChanges.rating}`;
+      document.getElementById('m-cfr').textContent = fmt(cd.changeFailureRate, '%');
+      document.getElementById('m-cfr-sub').textContent = `${cd.failedDeployments} failed / ${cd.deployments} · ${cd.changeFailureRate.rating}`;
+      document.getElementById('m-mttr').textContent = fmt(cd.timeToRestore, 'h');
+      document.getElementById('m-mttr-sub').textContent = `fail → next prod success · ${cd.timeToRestore.rating}`;
+    }
+
     const driftCard = document.getElementById('drift-kpi-card');
     driftCard.classList.remove('ok', 'warn', 'crit');
     driftCard.classList.add(s.criticalDriftCount > 0 ? 'crit' : s.activeDriftCount > 0 ? 'warn' : 'ok');

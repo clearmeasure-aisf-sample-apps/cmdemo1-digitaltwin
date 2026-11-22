@@ -42,6 +42,15 @@ public sealed class TwinMcpTools(TwinQueryService queries, ReconciliationService
         CancellationToken ct = default)
         => JsonSerializer.Serialize(await queries.GetConfigChangesAsync((asOf ?? DateTimeOffset.UtcNow).AddHours(-Math.Max(1, sinceHours)), limit, asOf, ct), JsonOptions);
 
+    [McpServerTool(Name = "get_dora_metrics", Title = "Get DORA Metrics From Change Chains", ReadOnly = true, Idempotent = true)]
+    [Description("The four DORA keys computed from change chains: deployment frequency, lead time for changes (median and p85, commit to prod), change failure rate and time to restore, each with its DORA performance band, plus a per-deployable breakdown and the failed chains.")]
+    public async Task<string> GetDoraMetricsAsync(
+        [Description("Window in days (1-90, default 28)")] int windowDays = 28,
+        [Description("Optional deployable filter: ui, dashboard, system, scorecard")] string? deployable = null,
+        [Description(AsOfDescription)] DateTimeOffset? asOf = null,
+        CancellationToken ct = default)
+        => JsonSerializer.Serialize(await queries.GetChainDoraAsync(windowDays, deployable, asOf, ct), JsonOptions);
+
     [McpServerTool(Name = "get_reconciliation", Title = "Get Twin Accuracy Reconciliation", ReadOnly = true, Idempotent = true)]
     [Description("How accurate the twin is: the latest comparison against GitHub (open PRs, recently active issues per repository) and Octopus (deployed version per deployable and environment, recent releases), with what the twin is missing or has extra.")]
     public async Task<string> GetReconciliationAsync(

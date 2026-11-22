@@ -80,7 +80,9 @@ public sealed record DashboardStateDto(
     IReadOnlyList<AzureResourceSnapshot> AzureResources,
     IReadOnlyList<ArtifactPackageSnapshot> Artifacts,
     DateTimeOffset? HistoryStartsAt = null,
-    IReadOnlyList<ChangeChain>? ChangeChains = null);
+    IReadOnlyList<ChangeChain>? ChangeChains = null,
+    ChainDoraMetrics? ChainDora7Days = null,
+    ChainDoraMetrics? ChainDora28Days = null);
 
 public sealed record CausalExplanationDto(
     string Query,
