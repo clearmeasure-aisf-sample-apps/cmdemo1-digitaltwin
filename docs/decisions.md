@@ -279,3 +279,8 @@ Following the domain research in the prompt's prior-art references:
 
 - **Decision**: DORA keys are computed from change chains (`ChainDora`), not from raw deployment rows. A chain is one change, from commit to prod. Lead time is commit to prod; a failure is any failed prod attempt or a prod failure signal. Time to restore runs to the next successful prod delivery of that deployable. Bands follow the DORA State of DevOps thresholds. The older delivery-based scorecard stays in the summary for continuity; the dashboard's strip shows the chain-based keys.
 
+## ADR-027: Complete Source Event Coverage
+
+- **Decision**: the catalog covers every documented source event. Hand-written rows carry the domain semantics the twin uses; everything else gets a generated row with a deterministic type, domain event and bounded context (`SourceEventTypes`). That means `twin.github.{event}.{action}` for GitHub, and `twin.octopus.{area}.{verb}` for Octopus, replacing `twin.octopus.audit.{category}`. The name lists (`SourceEventNames`) are generated from the official snapshots, and a test keeps them equal.
+- **Not subscribed**: the 44 instance-level Octopus categories (logins, licences, API keys, certificates, signing keys, usage declarations, MCP OAuth) stay out of the space subscription. They describe the Octopus instance rather than delivery, and carry user names and IP addresses. They are typed if they ever arrive.
+

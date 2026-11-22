@@ -205,8 +205,17 @@ public static class OctopusEventNormalizer
             "CompliancePolicyEvaluatedNonCompliantBlocked" => ("twin.octopus.compliance.evaluated", "service", "blocked", EventOutcome.Failure),
             "CompliancePolicyEvaluatedNonCompliantWarned" => ("twin.octopus.compliance.evaluated", "service", "warned", EventOutcome.None),
             "RateLimitExceeded" => ("twin.octopus.rateLimit.exceeded", "octopusDocument", "exceeded", EventOutcome.Failure),
-            _ => ($"twin.octopus.audit.{category}", "octopusDocument", category.ToLowerInvariant(), EventOutcome.None)
+            _ => (SourceEventTypes.OctopusType(category), "octopusDocument", category.ToLowerInvariant(), OutcomeOf(category))
         };
+
+    private static EventOutcome OutcomeOf(string category)
+        => category.EndsWith("Failed", StringComparison.Ordinal) || category.EndsWith("Banned", StringComparison.Ordinal)
+           || category.EndsWith("Expired", StringComparison.Ordinal) || category.EndsWith("Rejected", StringComparison.Ordinal)
+           || category.EndsWith("Unhealthy", StringComparison.Ordinal) || category.EndsWith("Unavailable", StringComparison.Ordinal)
+            ? EventOutcome.Failure
+            : category.EndsWith("Succeeded", StringComparison.Ordinal) || category.EndsWith("Healthy", StringComparison.Ordinal)
+                ? EventOutcome.Success
+                : EventOutcome.None;
 
     private static string? InferProjectFromMessage(string message)
     {
