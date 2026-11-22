@@ -14,6 +14,8 @@ namespace DigitalTwin.Persistence;
 public sealed class ShadowRebuildTarget(IDbContextFactory<TwinDbContext> live, IDbContextFactory<ShadowTwinDbContext> shadow) : IRebuildTarget
 {
     private const string RetiredSchema = "retired";
+    // The swap waits for readers' schema locks; drops of large retired tables are slow on the Basic tier.
+    private const int CommandTimeoutSeconds = 300;
 
     public bool IsSupported
     {
@@ -28,6 +30,7 @@ public sealed class ShadowRebuildTarget(IDbContextFactory<TwinDbContext> live, I
     {
         await DiscardAsync(ct);
         await using var db = await shadow.CreateDbContextAsync(ct);
+        db.Database.SetCommandTimeout(TimeSpan.FromSeconds(CommandTimeoutSeconds));
         var script = db.Database.GenerateCreateScript();
         foreach (var batch in script.Split(["\nGO", "\r\nGO"], StringSplitOptions.RemoveEmptyEntries).Select(b => b.Trim()).Where(b => b.Length > 0))
         {
@@ -52,9 +55,9 @@ public sealed class ShadowRebuildTarget(IDbContextFactory<TwinDbContext> live, I
         {
             foreach (var table in tables)
             {
-                await using var retire = new SqlCommand($"ALTER SCHEMA [{RetiredSchema}] TRANSFER [dbo].[{table}]", conn, tx);
+                await using var retire = new SqlCommand($"ALTER SCHEMA [{RetiredSchema}] TRANSFER [dbo].[{table}]", conn, tx) { CommandTimeout = CommandTimeoutSeconds };
                 await retire.ExecuteNonQueryAsync(ct);
-                await using var promote = new SqlCommand($"ALTER SCHEMA [dbo] TRANSFER [{ShadowTwinDbContext.SchemaName}].[{table}]", conn, tx);
+                await using var promote = new SqlCommand($"ALTER SCHEMA [dbo] TRANSFER [{ShadowTwinDbContext.SchemaName}].[{table}]", conn, tx) { CommandTimeout = CommandTimeoutSeconds };
                 await promote.ExecuteNonQueryAsync(ct);
             }
             await tx.CommitAsync(ct);
@@ -84,6 +87,7 @@ public sealed class ShadowRebuildTarget(IDbContextFactory<TwinDbContext> live, I
 
     private static async Task DropTablesAsync(TwinDbContext db, string schema, CancellationToken ct)
     {
+        db.Database.SetCommandTimeout(TimeSpan.FromSeconds(CommandTimeoutSeconds));
         var tables = await db.Database.SqlQueryRaw<string>(
             "SELECT t.name AS [Value] FROM sys.tables t WHERE t.schema_id = SCHEMA_ID({0})", schema).ToListAsync(ct);
         foreach (var table in tables)

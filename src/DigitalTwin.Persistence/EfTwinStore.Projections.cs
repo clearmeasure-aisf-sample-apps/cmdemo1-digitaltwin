@@ -227,6 +227,7 @@ public sealed partial class EfTwinStore
     public async Task<IReadOnlyDictionary<string, string>> GetReadModelFingerprintAsync(CancellationToken ct)
     {
         await using var db = await factory.CreateDbContextAsync(ct);
+        db.Database.SetCommandTimeout(TimeSpan.FromMinutes(5));
         var result = new SortedDictionary<string, string>(StringComparer.Ordinal)
         {
             [StateKinds.Repository.Name] = await Fingerprint(db.Repositories, r => r.Name, ct),
@@ -253,20 +254,20 @@ public sealed partial class EfTwinStore
     }
 
     /// <summary>
-    /// Computed in the database: streaming every payload to the app reads the whole journal through a 5 DTU tier.
-    /// BINARY_CHECKSUM is case-sensitive; CHECKSUM_AGG is order-independent and rows are unique by idempotency key.
-    /// Payloads above 16 KB (legacy unbounded source payloads, large state sets) contribute their length only, so the
-    /// fingerprint never reads off-row LOB pages; state content is covered by the read-model fingerprints.
+    /// Computed in the database from two narrow covering indexes, never the journal's data pages: scanning a few hundred MB
+    /// of payloads takes minutes on a 5 DTU tier, and this runs while live intake is paused for a rebuild swap. State
+    /// observation keys embed their content hash; type, subject and time cover the rest. Read models are fingerprinted
+    /// in full separately. BINARY_CHECKSUM is case-sensitive; CHECKSUM_AGG is order-independent.
     /// </summary>
     private static async Task<string> JournalFingerprintSqlServerAsync(TwinDbContext db, CancellationToken ct)
     {
-        var sql = "SELECT COUNT_BIG(*) AS [Count], ISNULL(CHECKSUM_AGG(BINARY_CHECKSUM(" +
-            "IdempotencyKey, EventId, Source, SourceEventId, SpecVersion, EventType, SubjectType, SubjectId, Predicate, " +
-            "OccurredAt, IngestedAt, Channel, CorrelationId, ChainId, PipelineId, StageName, DeployableName, Actor, Outcome, " +
-            "Summary, SourceUrl, CASE WHEN DATALENGTH(PayloadJson) <= 16384 THEN HASHBYTES('SHA2_256', PayloadJson) " +
-            "ELSE CAST(DATALENGTH(PayloadJson) AS varbinary(8)) END)), 0) AS [Checksum] FROM " + JournalTable(db);
-        var row = await db.Database.SqlQueryRaw<JournalChecksum>(sql).SingleAsync(ct);
-        return $"{row.Count}:{row.Checksum:x8}";
+        db.Database.SetCommandTimeout(TimeSpan.FromMinutes(5));
+        var table = JournalTable(db);
+        var keysSql = "SELECT COUNT_BIG(*) AS [Count], ISNULL(CHECKSUM_AGG(BINARY_CHECKSUM(IdempotencyKey)), 0) AS [Checksum] FROM " + table;
+        var shapeSql = "SELECT COUNT_BIG(*) AS [Count], ISNULL(CHECKSUM_AGG(BINARY_CHECKSUM(EventType, SubjectType, SubjectId, OccurredAt)), 0) AS [Checksum] FROM " + table;
+        var keys = await db.Database.SqlQueryRaw<JournalChecksum>(keysSql).SingleAsync(ct);
+        var shape = await db.Database.SqlQueryRaw<JournalChecksum>(shapeSql).SingleAsync(ct);
+        return $"{keys.Count}:{keys.Checksum:x8}{shape.Checksum:x8}";
     }
 
     private static async Task<string> JournalFingerprintStreamedAsync(TwinDbContext db, CancellationToken ct)
