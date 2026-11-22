@@ -210,6 +210,16 @@ Following the domain research in the prompt's prior-art references:
   - The live rebuild check runs only on a manual `verify_rebuild` run, in two passes: read models identical, then identical everywhere.
 - **Open**: the raw intake table has no retention yet (about 86 MB after a day); it is the source of truth for rebuilds, so retention needs snapshots first.
 
+## ADR-020: Source Event Catalog Verified Against Official Names
+
+- **Context**: domain events were defined only implicitly by the normalizers. Nothing checked that the source event names exist, or showed which source events the twin drops.
+- **Decision**:
+  - `SourceEventCatalog` (Core) lists each exact source event (GitHub event + action, Octopus category, Event Grid event type, Resource Graph change type) with its twin event type, DDD domain event and bounded context.
+  - Snapshots of the official names (GitHub docs, our Octopus instance's `/api/events/categories` and `/api/events/groups`, Microsoft Learn) live in `docs/sources`. Tests check catalog names against them, run each row through the normalizer, and generate the tables in `docs/event-mapping.md`.
+  - Octopus categories journaled in volume under the generic fallback now have explicit mappings, as do the remaining Azure resource event types.
+  - GitHub `release` deletion maps to `artifact.deleted`, not `artifact.published`.
+- **Consequence**: the first rebuild after this change re-normalizes those journal entries under their new types. Read models are unaffected, which the two-pass rebuild check confirms.
+
 ## ADR-021: A Rebuild Never Drops State the Raw Store Cannot Reproduce
 
 - **Context**: the first live rebuild that actually cleared tables (2026-11-22 01:57 UTC) came back with fewer rows than it started with, for example 1,216 to 282 pipeline runs. Two causes:
@@ -220,14 +230,3 @@ Following the domain research in the prompt's prior-art references:
   - Every rebuild first folds the raw store's state observations in memory, using the time-travel fold, and compares entity keys per kind with the live read models. It aborts without clearing anything if a live row cannot be reproduced, unless `force=true`.
   - `GET /api/admin/rebuild/preflight` exposes the same comparison read-only.
 - **Recovery**: the lost rows are re-observed by the deploy's full backfill and the dead-letter replay. History older than the sources' API windows is no longer in the twin's read models, though the sources still hold it.
-
-## ADR-022: Source Event Catalog Verified Against Official Names
-
-- **Context**: domain events were defined only implicitly by the normalizers. Nothing checked that the source event names exist, or showed which source events the twin drops.
-- **Decision**:
-  - `SourceEventCatalog` (Core) lists each exact source event (GitHub event + action, Octopus category, Event Grid event type, Resource Graph change type) with its twin event type, DDD domain event and bounded context.
-  - Snapshots of the official names (GitHub docs, our Octopus instance's `/api/events/categories` and `/api/events/groups`, Microsoft Learn) live in `docs/sources`. Tests check catalog names against them, run each row through the normalizer, and generate the tables in `docs/event-mapping.md`.
-  - Octopus categories journaled in volume under the generic fallback now have explicit mappings, as do the remaining Azure resource event types.
-  - GitHub `release` deletion maps to `artifact.deleted`, not `artifact.published`.
-- **Consequence**: the first rebuild after this change re-normalizes those journal entries under their new types. Read models are unaffected, which the two-pass rebuild check confirms.
-
