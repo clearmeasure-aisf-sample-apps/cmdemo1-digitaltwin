@@ -72,10 +72,17 @@ public static partial class ChangeChainBuilder
 
     private static ChangeChain BuildReleaseCandidateChain(ChangeChainSources s, string pipelineId, string version)
     {
-        var builds = s.Runs.Where(r => Same(r.PipelineId, pipelineId) && Same(r.Version, version)).OrderBy(r => r.UpdatedAt).ToList();
-        var build = builds.LastOrDefault();
         var release = s.Releases.Where(r => Same(r.PipelineId, pipelineId) && Same(r.Version, version)).OrderBy(r => r.CreatedAt).LastOrDefault();
-        var sha = NullIfEmpty(release?.GitCommitSha) ?? NullIfEmpty(build?.HeadSha);
+        var releaseSha = NullIfEmpty(release?.GitCommitSha);
+        var builds = s.Runs.Where(r => Same(r.PipelineId, pipelineId) && Same(r.Version, version)).OrderBy(r => r.UpdatedAt).ToList();
+        if (builds.Count == 0 && releaseSha is not null)
+        {
+            // Some pipelines' build runs carry no version (e.g. cmdemo1-dashboard): link the build workflow by commit.
+            builds = s.Runs.Where(r => Same(r.PipelineId, pipelineId) && Same(r.HeadSha, releaseSha) && r.WorkflowName.Contains("build", StringComparison.OrdinalIgnoreCase))
+                .OrderBy(r => r.UpdatedAt).ToList();
+        }
+        var build = builds.LastOrDefault();
+        var sha = releaseSha ?? NullIfEmpty(build?.HeadSha);
         var artifact = s.Artifacts
             .Where(a => Same(a.PipelineId, pipelineId) && Same(a.Version, version))
             .OrderBy(a => a.Kind == "OctopusPackage" ? 0 : a.Kind == "ContainerImage" ? 1 : 2)
@@ -188,6 +195,11 @@ public static partial class ChangeChainBuilder
             int.TryParse(m.Groups[1].Value, NumberStyles.None, CultureInfo.InvariantCulture, out var fromBranch) && ByNumber(fromBranch) is { } byBranch)
         {
             return byBranch;
+        }
+        if (pr is not null && TitleIssuePattern().Match(pr.Title) is { Success: true } t &&
+            int.TryParse(t.Groups[1].Value, NumberStyles.None, CultureInfo.InvariantCulture, out var fromTitle) && ByNumber(fromTitle) is { } byTitle)
+        {
+            return byTitle;
         }
         return version is null ? null
             : s.WorkItems.FirstOrDefault(w => Same(w.ReleaseCandidateVersion, version) && (repository is null || Same(w.Repository, repository)));
@@ -305,4 +317,7 @@ public static partial class ChangeChainBuilder
 
     [GeneratedRegex(@"(?:^|/)(\d+)-")]
     private static partial Regex BranchIssuePattern();
+
+    [GeneratedRegex(@"\(#(\d+)\)")]
+    private static partial Regex TitleIssuePattern();
 }

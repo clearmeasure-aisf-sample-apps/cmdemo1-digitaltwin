@@ -154,6 +154,30 @@ public sealed class ChangeChainTests
         Assert.DoesNotContain(chains, c => c.PipelineId == "twin-observer");
     }
 
+    [Fact]
+    public void UnversionedBuildLinksByCommitAndIssueLinksByPrTitle()
+    {
+        var build = F.Build();
+        build.Version = null;
+        build.WorkflowName = "Build";
+        var scan = F.Build();
+        scan.Id = "cmdemo1-workorders:2";
+        scan.Version = null;
+        scan.WorkflowName = "secret-scan";
+        var pr = F.PullRequest();
+        pr.LinkedIssueNumber = null;
+        pr.HeadBranch = "dst-tests";
+        var issue = F.WorkItem();
+        issue.ReleaseCandidateVersion = null;
+
+        var chain = Assert.Single(ChangeChainBuilder.Build(Sources(prs: [pr], runs: [build, scan], workItems: [issue]), Now));
+
+        var buildStage = chain.Stages.Single(s => s.Kind == ChainStageKind.Build);
+        Assert.Equal(ChainStageStatus.Succeeded, buildStage.Status);
+        Assert.Equal(1, buildStage.Attempts);
+        Assert.Equal(1941, chain.WorkItemNumber);
+    }
+
     private static DeliveryExecutionSnapshot WithId(DeliveryExecutionSnapshot d, string id)
     {
         d.DeploymentId = id;
