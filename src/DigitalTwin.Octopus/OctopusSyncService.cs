@@ -487,7 +487,7 @@ public sealed partial class OctopusSyncService(
         {
             foreach (var item in catDoc.RootElement.EnumerateArray())
             {
-                if (item.TryGetProperty("Id", out var idEl) && idEl.GetString() is { } cid && !IsNoisyInstanceCategory(cid))
+                if (item.TryGetProperty("Id", out var idEl) && idEl.GetString() is { } cid && !OctopusEventNormalizer.IsExcludedFromSubscription(cid))
                 {
                     categories.Add(cid);
                 }
@@ -599,15 +599,6 @@ public sealed partial class OctopusSyncService(
         using var resp = await client.GetAsync(path, ct);
         return resp.IsSuccessStatusCode ? await resp.Content.ReadAsStringAsync(ct) : null;
     }
-
-    private static bool IsNoisyInstanceCategory(string categoryId)
-        => categoryId.StartsWith("Login", StringComparison.OrdinalIgnoreCase)
-        || categoryId.StartsWith("License", StringComparison.OrdinalIgnoreCase)
-        || categoryId.StartsWith("UsageDeclaration", StringComparison.OrdinalIgnoreCase)
-        || categoryId.StartsWith("ApiKey", StringComparison.OrdinalIgnoreCase)
-        || categoryId.StartsWith("Certificate", StringComparison.OrdinalIgnoreCase)
-        || categoryId.StartsWith("SigningKey", StringComparison.OrdinalIgnoreCase)
-        || categoryId.StartsWith("McpOAuth", StringComparison.OrdinalIgnoreCase);
 
     private static string? SanitizeUser(string? name)
         => string.IsNullOrWhiteSpace(name) ? null : name.Split('@')[0].Trim();

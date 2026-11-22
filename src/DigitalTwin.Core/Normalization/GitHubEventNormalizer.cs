@@ -305,8 +305,9 @@ public static class GitHubEventNormalizer
         var tag = GetString(root, "release", "tag_name") ?? "release";
         var url = GetString(root, "release", "html_url");
         var at = ParseDate(GetString(root, "release", "published_at")) ?? fallbackTime;
+        var removed = action is "deleted" or "unpublished";
         return (
-            "dev.cdevents.artifact.published",
+            removed ? "dev.cdevents.artifact.deleted" : "dev.cdevents.artifact.published",
             "artifact",
             $"{repoShortName}:{tag}",
             action ?? "published",

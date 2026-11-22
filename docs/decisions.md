@@ -221,3 +221,13 @@ Following the domain research in the prompt's prior-art references:
   - `GET /api/admin/rebuild/preflight` exposes the same comparison read-only.
 - **Recovery**: the lost rows are re-observed by the deploy's full backfill and the dead-letter replay. History older than the sources' API windows is no longer in the twin's read models, though the sources still hold it.
 
+## ADR-022: Source Event Catalog Verified Against Official Names
+
+- **Context**: domain events were defined only implicitly by the normalizers. Nothing checked that the source event names exist, or showed which source events the twin drops.
+- **Decision**:
+  - `SourceEventCatalog` (Core) lists each exact source event (GitHub event + action, Octopus category, Event Grid event type, Resource Graph change type) with its twin event type, DDD domain event and bounded context.
+  - Snapshots of the official names (GitHub docs, our Octopus instance's `/api/events/categories` and `/api/events/groups`, Microsoft Learn) live in `docs/sources`. Tests check catalog names against them, run each row through the normalizer, and generate the tables in `docs/event-mapping.md`.
+  - Octopus categories journaled in volume under the generic fallback now have explicit mappings, as do the remaining Azure resource event types.
+  - GitHub `release` deletion maps to `artifact.deleted`, not `artifact.published`.
+- **Consequence**: the first rebuild after this change re-normalizes those journal entries under their new types. Read models are unaffected, which the two-pass rebuild check confirms.
+

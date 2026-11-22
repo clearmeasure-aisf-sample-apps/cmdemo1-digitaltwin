@@ -77,6 +77,8 @@ All terminology follows Domain-Driven Design across eight bounded contexts (usin
 | **Reliability & Drift** | `HealthProbeSnapshot`, `DriftFinding` | Live endpoint probes + deterministic comparison of `cmdemo1-system` desired state vs observed Azure/Octopus state |
 | **Measurement** | `DoraMetricsSnapshot` | Five DORA metrics: Deployment Frequency, Change Lead Time, Change Fail Rate (counting guided failures), Failed Deployment Recovery Time, Deployment Rework Rate |
 
+Every twin domain event maps to exact source events (GitHub event + action, Octopus audit category and event group, Azure Event Grid event type), verified against the official docs. The table is in [docs/event-mapping.md](docs/event-mapping.md), along with the source events the twin drops or journals only generically. The same mapping exists in code as `SourceEventCatalog`.
+
 ---
 
 ## Durable Intake (Guaranteed Event Capture)
