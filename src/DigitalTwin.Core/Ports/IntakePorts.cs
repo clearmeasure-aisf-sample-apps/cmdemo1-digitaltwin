@@ -25,6 +25,8 @@ public interface IRawIntakeStore
     /// <summary>Processed rows received on a UTC day, in capture order, after <paramref name="afterSequence"/>.</summary>
     Task<IReadOnlyList<RawIntakeEvent>> ReadProcessedDayPageAsync(DateOnly day, long afterSequence, int take, CancellationToken ct);
     Task<int> DeleteAsync(IReadOnlyCollection<Guid> ids, CancellationToken ct);
+    /// <summary>Space the raw table uses, in MB (0 where not measurable).</summary>
+    Task<double> GetSizeMbAsync(CancellationToken ct);
 }
 
 /// <summary>

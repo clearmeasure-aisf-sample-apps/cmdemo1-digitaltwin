@@ -521,7 +521,7 @@ public sealed partial class AzureSyncService(
                 Address = address,
                 ManagedEnvironmentId = managedEnv,
                 IsTwinOwnResource = isTwin,
-                TagsJson = tagsEl.ValueKind == JsonValueKind.Object ? tagsEl.GetRawText() : "{}",
+                TagsJson = StableJson.SortedObject(tagsEl),
                 ObservedAt = now
             });
         }

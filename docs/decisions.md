@@ -241,4 +241,12 @@ Following the domain research in the prompt's prior-art references:
   - Retention and rebuild never overlap: they share a `MaintenanceLock`.
 - **Credentials**: the deploy principal has no `roleAssignments/write`, so Bicep reads the account key with `listKeys()` and passes it only as a Container App secret. It never appears in logs or the repository.
 - **Locally**: the archive is a directory (`FileSystem` provider), so integration tests need no Azure.
+- **Size budget (follow-up)**: measured live, the raw table grows by roughly 120 MB of compressed events a day, so 30 days can't stay in a 2 GB database. Retention therefore also archives the oldest complete days while the raw table exceeds `MaxRawMb` (500). The 30-day window is an upper bound, and the archive keeps the full history either way.
+- **State volume (follow-up)**: most state observations on 2026-11-22 were churn, not change:
+  - Work items alternated between two producers: the board sync and the `workitems.json` fallback.
+  - Azure tags came back from Resource Graph with nondeterministic key order.
+  - `containers.json` embeds a `generated` timestamp.
+  - Webhook `lastDeliveryAt` changes on every delivery.
+
+  The fallback now keeps the board's fields, payloads are canonicalized (`StableJson`), and `lastDeliveryAt` is volatile.
 

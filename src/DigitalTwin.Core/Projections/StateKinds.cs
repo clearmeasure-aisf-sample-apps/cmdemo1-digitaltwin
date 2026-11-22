@@ -71,7 +71,7 @@ public static class StateKinds
     public static readonly StateKind AzureResource = Set<AzureResourceSnapshot>(StateKindId.AzureResource, "azure-resource", r => r.ResourceId, nameof(AzureResourceSnapshot.ObservedAt));
     public static readonly StateKind HealthProbe = Upsert<HealthProbeSnapshot>(StateKindId.HealthProbe, "health-probe", p => p.TargetKey, nameof(HealthProbeSnapshot.CheckedAt), nameof(HealthProbeSnapshot.LatencyMs));
     public static readonly StateKind Drift = Set<DriftFinding>(StateKindId.Drift, "drift", d => d.DriftKey, nameof(DriftFinding.DetectedAt), nameof(DriftFinding.ResolvedAt), nameof(DriftFinding.IsActive));
-    public static readonly StateKind WebhookStatus = Set<WebhookRegistrationStatus>(StateKindId.WebhookStatus, "webhook-status", w => w.Id, nameof(WebhookRegistrationStatus.CheckedAt));
+    public static readonly StateKind WebhookStatus = Set<WebhookRegistrationStatus>(StateKindId.WebhookStatus, "webhook-status", w => w.Id, nameof(WebhookRegistrationStatus.CheckedAt), nameof(WebhookRegistrationStatus.LastDeliveryAt));
 
     public static IReadOnlyList<StateKind> All { get; } =
     [

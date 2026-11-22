@@ -231,6 +231,18 @@ public sealed class SqlRawIntakeStore(IOptions<MessagingOptions> options) : IRaw
         return list;
     }
 
+    public async Task<double> GetSizeMbAsync(CancellationToken ct)
+    {
+        await using var conn = new SqlConnection(ConnectionString);
+        await conn.OpenAsync(ct);
+        await using var cmd = new SqlCommand("""
+            SELECT CAST(ISNULL(SUM(a.used_pages), 0) * 8 / 1024.0 AS float)
+            FROM sys.partitions p JOIN sys.allocation_units a ON a.container_id = p.partition_id
+            WHERE p.object_id = OBJECT_ID('twin.raw_intake_events')
+            """, conn);
+        return Math.Round((double)(await cmd.ExecuteScalarAsync(ct) ?? 0d), 1);
+    }
+
     public async Task<int> DeleteAsync(IReadOnlyCollection<Guid> ids, CancellationToken ct)
     {
         var deleted = 0;
