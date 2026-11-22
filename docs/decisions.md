@@ -290,3 +290,7 @@ Following the domain research in the prompt's prior-art references:
 - **Decision**: the intake stays on the SQL Server transport (`deployServiceBus=false`). The switch stays implemented: managed identity, or a connection string (shared access key or emulator). It is validated at startup and covered by tests. `serviceBusAuth=SharedAccessKey` gives an Owner a Contributor-compatible option (no role assignment) besides the managed-identity mode, which needs `roleAssignments/write`.
 - **Open**: the opt-in emulator test (`TWIN_TEST_SERVICEBUS=1`) could not run in the cloud agent sandbox, where the emulator container crashes when connecting to its SQL engine.
 
+## ADR-029: Alerts Through a Configurable Outgoing Webhook
+
+- **Decision**: alert rules (`AlertRules`) are a pure function of change chains, intake health and the latest reconciliation. `AlertService` sends each new condition once, after recording a baseline on the first evaluation. Delivery goes through the `IAlertSink` port, implemented by a new `DigitalTwin.Notifications` adapter that posts Slack, Teams (MessageCard) or generic JSON payloads to one incoming-webhook URL. The URL is empty by default, which means alerts are off; it is set only as a secure Bicep parameter and Container App secret. No channel was created and nothing is posted to a real channel.
+

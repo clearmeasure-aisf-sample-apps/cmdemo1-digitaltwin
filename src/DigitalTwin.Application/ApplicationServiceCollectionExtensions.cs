@@ -25,6 +25,9 @@ public static class ApplicationServiceCollectionExtensions
         services.Configure<ReconciliationOptions>(configuration.GetSection("Twin:Reconciliation"));
         services.AddSingleton<ReconciliationService>();
         services.AddHostedService<ReconciliationHostedService>();
+        services.Configure<AlertRuleOptions>(configuration.GetSection("Twin:Alerts"));
+        services.AddSingleton<AlertService>();
+        services.AddHostedService<AlertHostedService>();
         services.AddSingleton<TwinQueryService>();
 
         services.AddSingleton<IntakeEventApplier>();

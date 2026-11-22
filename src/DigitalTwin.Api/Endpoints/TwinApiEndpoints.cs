@@ -39,6 +39,12 @@ public static class TwinApiEndpoints
             ? new { r.FinishedAt, r.DriftCount, r.ErrorCount, checks = r.Checks.Count, drifted = r.Checks.Where(c => c.Error is null && !c.InSync).Select(c => $"{c.Source} {c.Name} ({c.Scope})").ToList() }
             : null));
 
+        app.MapGet("/api/alerts/status", (AlertService alerts) =>
+        {
+            var snapshot = alerts.Snapshot();
+            return Results.Ok(new { snapshot.SinkEnabled, snapshot.LastEvaluatedAt, active = snapshot.Active.Count, critical = snapshot.Active.Count(a => a.Severity == "critical"), titles = snapshot.Active.Select(a => a.Title).Take(5).ToList() });
+        });
+
         app.MapGet("/api/intake/status", async (TwinQueryService queries, CancellationToken ct)
             => Results.Ok(await queries.GetIntakeQueueAsync(ct)));
 
@@ -121,6 +127,12 @@ public static class TwinApiEndpoints
 
         protectedApi.MapGet("/change-chains", async (string? q, int? limit, DateTimeOffset? asOf, TwinQueryService queries, CancellationToken ct)
             => Results.Ok(await queries.GetChangeChainsAsync(q, limit ?? 20, asOf, ct)));
+
+        protectedApi.MapGet("/alerts", (AlertService alerts) => Results.Ok(alerts.Snapshot()));
+
+        protectedApi.MapPost("/admin/alerts/evaluate", async (AlertService alerts, CancellationToken ct) => Results.Ok(await alerts.EvaluateAsync(ct)));
+
+        protectedApi.MapPost("/admin/alerts/test", async (AlertService alerts, CancellationToken ct) => Results.Ok(await alerts.SendTestAsync(ct)));
 
         protectedApi.MapGet("/dora", async (int? windowDays, string? deployable, DateTimeOffset? asOf, TwinQueryService queries, CancellationToken ct)
             => Results.Ok(await queries.GetChainDoraAsync(windowDays ?? 28, deployable, asOf, ct)));
@@ -254,6 +266,8 @@ public static class TwinApiEndpoints
             - GET {{baseUrl}}/api/metrics?windowDays=7&stage=prod — DORA 5-metric delivery scorecard [X-Twin-Key]
             - GET {{baseUrl}}/api/explain?q=<issue|pr|version|sha|task> — Causal trace across work -> PR -> build -> release -> deploy -> runtime [X-Twin-Key]
             - GET {{baseUrl}}/api/change-chains?q=<issue|pr|sha|version|release>&limit=&asOf= — Change chains: work item -> PR -> build -> RC -> Octopus release -> tdd -> uat -> prod with stage timings and failures [X-Twin-Key]
+            - GET {{baseUrl}}/api/alerts — Active alerts (deploy failures, stalled changes, dead letters, reconciliation drift) and recently sent ones [X-Twin-Key]
+            - POST {{baseUrl}}/api/admin/alerts/test — Send a test alert to the configured webhook (Twin:Alerts:WebhookUrl; off when empty) [X-Twin-Key]
             - GET {{baseUrl}}/api/dora?windowDays=28&deployable=&asOf= — DORA keys from change chains: deployment frequency, lead time, change failure rate, time to restore, with performance bands [X-Twin-Key]
             - GET {{baseUrl}}/api/reconciliation — Latest daily comparison of the twin against GitHub and Octopus: drifted checks with what the twin is missing [X-Twin-Key]
             - POST {{baseUrl}}/api/admin/reconciliation/run — Reconcile now (drifted repositories and Octopus are refreshed) [X-Twin-Key]
@@ -275,7 +289,7 @@ public static class TwinApiEndpoints
 
             ## MCP Server (Streamable HTTP)
             Endpoint: {{baseUrl}}/mcp (requires `X-Twin-Key` header)
-            Tools: get_summary, get_dora_metrics, get_change_chain, get_config_changes, get_reconciliation, get_state_at, query_events, get_environment, get_drift, get_pipeline, explain_item, get_intake_queue (read tools accept `asOf`)
+            Tools: get_summary, get_alerts, get_dora_metrics, get_change_chain, get_config_changes, get_reconciliation, get_state_at, query_events, get_environment, get_drift, get_pipeline, explain_item, get_intake_queue (read tools accept `asOf`)
             """);
     }
 }

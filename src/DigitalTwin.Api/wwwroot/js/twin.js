@@ -89,6 +89,16 @@
     if (pill) pill.title = `Durable intake (${iq.transport}): ${iq.capturedTotal} captured, ${iq.processedTotal} processed, depth ${iq.depth}, oldest pending ${age}, dead letters ${iq.deadLetterCount}`;
   }
 
+  async function fetchAlerts() {
+    const res = await fetch('/api/alerts/status', { cache: 'no-store' });
+    if (!res.ok) return;
+    const a = await res.json();
+    if (!a.lastEvaluatedAt) { setPill('alerts', 'pending', 'warn'); return; }
+    setPill('alerts', a.active === 0 ? 'none' : `${a.active}`, a.critical > 0 ? 'err' : a.active > 0 ? 'warn' : 'ok');
+    const pill = document.querySelector('[data-source="alerts"]');
+    if (pill) pill.title = `${a.active} active (${a.critical} critical)${a.titles.length ? ': ' + a.titles.join('; ') : ''}. Webhook ${a.sinkEnabled ? 'configured' : 'off'}.`;
+  }
+
   async function fetchAccuracy() {
     const res = await fetch('/api/reconciliation/status', { cache: 'no-store' });
     if (!res.ok) return;
@@ -922,6 +932,8 @@
   setInterval(() => { if (!state.asOf) fetchState().catch(() => {}); }, 30000);
   setInterval(() => fetchIntake().catch(() => {}), 5000);
   setInterval(() => fetchAccuracy().catch(() => {}), 60000);
+  setInterval(() => fetchAlerts().catch(() => {}), 60000);
+  fetchAlerts().catch(() => {});
   fetchAccuracy().catch(() => {});
 
   fetchState()

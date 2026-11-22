@@ -141,6 +141,7 @@ flowchart LR
 
 - `GET /api/events?since=&until=&source=&pipeline=&stage=&eventType=&limit=`
 - `GET /api/state-at?asOf=<ISO-8601>`: time travel (see below)
+- `GET /api/alerts`, `POST /api/admin/alerts/evaluate`, `POST /api/admin/alerts/test`: alerts (webhook off by default)
 - `GET /api/dora?windowDays=28&deployable=&asOf=`: DORA keys from change chains
 - `GET /api/reconciliation` (latest) and `POST /api/admin/reconciliation/run`: daily accuracy check of the twin against GitHub and Octopus
 - `GET /api/config-changes?since=&limit=&asOf=`: Octopus deployment process, variable, project, trigger and runbook changes, with who made them
@@ -163,6 +164,7 @@ Pass header `X-Twin-Key: <TWIN_API_KEY>`:
 
 - `get_summary`
 - `get_change_chain` (by issue, PR, commit, release or version)
+- `get_alerts` (active and recently sent alerts)
 - `get_dora_metrics` (DORA keys from change chains, with `asOf`)
 - `get_reconciliation` (twin accuracy versus GitHub and Octopus)
 - `get_config_changes` (Octopus process, variable, project, trigger and runbook changes)
@@ -204,6 +206,16 @@ Each key carries its DORA performance band (elite, high, medium, low) and a per-
 Every read endpoint (summary, graph, dashboard state, pipelines, environments, drift, work items, deployments, metrics, explain) and every MCP read tool accepts `asOf=<ISO-8601>`. The twin folds the journal's `twin.state.observed` events up to that instant into an in-memory read model, using the same latest-wins and replace-set rules as the live projection. `asOf` just before now is therefore identical to the live tables, and a test enforces that. `GET /api/state-at?asOf=` and the MCP tool `get_state_at` give the compact answer: the version deployed to each environment, the Azure resources that existed, the board columns and active drift at that instant. On the dashboard, the **time travel** strip has a slider covering the state history, a replay button and a LIVE button; realtime updates pause while you view the past. State history starts at the first state observation, which is the event-sourcing baseline on first start.
 
 ---
+
+## Alerts (outgoing webhook, off by default)
+
+Every 5 minutes the twin evaluates:
+- deployments to tdd, uat or prod that failed in the last 24 hours (prod is critical);
+- stalled change chains (a release candidate or later, not delivered, no activity for 6 hours);
+- dead-lettered intake events;
+- reconciliation drift.
+
+Each new condition is sent once. The first evaluation after a start only records the current state, so deploys never re-send old alerts. The channel is an incoming-webhook URL in `Twin:Alerts:WebhookUrl` (Bicep `alertWebhookUrl`, a secure parameter stored as a Container App secret), using `Twin:Alerts:Format` = `Slack` (`{"text": …}`), `Teams` (MessageCard) or `Generic` (the alert as JSON). The URL is **empty by default, so nothing is posted anywhere**; no channel has been created or configured. `GET /api/alerts`, MCP `get_alerts` and the dashboard's **Alerts** pill show active and recently sent alerts. `POST /api/admin/alerts/test` sends a test message once a URL is set.
 
 ## Azure Service Bus Transport (switch ready, not enabled)
 

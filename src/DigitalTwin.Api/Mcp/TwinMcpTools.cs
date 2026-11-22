@@ -8,7 +8,7 @@ using ModelContextProtocol.Server;
 namespace DigitalTwin.Api.Mcp;
 
 [McpServerToolType]
-public sealed class TwinMcpTools(TwinQueryService queries, ReconciliationService reconciliation)
+public sealed class TwinMcpTools(TwinQueryService queries, ReconciliationService reconciliation, AlertService alerts)
 {
     private const string AsOfDescription = "Optional ISO-8601 UTC timestamp: answer from the twin's state as it was at that instant (time travel). Omit for live state.";
     private static readonly JsonSerializerOptions JsonOptions = new(JsonSerializerDefaults.Web)
@@ -41,6 +41,13 @@ public sealed class TwinMcpTools(TwinQueryService queries, ReconciliationService
         [Description(AsOfDescription)] DateTimeOffset? asOf = null,
         CancellationToken ct = default)
         => JsonSerializer.Serialize(await queries.GetConfigChangesAsync((asOf ?? DateTimeOffset.UtcNow).AddHours(-Math.Max(1, sinceHours)), limit, asOf, ct), JsonOptions);
+
+    [McpServerTool(Name = "get_alerts", Title = "Get Active Alerts", ReadOnly = true, Idempotent = true)]
+    [Description("Active alerts on cmdemo1: failed deployments (last 24 h), stalled change chains, dead-lettered intake events and reconciliation drift, plus recently sent alerts and whether the outgoing webhook is configured.")]
+    public async Task<string> GetAlertsAsync(
+        [Description("Evaluate the rules now instead of returning the latest evaluation (default false)")] bool evaluateNow = false,
+        CancellationToken ct = default)
+        => JsonSerializer.Serialize(evaluateNow ? await alerts.EvaluateAsync(ct) : alerts.Snapshot(), JsonOptions);
 
     [McpServerTool(Name = "get_dora_metrics", Title = "Get DORA Metrics From Change Chains", ReadOnly = true, Idempotent = true)]
     [Description("The four DORA keys computed from change chains: deployment frequency, lead time for changes (median and p85, commit to prod), change failure rate and time to restore, each with its DORA performance band, plus a per-deployable breakdown and the failed chains.")]

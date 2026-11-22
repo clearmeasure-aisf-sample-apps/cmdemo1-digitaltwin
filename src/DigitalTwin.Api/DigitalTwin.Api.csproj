@@ -18,6 +18,7 @@
     <ProjectReference Include="..\DigitalTwin.Persistence\DigitalTwin.Persistence.csproj" />
     <ProjectReference Include="..\DigitalTwin.Messaging\DigitalTwin.Messaging.csproj" />
     <ProjectReference Include="..\DigitalTwin.Archive\DigitalTwin.Archive.csproj" />
+    <ProjectReference Include="..\DigitalTwin.Notifications\DigitalTwin.Notifications.csproj" />
   </ItemGroup>
 
 </Project>
