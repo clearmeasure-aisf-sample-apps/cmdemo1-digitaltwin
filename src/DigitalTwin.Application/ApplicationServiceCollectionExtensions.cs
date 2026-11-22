@@ -22,6 +22,9 @@ public static class ApplicationServiceCollectionExtensions
         services.AddSingleton<ProjectionBaselineSeeder>();
         services.AddSingleton<DriftReconciliationService>();
         services.AddSingleton<TwinTimeTravel>();
+        services.Configure<ReconciliationOptions>(configuration.GetSection("Twin:Reconciliation"));
+        services.AddSingleton<ReconciliationService>();
+        services.AddHostedService<ReconciliationHostedService>();
         services.AddSingleton<TwinQueryService>();
 
         services.AddSingleton<IntakeEventApplier>();

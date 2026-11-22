@@ -81,6 +81,15 @@ Every twin domain event maps to exact source events (GitHub event + action, Octo
 
 ---
 
+## Data Accuracy (Reconciliation)
+
+- **Work items from every repository**: besides Project #679 and `workitems.json`, each observed repository's issues are swept every 10 minutes (updated-since cursor, ETag 304s). Work that is not on the board, such as cmdemo1-dashboard#1011, still reaches the twin. Board and `workitems.json` data win where they overlap.
+- **Daily reconciliation** compares the twin with its sources and refreshes what drifted:
+  - GitHub: open PRs and recently active issues per repository.
+  - Octopus: the version currently deployed per deployable and environment, and the 20 most recent releases.
+
+  Results are exposed by `GET /api/reconciliation`, MCP `get_reconciliation` and the dashboard's **Accuracy** pill (`/api/reconciliation/status`).
+
 ## Durable Intake (Guaranteed Event Capture)
 
 Every occurrence, from webhooks and from backstop pollers alike, is durably captured before it is acknowledged, then applied to the model by a separate handler:
@@ -132,6 +141,7 @@ flowchart LR
 
 - `GET /api/events?since=&until=&source=&pipeline=&stage=&eventType=&limit=`
 - `GET /api/state-at?asOf=<ISO-8601>`: time travel (see below)
+- `GET /api/reconciliation` (latest) and `POST /api/admin/reconciliation/run`: daily accuracy check of the twin against GitHub and Octopus
 - `GET /api/config-changes?since=&limit=&asOf=`: Octopus deployment process, variable, project, trigger and runbook changes, with who made them
 - `GET /api/change-chains?q=<issue|pr|sha|version|release>&limit=&asOf=`: change chains (see below)
 - `GET /api/pipelines` and `GET /api/pipelines/{id}`
@@ -152,6 +162,7 @@ Pass header `X-Twin-Key: <TWIN_API_KEY>`:
 
 - `get_summary`
 - `get_change_chain` (by issue, PR, commit, release or version)
+- `get_reconciliation` (twin accuracy versus GitHub and Octopus)
 - `get_config_changes` (Octopus process, variable, project, trigger and runbook changes)
 - `get_state_at` (time travel)
 - `query_events`

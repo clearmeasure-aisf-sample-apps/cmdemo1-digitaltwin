@@ -15,6 +15,8 @@ public sealed class TwinAppFactory(
     IDictionary<string, string?>? settings = null,
     Action<IServiceCollection>? configureServices = null) : WebApplicationFactory<Program>
 {
+    private static readonly string[] ExternalClients = ["github", "github-raw", "octopus"];
+
     public const string ApiKey = "test-twin-api-key-123";
     public const string WebhookSecret = "test-webhook-secret-456";
 
@@ -32,7 +34,11 @@ public sealed class TwinAppFactory(
             ["Twin:EnableBackgroundWorkers"] = "false",
             ["Twin:Messaging:Transport"] = "LocalDurable",
             ["Twin:Messaging:DurabilityMode"] = "Solo",
-            ["Twin:Messaging:RetryDelays"] = "50,100,150"
+            ["Twin:Messaging:RetryDelays"] = "50,100,150",
+            // Integration tests never call GitHub, even where the environment carries a token.
+            ["GH_PAT"] = "",
+            ["GITHUB_TOKEN"] = "",
+            ["Twin:GitHubToken"] = ""
         };
         foreach (var (key, value) in settings ?? new Dictionary<string, string?>())
         {
@@ -42,6 +48,14 @@ public sealed class TwinAppFactory(
         {
             builder.UseSetting(key, value);
         }
+        builder.ConfigureTestServices(services =>
+        {
+            // No external calls from tests: GitHub and Octopus answer 503 unless a test installs its own stub.
+            foreach (var name in ExternalClients)
+            {
+                services.AddHttpClient(name).ConfigurePrimaryHttpMessageHandler(() => new OfflineHandler());
+            }
+        });
         if (configureServices is not null)
         {
             builder.ConfigureTestServices(configureServices);
@@ -103,5 +117,11 @@ public sealed class TwinAppFactory(
             await Task.Delay(200);
         }
         throw new TimeoutException($"Timed out after {timeout.TotalSeconds}s waiting until {because}.");
+    }
+
+    private sealed class OfflineHandler : HttpMessageHandler
+    {
+        protected override Task<HttpResponseMessage> SendAsync(HttpRequestMessage request, CancellationToken cancellationToken)
+            => Task.FromResult(new HttpResponseMessage(System.Net.HttpStatusCode.ServiceUnavailable));
     }
 }

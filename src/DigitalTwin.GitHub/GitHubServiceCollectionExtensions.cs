@@ -18,6 +18,7 @@ public static class GitHubServiceCollectionExtensions
         services.AddSingleton<GitHubApiClient>();
         services.AddSingleton<IGitHubRateLimitProvider>(sp => sp.GetRequiredService<GitHubApiClient>());
         services.AddSingleton<IGitHubSyncService, GitHubSyncService>();
+        services.AddSingleton<ISourceReconciler, GitHubReconciler>();
         return services;
     }
 

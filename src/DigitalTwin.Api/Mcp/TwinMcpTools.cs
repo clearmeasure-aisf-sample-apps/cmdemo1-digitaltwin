@@ -8,7 +8,7 @@ using ModelContextProtocol.Server;
 namespace DigitalTwin.Api.Mcp;
 
 [McpServerToolType]
-public sealed class TwinMcpTools(TwinQueryService queries)
+public sealed class TwinMcpTools(TwinQueryService queries, ReconciliationService reconciliation)
 {
     private const string AsOfDescription = "Optional ISO-8601 UTC timestamp: answer from the twin's state as it was at that instant (time travel). Omit for live state.";
     private static readonly JsonSerializerOptions JsonOptions = new(JsonSerializerDefaults.Web)
@@ -41,6 +41,13 @@ public sealed class TwinMcpTools(TwinQueryService queries)
         [Description(AsOfDescription)] DateTimeOffset? asOf = null,
         CancellationToken ct = default)
         => JsonSerializer.Serialize(await queries.GetConfigChangesAsync((asOf ?? DateTimeOffset.UtcNow).AddHours(-Math.Max(1, sinceHours)), limit, asOf, ct), JsonOptions);
+
+    [McpServerTool(Name = "get_reconciliation", Title = "Get Twin Accuracy Reconciliation", ReadOnly = true, Idempotent = true)]
+    [Description("How accurate the twin is: the latest comparison against GitHub (open PRs, recently active issues per repository) and Octopus (deployed version per deployable and environment, recent releases), with what the twin is missing or has extra.")]
+    public async Task<string> GetReconciliationAsync(
+        [Description("Run a fresh reconciliation now instead of returning the latest daily report (default false)")] bool runNow = false,
+        CancellationToken ct = default)
+        => JsonSerializer.Serialize(runNow || reconciliation.LastReport is null ? await reconciliation.RunAsync(ct) : reconciliation.LastReport, JsonOptions);
 
     [McpServerTool(Name = "get_state_at", Title = "Get Point-in-Time State", ReadOnly = true, Idempotent = true)]
     [Description("Time travel: what version was deployed to each environment (tdd/uat/prod), which Azure resources existed, the work board columns, and active drift at a given instant, reconstructed from the event journal.")]

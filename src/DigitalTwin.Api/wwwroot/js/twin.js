@@ -89,6 +89,16 @@
     if (pill) pill.title = `Durable intake (${iq.transport}): ${iq.capturedTotal} captured, ${iq.processedTotal} processed, depth ${iq.depth}, oldest pending ${age}, dead letters ${iq.deadLetterCount}`;
   }
 
+  async function fetchAccuracy() {
+    const res = await fetch('/api/reconciliation/status', { cache: 'no-store' });
+    if (!res.ok) return;
+    const r = await res.json();
+    if (!r) { setPill('accuracy', 'pending', 'warn'); return; }
+    setPill('accuracy', r.driftCount === 0 ? `${r.checks} ok` : `${r.driftCount} drift`, r.driftCount === 0 && r.errorCount === 0 ? 'ok' : 'warn');
+    const pill = document.querySelector('[data-source="accuracy"]');
+    if (pill) pill.title = `Reconciled ${r.finishedAt}: ${r.checks} checks, ${r.driftCount} drifted${r.drifted.length ? ': ' + r.drifted.join('; ') : ''}${r.errorCount ? `, ${r.errorCount} errors` : ''}`;
+  }
+
   async function fetchIntake() {
     const res = await fetch('/api/intake/status', { cache: 'no-store' });
     if (res.ok) renderIntake(await res.json());
@@ -897,6 +907,8 @@
 
   setInterval(() => { if (!state.asOf) fetchState().catch(() => {}); }, 30000);
   setInterval(() => fetchIntake().catch(() => {}), 5000);
+  setInterval(() => fetchAccuracy().catch(() => {}), 60000);
+  fetchAccuracy().catch(() => {});
 
   fetchState()
     .then(setupRealtime)
