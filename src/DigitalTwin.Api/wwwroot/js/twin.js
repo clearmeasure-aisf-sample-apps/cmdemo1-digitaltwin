@@ -45,7 +45,19 @@
     ttLabel: document.getElementById('tt-label'),
     ttLive: document.getElementById('tt-live'),
     ttPlay: document.getElementById('tt-play'),
-    chainList: document.getElementById('chain-list')
+    chainList: document.getElementById('chain-list'),
+    ttBack: document.getElementById('tt-back'),
+    ttFwd: document.getElementById('tt-fwd'),
+    ttSpeed: document.getElementById('tt-speed'),
+    ttCompare: document.getElementById('tt-compare'),
+    comparePanel: document.getElementById('compare-panel'),
+    compareBody: document.getElementById('compare-body'),
+    compareTitle: document.getElementById('compare-title'),
+    player: document.getElementById('chain-player'),
+    playerTitle: document.getElementById('player-title'),
+    playerSub: document.getElementById('player-sub'),
+    playerPath: document.getElementById('player-path'),
+    playerStage: document.getElementById('player-stage')
   };
 
   // "Now" for relative times: the selected instant while time travelling.
@@ -646,9 +658,78 @@
       </div>`;
     }).join('');
     dom.chainList.querySelectorAll('.chain-row').forEach(row => {
-      row.addEventListener('click', () => openChainInspector(chains[Number(row.dataset.chain)]));
+      row.addEventListener('click', () => openChainPlayer(chains[Number(row.dataset.chain)]));
     });
   }
+
+  // Step-through player: one change, stage by stage, with timings and the journal signals of each stage.
+  const player = { chain: null, steps: [], index: 0, timer: null };
+
+  function openChainPlayer(c) {
+    stopPlayer();
+    player.chain = c;
+    const stages = c.stages || [];
+    player.steps = stages.map((st, i) => i).filter(i => stages[i].status !== 'Pending');
+    if (!player.steps.length) player.steps = stages.map((st, i) => i);
+    player.index = 0;
+    dom.playerTitle.textContent = c.title;
+    dom.playerSub.textContent = `${c.deployable || c.pipelineId} ${c.version || ''} · ${c.outcome}${c.leadTimeHours != null ? ` · lead ${c.leadTimeHours}h` : ''}`;
+    dom.player.classList.remove('hidden');
+    renderPlayer();
+    playPlayer();
+  }
+
+  function renderPlayer() {
+    const c = player.chain;
+    if (!c) return;
+    const stages = c.stages || [];
+    const current = player.steps[player.index];
+    dom.playerPath.innerHTML = stages.map((st, i) => {
+      const cls = [chainStatusClass[st.status] || '', i > current ? 'dim' : '', i === current ? 'current' : ''].join(' ');
+      const node = `<span class="chain-node ${cls}"><span class="lbl">${chainStageLabels[st.kind] || st.kind}</span></span>`;
+      if (i === stages.length - 1) return node;
+      const linkCls = [i < current ? 'reached' : '', stages[i + 1].status === 'Failed' ? 'fail' : ''].join(' ');
+      return node + `<span class="chain-link ${linkCls}"><span class="fill"></span></span>`;
+    }).join('');
+    const st = stages[current];
+    if (!st) return;
+    const when = st.startedAt ? new Date(st.startedAt).toISOString().replace('T', ' ').substring(0, 16) + 'Z' : '--';
+    const signals = (c.signals || []).filter(sig => sig.stage === st.kind);
+    dom.playerStage.innerHTML = `
+      <h4>${esc(chainStageLabels[st.kind] || st.kind)} · ${esc(st.status)}${st.durationMinutes != null ? ` · ${fmtMinutes(st.durationMinutes)}` : ''}</h4>
+      <div>${esc(st.reference || '')} ${st.detail ? '· ' + esc(st.detail) : ''}</div>
+      <div>started ${esc(when)}${st.attempts > 1 ? ` · ${st.attempts} attempts (${st.failedAttempts} failed)` : ''}</div>
+      ${signals.map(sig => `<div class="signal ${/failed|guided/.test(sig.kind) ? 'bad' : sig.kind === 'signed-off' ? 'good' : ''}">${esc(sig.kind)}${sig.actor ? ' · ' + esc(sig.actor) : ''} · ${esc(sig.summary)}</div>`).join('')}
+      ${st.url ? `<a class="drawer-link" href="${esc(st.url)}" target="_blank" rel="noopener">Open in source system →</a>` : ''}`;
+  }
+
+  function stepPlayer(delta) {
+    player.index = Math.max(0, Math.min(player.steps.length - 1, player.index + delta));
+    renderPlayer();
+  }
+
+  function stopPlayer() {
+    if (player.timer) clearInterval(player.timer);
+    player.timer = null;
+    document.getElementById('player-play').innerHTML = '&#9654;';
+  }
+
+  function playPlayer() {
+    stopPlayer();
+    if (player.index >= player.steps.length - 1) player.index = 0;
+    renderPlayer();
+    document.getElementById('player-play').innerHTML = '&#10074;&#10074;';
+    player.timer = setInterval(() => {
+      if (player.index >= player.steps.length - 1) { stopPlayer(); return; }
+      stepPlayer(1);
+    }, 1200);
+  }
+
+  document.getElementById('player-prev').addEventListener('click', () => { stopPlayer(); stepPlayer(-1); });
+  document.getElementById('player-next').addEventListener('click', () => { stopPlayer(); stepPlayer(1); });
+  document.getElementById('player-play').addEventListener('click', () => player.timer ? stopPlayer() : playPlayer());
+  document.getElementById('player-details').addEventListener('click', () => player.chain && openChainInspector(player.chain));
+  document.getElementById('player-close').addEventListener('click', () => { stopPlayer(); dom.player.classList.add('hidden'); });
 
   function openChainInspector(c) {
     const kv = { Chain: c.chainId, Outcome: c.outcome, Commit: c.commitSha ? c.commitSha.substring(0, 12) : '--' };
@@ -882,6 +963,7 @@
       dom.ttLabel.textContent = `AS OF ${fmtUtc(t)}`;
     }
     dom.ttLive.classList.toggle('active', !state.asOf);
+    dom.ttCompare.disabled = !state.asOf;
     document.body.classList.toggle('time-travel', !!state.asOf);
   }
 
@@ -913,11 +995,34 @@
     sliderDebounce = setTimeout(() => setAsOf(sliderToTime(dom.ttSlider.value)), 250);
   });
   dom.ttLive.addEventListener('click', goLive);
+  const selectedTime = () => state.asOf ? new Date(state.asOf).getTime() : Date.now();
+  dom.ttBack.addEventListener('click', () => { stopReplay(); setAsOf(Math.max(timeRange().min, selectedTime() - 3600000)); });
+  dom.ttFwd.addEventListener('click', () => { stopReplay(); setAsOf(selectedTime() + 3600000); });
+
+  // Before/after: the selected instant against now, per environment and for the platform.
+  async function showComparison() {
+    if (!state.asOf) return;
+    const res = await fetch(`/api/environments/compare?from=${encodeURIComponent(state.asOf)}`, { cache: 'no-store' });
+    if (!res.ok) return;
+    const cmp = await res.json();
+    const row = v => `<div class="compare-row ${v.changed ? 'changed' : ''}"><span>${esc(v.name)}</span><span>${esc(v.from ?? '—')}</span><span class="arrow">→</span><span>${esc(v.to ?? '—')}</span></div>`;
+    const stages = (cmp.stages || []).map(st => `<div class="compare-card"><h5>${esc(st.stage.toUpperCase())}${st.changed ? ' · CHANGED' : ''}</h5>
+        ${st.versions.map(row).join('')}${st.revisions.filter(r => r.changed).map(r => row({ ...r, name: r.name + ' rev' })).join('')}</div>`).join('');
+    const list = (items, cls) => items.map(i => `<div class="${cls}">${cls === 'add' ? '+' : '−'} ${esc(i)}</div>`).join('');
+    dom.compareTitle.textContent = `BEFORE ${fmtUtc(new Date(cmp.from).getTime())} / AFTER ${fmtUtc(new Date(cmp.to).getTime())}`;
+    dom.compareBody.innerHTML = stages + `
+      <div class="compare-card"><h5>AZURE RESOURCES ${cmp.resourcesFrom} → ${cmp.resourcesTo}</h5><div class="compare-list">${list(cmp.resourcesAdded, 'add')}${list(cmp.resourcesRemoved, 'remove')}${!cmp.resourcesAdded.length && !cmp.resourcesRemoved.length ? 'no change' : ''}</div></div>
+      <div class="compare-card"><h5>DRIFT ${cmp.driftFrom.length} → ${cmp.driftTo.length}</h5><div class="compare-list">${cmp.driftTo.map(d => `<div>${esc(d)}</div>`).join('') || 'none now'}</div></div>
+      <div class="compare-card"><h5>WORK BOARD</h5>${cmp.boardColumns.map(row).join('')}</div>`;
+    dom.comparePanel.classList.remove('hidden');
+  }
+  dom.ttCompare.addEventListener('click', () => showComparison().catch(() => {}));
+  document.getElementById('compare-close').addEventListener('click', () => dom.comparePanel.classList.add('hidden'));
   dom.ttPlay.addEventListener('click', () => {
     if (state.replayTimer) { stopReplay(); return; }
     const { min } = timeRange();
     let t = state.asOf ? new Date(state.asOf).getTime() : min;
-    const step = Math.max(60000, (Date.now() - t) / 40);
+    const step = Math.max(60000, (Date.now() - t) / 40) * Number(dom.ttSpeed.value || 1);
     dom.ttPlay.innerHTML = '&#10074;&#10074;';
     let busy = false;
     state.replayTimer = setInterval(() => {

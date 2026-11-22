@@ -294,3 +294,8 @@ Following the domain research in the prompt's prior-art references:
 
 - **Decision**: alert rules (`AlertRules`) are a pure function of change chains, intake health and the latest reconciliation. `AlertService` sends each new condition once, after recording a baseline on the first evaluation. Delivery goes through the `IAlertSink` port, implemented by a new `DigitalTwin.Notifications` adapter that posts Slack, Teams (MessageCard) or generic JSON payloads to one incoming-webhook URL. The URL is empty by default, which means alerts are off; it is set only as a secure Bicep parameter and Container App secret. No channel was created and nothing is posted to a real channel.
 
+## ADR-030: Dashboard Step-Through, Replay Speed and Before/After From the Journal
+
+- **Decision**: the chain player, replay speed/step controls and before/after comparison are built on read models the twin already has: change chains with their signals, and point-in-time state folded from the journal (ADR-021). The comparison is two `asOf` folds diffed on the server (`TwinQueryService.CompareAsync`). It is public because it exposes only what the public dashboard already shows: versions, revisions, resource names, drift and board counts.
+- **Superseded changes are not stalled**: a stalled-change alert now needs the chain to be the newest change of its deployable at that stage or beyond. Older versions skipped by a newer promotion are superseded, not stuck. The first live evaluation showed 26 such false positives at tdd.
+

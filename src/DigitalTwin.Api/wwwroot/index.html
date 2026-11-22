@@ -102,10 +102,27 @@
     <!-- Time travel: replay state reconstructed from the event journal -->
     <section class="time-strip" id="time-strip" aria-label="Time travel">
       <span class="section-tag">TIME TRAVEL</span>
+      <button type="button" class="tt-btn" id="tt-back" title="One hour back" aria-label="One hour back">&#9198;</button>
       <button type="button" class="tt-btn" id="tt-play" title="Replay from the selected time to now" aria-label="Replay">&#9654;</button>
+      <button type="button" class="tt-btn" id="tt-fwd" title="One hour forward" aria-label="One hour forward">&#9197;</button>
+      <select id="tt-speed" class="tt-btn" aria-label="Replay speed">
+        <option value="1">1&times;</option>
+        <option value="4">4&times;</option>
+        <option value="16">16&times;</option>
+      </select>
       <input type="range" id="tt-slider" min="0" max="1000" value="1000" aria-label="Point in time" />
       <span class="tt-label" id="tt-label">LIVE</span>
+      <button type="button" class="tt-btn" id="tt-compare" title="Compare the selected instant with now" disabled>COMPARE</button>
       <button type="button" class="tt-btn tt-live active" id="tt-live">LIVE</button>
+    </section>
+
+    <!-- Before/after comparison of the selected instant and now -->
+    <section class="compare-panel hidden" id="compare-panel" aria-label="Environment comparison">
+      <header class="chain-head">
+        <span class="section-tag" id="compare-title">BEFORE / AFTER</span>
+        <button type="button" class="tt-btn" id="compare-close" aria-label="Close comparison">&times;</button>
+      </header>
+      <div class="compare-body" id="compare-body"></div>
     </section>
 
     <!-- Multi-Pipeline Animated Value Stream Canvas -->
@@ -187,6 +204,26 @@
       </article>
     </section>
   </div>
+
+  <!-- Change chain player: steps through one change stage by stage -->
+  <aside class="chain-player hidden" id="chain-player" aria-label="Change chain player">
+    <div class="drawer-head">
+      <div>
+        <div class="drawer-kicker">CHANGE CHAIN</div>
+        <h3 id="player-title">Change</h3>
+        <div class="chain-sub" id="player-sub"></div>
+      </div>
+      <button type="button" class="drawer-close" id="player-close" aria-label="Close player">&times;</button>
+    </div>
+    <div class="player-path" id="player-path"></div>
+    <div class="player-controls">
+      <button type="button" class="tt-btn" id="player-prev" aria-label="Previous stage">&#9664;</button>
+      <button type="button" class="tt-btn" id="player-play" aria-label="Play">&#9654;</button>
+      <button type="button" class="tt-btn" id="player-next" aria-label="Next stage">&#9654;&#9654;</button>
+      <button type="button" class="tt-btn" id="player-details">DETAILS</button>
+    </div>
+    <div class="player-stage" id="player-stage"></div>
+  </aside>
 
   <!-- Slide-over Inspector Drawer -->
   <aside class="inspector-drawer hidden" id="inspector-drawer" aria-label="Details inspector">

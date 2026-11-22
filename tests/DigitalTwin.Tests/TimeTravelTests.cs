@@ -121,6 +121,22 @@ public sealed class TimeTravelTests(SqlServerFixture sql)
         Assert.Equal(F.Version, Stage(mcp, "uat").DeployedVersions["ui"]);
         Assert.Null(Stage(mcp, "prod").DeployedVersions["ui"]);
 
+        // Before/after (public, like the dashboard): the tdd instant against now.
+        using var anonymous = app.CreateClient();
+        var compare = await anonymous.GetFromJsonAsync<EnvironmentComparisonDto>($"/api/environments/compare?from={Iso(AtTdd.AddMinutes(1))}", Json);
+        Assert.Equal(AtTdd.AddMinutes(1), compare!.From);
+        Assert.Equal(clock.Now, compare.To);
+        var prodUi = compare.Stages.Single(s => s.Stage == "prod").Versions.Single(v => v.Name == "ui");
+        Assert.Equal((null, F.Version, true), (prodUi.From, prodUi.To, prodUi.Changed));
+        Assert.True(compare.Stages.Single(s => s.Stage == "prod").Changed);
+        var tddUi = compare.Stages.Single(s => s.Stage == "tdd").Versions.Single(v => v.Name == "ui");
+        Assert.False(tddUi.Changed);
+        Assert.Empty(compare.ResourcesAdded);
+        Assert.EndsWith("/ca-cmdemo1-old", Assert.Single(compare.ResourcesRemoved), StringComparison.Ordinal);
+        Assert.Equal((2, 1), (compare.ResourcesFrom, compare.ResourcesTo));
+        Assert.Equal((1, 0), (compare.DriftFrom.Count, compare.DriftTo.Count));
+        Assert.Contains(compare.BoardColumns, c => c is { Name: "Done", From: null, To: "1", Changed: true });
+
         // "As of just now" folds the journal to exactly the live projection.
         var timeTravel = app.Services.GetRequiredService<TwinTimeTravel>();
         var live = app.Services.GetRequiredService<ITwinStore>();

@@ -39,6 +39,10 @@ public static class TwinApiEndpoints
             ? new { r.FinishedAt, r.DriftCount, r.ErrorCount, checks = r.Checks.Count, drifted = r.Checks.Where(c => c.Error is null && !c.InSync).Select(c => $"{c.Source} {c.Name} ({c.Scope})").ToList() }
             : null));
 
+        // Public like the dashboard: what changed per environment between two instants (from the event journal).
+        app.MapGet("/api/environments/compare", async (DateTimeOffset from, DateTimeOffset? to, TwinQueryService queries, CancellationToken ct)
+            => Results.Ok(await queries.CompareAsync(from, to, ct)));
+
         app.MapGet("/api/alerts/status", (AlertService alerts) =>
         {
             var snapshot = alerts.Snapshot();
@@ -266,6 +270,7 @@ public static class TwinApiEndpoints
             - GET {{baseUrl}}/api/metrics?windowDays=7&stage=prod — DORA 5-metric delivery scorecard [X-Twin-Key]
             - GET {{baseUrl}}/api/explain?q=<issue|pr|version|sha|task> — Causal trace across work -> PR -> build -> release -> deploy -> runtime [X-Twin-Key]
             - GET {{baseUrl}}/api/change-chains?q=<issue|pr|sha|version|release>&limit=&asOf= — Change chains: work item -> PR -> build -> RC -> Octopus release -> tdd -> uat -> prod with stage timings and failures [X-Twin-Key]
+            - GET {{baseUrl}}/api/environments/compare?from=&to= — Before/after: versions and revisions per environment, Azure resources added/removed, drift and board changes between two instants (public)
             - GET {{baseUrl}}/api/alerts — Active alerts (deploy failures, stalled changes, dead letters, reconciliation drift) and recently sent ones [X-Twin-Key]
             - POST {{baseUrl}}/api/admin/alerts/test — Send a test alert to the configured webhook (Twin:Alerts:WebhookUrl; off when empty) [X-Twin-Key]
             - GET {{baseUrl}}/api/dora?windowDays=28&deployable=&asOf= — DORA keys from change chains: deployment frequency, lead time, change failure rate, time to restore, with performance bands [X-Twin-Key]
