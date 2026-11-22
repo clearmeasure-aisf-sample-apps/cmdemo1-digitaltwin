@@ -188,3 +188,14 @@ Following the domain research in the prompt's prior-art references:
 - **Not historical**: ingestion cursors (empty as of a past instant), the GitHub quota and the intake queue are live operational telemetry.
 - **Rebuild interplay**: live intake messages that cannot enter the projection gate within 20 seconds (a rebuild is running) throw `IntakeApplyDeferredException`, which Wolverine reschedules indefinitely instead of dead-lettering. A rebuild replays raw rows page by page: appending is earliest-wins and projecting is latest-wins, so batching gives the identical result with far fewer database round trips.
 
+## ADR-019: Bounded Journal Payloads and a Cheap Rebuild on the Basic Tier
+
+- **Context**: on the 5 DTU / 2 GB Basic database the journal grew to 668 MB within a day (71k events), almost all of it raw GitHub webhook bodies copied uncompressed into `PayloadJson`. A live rebuild then spent more than 20 minutes just streaming those payloads for its fingerprint, with live intake paused the whole time.
+- **Decision**:
+  - The journal keeps source payloads up to 4 KB. Larger ones become a stub with their size and SHA-256, because the raw intake table already keeps every original, compressed. Nothing reads source payloads from the journal; state observations keep theirs.
+  - The rebuild clears tables with `TRUNCATE` instead of fully logged deletes.
+  - The journal fingerprint is computed in the database, hashing payloads up to 16 KB and taking only the length of larger ones, so it never reads off-row LOB pages.
+  - The public dashboard state no longer carries event payloads.
+  - The live rebuild check runs only on a manual `verify_rebuild` run, in two passes: read models identical, then identical everywhere.
+- **Open**: the raw intake table has no retention yet (about 86 MB after a day); it is the source of truth for rebuilds, so retention needs snapshots first.
+

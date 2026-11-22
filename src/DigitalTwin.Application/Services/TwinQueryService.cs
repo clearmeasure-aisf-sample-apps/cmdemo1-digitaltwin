@@ -187,6 +187,11 @@ public sealed class TwinQueryService(
         var model = scope.Model;
         var summary = await GetSummaryAsync(scope, ct);
         var events = await store.QueryEventsAsync(null, scope.AsOf, null, null, null, null, 100, ct);
+        // The dashboard is public and never shows source payloads.
+        foreach (var e in events)
+        {
+            e.PayloadJson = "{}";
+        }
         var workItems = await model.GetWorkItemsAsync(ct);
         var prs = (await model.GetSourceChangesAsync(ct)).Where(p => p.State == "open").OrderByDescending(p => p.UpdatedAt).Take(40).ToList();
         var runs = await model.GetPipelineRunsAsync(60, ct);
