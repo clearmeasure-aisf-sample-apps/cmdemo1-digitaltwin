@@ -179,10 +179,13 @@ public sealed class IntakeRebuildService(
                 stepStarted = pauseStarted;
                 catchUp += await CatchUpAsync(run, ct);
                 Step("finalCatchUp");
-                live = await store.GetReadModelFingerprintAsync(ct);
-                Step("liveFingerprint");
-                rebuilt = await shadow.GetReadModelFingerprintAsync(ct);
-                Step("shadowFingerprint");
+                // In parallel: each reads only its own schema, and this is the part of the swap that holds the gate.
+                var liveTask = store.GetReadModelFingerprintAsync(ct);
+                var shadowTask = shadow.GetReadModelFingerprintAsync(ct);
+                await Task.WhenAll(liveTask, shadowTask);
+                live = await liveTask;
+                rebuilt = await shadowTask;
+                Step("fingerprints");
                 differences = live.Keys.Union(rebuilt.Keys)
                     .Where(k => !string.Equals(live.GetValueOrDefault(k), rebuilt.GetValueOrDefault(k), StringComparison.Ordinal))
                     .Select(k => $"{k}: {live.GetValueOrDefault(k) ?? "-"} -> {rebuilt.GetValueOrDefault(k) ?? "-"}")

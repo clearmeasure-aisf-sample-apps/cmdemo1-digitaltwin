@@ -261,3 +261,8 @@ Following the domain research in the prompt's prior-art references:
 - **Interruptions**: a cancel, an exception or a restart before the swap leaves live state untouched. The startup discards leftover shadow tables, and CI defers deploys while a rebuild runs.
 - **Follow-up (live run 2026-11-22)**: intake kept flowing for the whole 27-minute rebuild, and the dashboard answered every request. The final step then timed out at the 30 s default: the journal fingerprint scanned about 300 MB of payloads, and the swap waited on readers. The shadow was discarded and live was untouched. The journal fingerprint now reads only two narrow covering indexes (idempotency keys, which embed the content hash for state observations; type, subject and time). Final-step commands allow 5 minutes.
 
+## ADR-024: Signals and Configuration Changes From High-Value Source Events
+
+- **Decision**: Octopus document events map by their related document type (deployment process, variable sets, interruptions, releases, runbooks, triggers, project settings). Journal events that explain a change attach to its chain stages as `ChainSignal`s at query time, matched by the journal's chain ids, so read models and rebuilds are unaffected. Octopus configuration changes are listed by `GET /api/config-changes` and MCP `get_config_changes`.
+- **Shadow swap (phase 2 follow-up)**: the live and shadow fingerprints under the gate now run in parallel. The verified live run held the gate for 130 s (live 84 s, shadow 43 s).
+

@@ -51,7 +51,7 @@ public sealed partial class EfTwinStore
         return rows.OrderBy(e => e.OccurredAt.UtcTicks).ThenBy(e => e.IdempotencyKey, StringComparer.Ordinal).ToList();
     }
 
-    public async Task<IReadOnlyList<ObservedEvent>> GetEventsByChainAsync(IReadOnlyCollection<string> chainIds, DateTimeOffset? until, int limit, CancellationToken ct)
+    public async Task<IReadOnlyList<ObservedEvent>> GetEventsByChainAsync(IReadOnlyCollection<string> chainIds, DateTimeOffset? until, int limit, IReadOnlyCollection<string>? eventTypes, CancellationToken ct)
     {
         if (chainIds.Count == 0)
         {
@@ -60,6 +60,11 @@ public sealed partial class EfTwinStore
         await using var db = await factory.CreateDbContextAsync(ct);
         var ids = chainIds.ToList();
         var query = db.ObservedEvents.AsNoTracking().Where(e => e.ChainId != null && ids.Contains(e.ChainId) && e.EventType != StateKinds.EventType);
+        if (eventTypes is { Count: > 0 })
+        {
+            var types = eventTypes.ToList();
+            query = query.Where(e => types.Contains(e.EventType));
+        }
         var rows = db.Database.IsSqlite() || until is null
             ? await query.ToListAsync(ct)
             : await query.Where(e => e.OccurredAt <= until.Value).ToListAsync(ct);

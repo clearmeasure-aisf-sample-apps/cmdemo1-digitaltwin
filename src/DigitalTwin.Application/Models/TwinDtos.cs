@@ -124,3 +124,6 @@ public sealed record ChangeChainsDto(
     int MatchCount,
     IReadOnlyList<ChangeChain> Chains,
     IReadOnlyList<ObservedEvent> TimelineEvents);
+
+/// <summary>An Octopus configuration change: deployment process, variables, project settings, triggers or runbooks.</summary>
+public sealed record ConfigChangeDto(DateTimeOffset At, string Kind, string? Deployable, string? PipelineId, string Summary, string? Actor, string? Url);

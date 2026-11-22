@@ -218,7 +218,7 @@ public sealed class TwinQueryService(
             resources,
             artifacts,
             await timeTravel.GetHistoryStartAsync(ct),
-            SelectDashboardChains(await BuildChainsAsync(scope, ct)));
+            await WithSignalsAsync(SelectDashboardChains(await BuildChainsAsync(scope, ct)), scope, ct));
     }
 
     public async Task<ChangeChainsDto> GetChangeChainsAsync(string? query, int limit, DateTimeOffset? asOf, CancellationToken ct)
@@ -228,9 +228,46 @@ public sealed class TwinQueryService(
         var matches = string.IsNullOrWhiteSpace(query) ? chains : ChangeChainBuilder.Find(chains, query);
         var top = matches.Take(Math.Clamp(limit, 1, 100)).ToList();
         var timeline = !string.IsNullOrWhiteSpace(query) && top.Count > 0
-            ? await store.GetEventsByChainAsync(top[0].CorrelationIds, scope.AsOf, 60, ct)
+            ? await store.GetEventsByChainAsync(top[0].CorrelationIds, scope.AsOf, 60, null, ct)
             : [];
-        return new ChangeChainsDto(scope.AsOf, query, matches.Count, top, timeline);
+        return new ChangeChainsDto(scope.AsOf, query, matches.Count, await WithSignalsAsync(top, scope, ct), timeline);
+    }
+
+    /// <summary>Reviews, failed jobs and checks, interventions and sign-offs from the journal, attached to their stages.</summary>
+    private async Task<IReadOnlyList<ChangeChain>> WithSignalsAsync(List<ChangeChain> chains, TwinReadScope scope, CancellationToken ct)
+    {
+        if (chains.Count == 0)
+        {
+            return chains;
+        }
+        var ids = chains.SelectMany(c => c.CorrelationIds).Distinct(StringComparer.OrdinalIgnoreCase).ToList();
+        var events = await store.GetEventsByChainAsync(ids, scope.AsOf, 2000, ChangeChainSignals.EventTypes, ct);
+        return ChangeChainSignals.Attach(chains, events);
+    }
+
+    public static readonly IReadOnlyList<string> ConfigChangeEventTypes =
+    [
+        "twin.octopus.process.changed",
+        "twin.octopus.variables.changed",
+        "twin.octopus.project.changed",
+        "twin.octopus.trigger.changed",
+        "twin.octopus.runbook.changed"
+    ];
+
+    /// <summary>Octopus deployment process, variable, project, trigger and runbook changes, newest first.</summary>
+    public async Task<IReadOnlyList<ConfigChangeDto>> GetConfigChangesAsync(DateTimeOffset? since, int limit, DateTimeOffset? asOf, CancellationToken ct)
+    {
+        var scope = await timeTravel.ResolveAsync(asOf, ct);
+        var take = Math.Clamp(limit, 1, 500);
+        var changes = new List<ObservedEvent>();
+        foreach (var type in ConfigChangeEventTypes)
+        {
+            changes.AddRange(await store.QueryEventsAsync(since, scope.AsOf, EventSourceKind.Octopus, null, null, type, take, ct));
+        }
+        return changes.OrderByDescending(e => e.OccurredAt).Take(take)
+            .Select(e => new ConfigChangeDto(e.OccurredAt, e.EventType["twin.octopus.".Length..].Replace(".changed", "", StringComparison.Ordinal),
+                e.DeployableName, e.PipelineId, e.Summary, e.Actor, e.SourceUrl))
+            .ToList();
     }
 
     /// <summary>Most recent changes, favouring ones that reached a build: the dashboard stays sparse.</summary>

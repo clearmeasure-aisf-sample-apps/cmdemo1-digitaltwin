@@ -1,3 +1,5 @@
+using DigitalTwin.Core.Observation;
+
 namespace DigitalTwin.Core.ChangeChains;
 
 public enum ChainStageKind
@@ -67,4 +69,8 @@ public sealed record ChangeChain(
     DateTimeOffset LastActivityAt,
     double? LeadTimeHours,
     double? CycleTimeHours,
-    IReadOnlyList<string> CorrelationIds);
+    IReadOnlyList<string> CorrelationIds,
+    IReadOnlyList<ChainSignal>? Signals = null);
+
+/// <summary>A fact from the journal attached to a chain stage: a review, a failed job or check, a sign-off, a failure.</summary>
+public sealed record ChainSignal(ChainStageKind Stage, string Kind, string Summary, DateTimeOffset At, string Outcome, string? Actor, string? Url);
