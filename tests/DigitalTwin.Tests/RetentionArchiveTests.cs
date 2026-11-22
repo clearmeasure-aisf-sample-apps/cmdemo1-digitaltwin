@@ -79,6 +79,27 @@ public sealed class RetentionArchiveTests(SqlServerFixture sql) : IDisposable
     }
 
     [Fact]
+    public async Task OverTheSizeBudgetRecentCompleteDaysAreArchivedButNeverToday()
+    {
+        await using var app = new TwinAppFactory(await sql.CreateDatabaseAsync(), new Dictionary<string, string?>
+        {
+            ["Twin:Archive:Provider"] = "FileSystem",
+            ["Twin:Archive:Path"] = _archiveRoot,
+            ["Twin:Retention:MaxRawMb"] = "0"
+        });
+        using var client = app.CreateAuthedClient();
+        await Track(app, () => client.SendAsync(TwinAppFactory.GitHubWebhook("ping", "yesterday", """{"zen":"x","repository":{"name":"r"}}""")));
+        await app.ScalarAsync("UPDATE twin.raw_intake_events SET received_at = DATEADD(day, -1, received_at); SELECT @@ROWCOUNT");
+        await Track(app, () => client.SendAsync(TwinAppFactory.GitHubWebhook("ping", "today", """{"zen":"y","repository":{"name":"r"}}""")));
+
+        var report = await (await client.PostAsync("/api/admin/retention/run", null)).Content.ReadFromJsonAsync<RetentionReport>();
+        var day = Assert.Single(report!.Days);
+        Assert.Equal("size", day.Reason);
+        Assert.Equal(DateOnly.FromDateTime(DateTime.UtcNow.AddDays(-1)), day.Day);
+        Assert.Equal(1, await app.ScalarAsync("SELECT COUNT(*) FROM twin.raw_intake_events"));
+    }
+
+    [Fact]
     public async Task WithoutAnArchiveNothingIsPruned()
     {
         await using var app = new TwinAppFactory(await sql.CreateDatabaseAsync());

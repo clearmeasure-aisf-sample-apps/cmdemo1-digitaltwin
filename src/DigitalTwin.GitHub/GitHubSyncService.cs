@@ -378,7 +378,7 @@ public sealed partial class GitHubSyncService(
             SystemName = Cmdemo1PlatformCatalog.SystemName,
             SystemJson = systemJson,
             PinnedVersionsJson = JsonSerializer.Serialize(pinned),
-            NodesJson = containersJson,
+            NodesJson = StableJson.Without(containersJson, "generated"),
             CostJson = costJson,
             UpdatedAt = now
         }], EventSourceKind.GitOps, ct);
@@ -944,7 +944,21 @@ public sealed partial class GitHubSyncService(
 
         if (!queryBoardGraphQl || gh.IsGraphQlPaused(out _))
         {
-            if (itemsById.Count > 0) await state.PublishAsync(StateKinds.WorkItem, itemsById.Values.ToList(), EventSourceKind.GitHub, ct);
+            // The board owns column, state and timing: keep its last observation instead of overwriting it with
+            // workitems.json values, which would make every item flap between the two producers.
+            var current = (await store.GetWorkItemsAsync(ct)).ToDictionary(w => w.Id, StringComparer.OrdinalIgnoreCase);
+            foreach (var item in itemsById.Values)
+            {
+                if (current.TryGetValue(item.Id, out var known) && known.ColumnSource == "project")
+                {
+                    item.Column = known.Column;
+                    item.ColumnSource = known.ColumnSource;
+                    item.State = known.State;
+                    item.ClosedAt = known.ClosedAt;
+                    item.UpdatedAt = known.UpdatedAt;
+                }
+            }
+            if (itemsById.Count > 0) await state.PublishAsync(StateKinds.WorkItem, WithTimings(itemsById.Values), EventSourceKind.GitHub, ct);
             return;
         }
 
@@ -1049,17 +1063,6 @@ public sealed partial class GitHubSyncService(
                         };
                     }
 
-                    if (itemsById.TryGetValue(id, out var item))
-                    {
-                        if (item.ProdDeployedAt is not null)
-                        {
-                            item.LeadTimeHours = Math.Round((item.ProdDeployedAt.Value - item.CreatedAt).TotalHours, 1);
-                        }
-                        if (item.ClosedAt is not null)
-                        {
-                            item.CycleTimeHours ??= Math.Round((item.ClosedAt.Value - item.CreatedAt).TotalHours, 1);
-                        }
-                    }
                 }
             }
 
@@ -1077,8 +1080,20 @@ public sealed partial class GitHubSyncService(
 
         if (itemsById.Count > 0)
         {
-            await state.PublishAsync(StateKinds.WorkItem, itemsById.Values.ToList(), EventSourceKind.GitHub, ct);
+            await state.PublishAsync(StateKinds.WorkItem, WithTimings(itemsById.Values), EventSourceKind.GitHub, ct);
         }
+    }
+
+    /// <summary>Lead and cycle times, computed the same way whichever path observed the item.</summary>
+    private static List<WorkItemSnapshot> WithTimings(IEnumerable<WorkItemSnapshot> items)
+    {
+        var list = items.ToList();
+        foreach (var item in list)
+        {
+            item.LeadTimeHours = item.ProdDeployedAt is null ? null : Math.Round((item.ProdDeployedAt.Value - item.CreatedAt).TotalHours, 1);
+            item.CycleTimeHours = item.ClosedAt is null ? null : Math.Round((item.ClosedAt.Value - item.CreatedAt).TotalHours, 1);
+        }
+        return list;
     }
 
     private static int? ExtractIssueNumber(string title, string branch)

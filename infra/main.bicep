@@ -55,6 +55,9 @@ param deployArchive bool = true
 @description('Days raw intake events stay in SQL before they move to the archive.')
 param retentionDays int = 30
 
+@description('Size budget for the raw intake table in SQL (MB): above it, the oldest complete days are archived early.')
+param retentionMaxRawMb int = 500
+
 var suffix = take(uniqueString(subscription().id, resourceGroup().id, 'cmdemo1-twin'), 5)
 var tags = {
   system: 'cmdemo1'
@@ -221,6 +224,7 @@ var archiveEnv = deployArchive
       { name: 'Twin__Archive__Container', value: archiveContainerName }
       { name: 'Twin__Archive__ConnectionString', secretRef: 'archive-connection' }
       { name: 'Twin__Retention__Days', value: string(retentionDays) }
+      { name: 'Twin__Retention__MaxRawMb', value: string(retentionMaxRawMb) }
     ]
   : [
       { name: 'Twin__Archive__Provider', value: 'None' }
