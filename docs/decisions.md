@@ -284,3 +284,9 @@ Following the domain research in the prompt's prior-art references:
 - **Decision**: the catalog covers every documented source event. Hand-written rows carry the domain semantics the twin uses; everything else gets a generated row with a deterministic type, domain event and bounded context (`SourceEventTypes`). That means `twin.github.{event}.{action}` for GitHub, and `twin.octopus.{area}.{verb}` for Octopus, replacing `twin.octopus.audit.{category}`. The name lists (`SourceEventNames`) are generated from the official snapshots, and a test keeps them equal.
 - **Not subscribed**: the 44 instance-level Octopus categories (logins, licences, API keys, certificates, signing keys, usage declarations, MCP OAuth) stay out of the space subscription. They describe the Octopus instance rather than delivery, and carry user names and IP addresses. They are typed if they ever arrive.
 
+## ADR-028: Service Bus Switch Kept Behind Configuration
+
+- **Attempt (2026-11-22)**: `az provider register -n Microsoft.ServiceBus` with the existing deploy principal returned `AuthorizationFailed` (no `Microsoft.ServiceBus/register/action`). The provider already showed `Registered`. Per instructions, no other credentials or rights were sought.
+- **Decision**: the intake stays on the SQL Server transport (`deployServiceBus=false`). The switch stays implemented: managed identity, or a connection string (shared access key or emulator). It is validated at startup and covered by tests. `serviceBusAuth=SharedAccessKey` gives an Owner a Contributor-compatible option (no role assignment) besides the managed-identity mode, which needs `roleAssignments/write`.
+- **Open**: the opt-in emulator test (`TWIN_TEST_SERVICEBUS=1`) could not run in the cloud agent sandbox, where the emulator container crashes when connecting to its SQL engine.
+

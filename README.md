@@ -205,6 +205,18 @@ Every read endpoint (summary, graph, dashboard state, pipelines, environments, d
 
 ---
 
+## Azure Service Bus Transport (switch ready, not enabled)
+
+The intake transport is configuration: `Twin:Messaging:Transport` = `LocalDurable`, `SqlServer` (deployed today) or `AzureServiceBus`. Service Bus can use a managed identity (`ServiceBusNamespace` + `ManagedIdentityClientId`) or a connection string (`ServiceBusConnectionString`: a Send+Listen shared access key, or the local emulator). Incomplete settings fail at startup.
+
+The Bicep has `deployServiceBus` (default **false**) and `serviceBusAuth`:
+- `ManagedIdentity` needs `Microsoft.Authorization/roleAssignments/write` for the Data Owner role.
+- `SharedAccessKey` creates a Send+Listen rule and passes its connection string as a Container App secret, which is Contributor-compatible.
+
+**Status (2026-11-22):** `Microsoft.ServiceBus` shows as Registered in the subscription. `az provider register` with the deploy principal fails with `AuthorizationFailed` (no `Microsoft.ServiceBus/register/action`), so the registration was done by someone else. Per instructions the transport stays on SQL Server with `deployServiceBus=false`. Enabling it is a decision for a subscription Owner: grant `roleAssignments/write` for the managed-identity mode, or approve `serviceBusAuth=SharedAccessKey`.
+
+`TWIN_TEST_SERVICEBUS=1 dotnet test` runs the transport end to end against the Testcontainers Service Bus emulator (with SQL Server 2022 as its engine). In the cloud agent sandbox used for this work, the emulator container crashed (exit 139) when connecting to its database, so that test has not been run successfully yet. The default suite covers selection and validation by configuration.
+
 ## Local Development & Verification (no Azure needed)
 
 Prerequisites: .NET 11 SDK and Docker. No Azure, GitHub or Octopus credentials are required.

@@ -33,7 +33,7 @@ public sealed class MessagingOptions
     public int SqlQueuePollingMs { get; set; } = 1_000;
     public string ServiceBusNamespace { get; set; } = string.Empty;
 
-    /// <summary>Connection string alternative to namespace + managed identity (local Service Bus emulator only).</summary>
+    /// <summary>Connection string alternative to namespace + managed identity: a Send+Listen shared access key, or the local emulator.</summary>
     public string ServiceBusConnectionString { get; set; } = string.Empty;
     public string ManagedIdentityClientId { get; set; } = string.Empty;
 
