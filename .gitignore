@@ -14,3 +14,7 @@ out/
 TestResults/
 coverage/
 artifacts/
+.terraform/
+*.tfstate
+*.tfstate.*
+*.tfvars

@@ -299,3 +299,9 @@ Following the domain research in the prompt's prior-art references:
 - **Decision**: the chain player, replay speed/step controls and before/after comparison are built on read models the twin already has: change chains with their signals, and point-in-time state folded from the journal (ADR-021). The comparison is two `asOf` folds diffed on the server (`TwinQueryService.CompareAsync`). It is public because it exposes only what the public dashboard already shows: versions, revisions, resource names, drift and board counts.
 - **Superseded changes are not stalled**: a stalled-change alert now needs the chain to be the newest change of its deployable at that stage or beyond. Older versions skipped by a newer promotion are superseded, not stuck. The first live evaluation showed 26 such false positives at tdd.
 
+## ADR-031: The Twin's Pipeline as Code, Applied by the Octopus Owner
+
+- **Decision**: the deploy logic lives in `deploy/scripts`, run by both GitHub Actions and the Octopus process. Each `main` build produces a release candidate: an ACR image, plus an Octopus package with the compiled ARM template so workers need no Bicep. The Octopus project, environment, lifecycle, variables and process are Terraform in `deploy/octopus/terraform`, following cmdemo1-system's Octopus Terraform. CI checks it with `fmt` and `validate` only.
+- **Not applied here**: Octopus space `Spaces-355` belongs to cmdemo1's owner, so the definitions are documented (docs/octopus-apply.md) rather than applied. Pushing packages and creating releases (`TWIN_OCTOPUS_RELEASES`) and handing deploys to Octopus (`TWIN_DEPLOY_VIA_OCTOPUS`) are repository variables, unset by default. Neither path promotes.
+- **Self-observation**: the twin's own Octopus project maps to the `twin-observer` pipeline, so its deployments never count as cmdemo1 changes.
+

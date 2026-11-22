@@ -231,6 +231,12 @@ The Bicep has `deployServiceBus` (default **false**) and `serviceBusAuth`:
 
 `TWIN_TEST_SERVICEBUS=1 dotnet test` runs the transport end to end against the Testcontainers Service Bus emulator (with SQL Server 2022 as its engine). In the cloud agent sandbox used for this work, the emulator container crashed (exit 139) when connecting to its database, so that test has not been run successfully yet. The default suite covers selection and validation by configuration.
 
+## The Twin's Own Release Pipeline (as code)
+
+Each push to `main` builds a **release candidate**: the image `cmdemo1/digitaltwin:1.0.<run>` in ACR, plus the Octopus package `cmdemo1-digitaltwin.1.0.<run>.zip`. The package holds the compiled ARM template, the Bicep sources, `deploy/scripts/*` and `scripts/register-hooks.sh`, and is kept as a workflow artifact. GitHub Actions deploys it with `deploy/scripts/deploy-twin.sh`, then gates it with `deploy/scripts/verify-twin.sh`: Healthy at the release version, 0 dead letters, database under budget, MCP answering.
+
+The twin's Octopus project is defined in `deploy/octopus/terraform`: one `Platform Twin` environment, a single-phase lifecycle, project variables, and three Bash steps that run those same scripts from the package. CI only formats and validates it. It is **not applied**: cmdemo1's Octopus space belongs to its owner, so no project, credential or team was created and nothing was promoted. [docs/octopus-apply.md](docs/octopus-apply.md) lists exactly what to apply, and the two repository variables that hand deploys to Octopus: `TWIN_OCTOPUS_RELEASES` and `TWIN_DEPLOY_VIA_OCTOPUS`, both unset.
+
 ## Local Development & Verification (no Azure needed)
 
 Prerequisites: .NET 11 SDK and Docker. No Azure, GitHub or Octopus credentials are required.

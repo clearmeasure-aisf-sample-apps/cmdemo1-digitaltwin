@@ -180,6 +180,7 @@ public static class Cmdemo1PlatformCatalog
             "cmdemo1-system" => "system-gitops",
             "cmdemo1-scorecard" or "cmdemo1-scorecard-space" => "measurement-scorecard",
             "cmdemo1-aisf" or "cmdemo1-fworker" or "cmdemo1-fworker-runtime" => "factory-agentic",
+            "cmdemo1-digitaltwin" => "twin-observer",
             _ => "system-gitops"
         };
     }
