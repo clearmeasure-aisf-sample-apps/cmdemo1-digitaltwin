@@ -60,6 +60,7 @@ public static partial class PersistenceServiceCollectionExtensions
                     // Tables added after the first deploy: EnsureCreated never alters an existing database.
                     await db.Database.ExecuteSqlRawAsync(ProjectionVersionsDdl, ct);
                     await db.Database.ExecuteSqlRawAsync(StateAsOfIndexDdl, ct);
+                    await db.Database.ExecuteSqlRawAsync(ChainIndexDdl, ct);
                 }
                 return;
             }
@@ -86,6 +87,11 @@ public static partial class PersistenceServiceCollectionExtensions
     private const string StateAsOfIndexDdl = $"""
         IF NOT EXISTS (SELECT 1 FROM sys.indexes WHERE name = '{TwinDbContext.StateAsOfIndexName}' AND object_id = OBJECT_ID('dbo.ObservedEvents'))
         CREATE INDEX [{TwinDbContext.StateAsOfIndexName}] ON dbo.ObservedEvents ([EventType], [SubjectType], [SubjectId], [OccurredAt]);
+        """;
+
+    private const string ChainIndexDdl = $"""
+        IF NOT EXISTS (SELECT 1 FROM sys.indexes WHERE name = '{TwinDbContext.ChainIndexName}' AND object_id = OBJECT_ID('dbo.ObservedEvents'))
+        CREATE INDEX [{TwinDbContext.ChainIndexName}] ON dbo.ObservedEvents ([ChainId]);
         """;
 
     [LoggerMessage(Level = LogLevel.Warning, Message = "Twin database initialization attempt {Attempt} failed; retrying in 5s")]

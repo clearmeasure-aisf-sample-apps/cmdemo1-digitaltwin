@@ -1,5 +1,6 @@
 using System.ComponentModel;
 using System.Text.Json;
+using System.Text.Json.Serialization;
 using DigitalTwin.Application.Services;
 using DigitalTwin.Core.Observation;
 using ModelContextProtocol.Server;
@@ -10,7 +11,11 @@ namespace DigitalTwin.Api.Mcp;
 public sealed class TwinMcpTools(TwinQueryService queries)
 {
     private const string AsOfDescription = "Optional ISO-8601 UTC timestamp: answer from the twin's state as it was at that instant (time travel). Omit for live state.";
-    private static readonly JsonSerializerOptions JsonOptions = new(JsonSerializerDefaults.Web) { WriteIndented = true };
+    private static readonly JsonSerializerOptions JsonOptions = new(JsonSerializerDefaults.Web)
+    {
+        WriteIndented = true,
+        Converters = { new JsonStringEnumConverter() }
+    };
 
     [McpServerTool(Name = "get_summary", Title = "Get Digital Twin Summary", ReadOnly = true, Idempotent = true)]
     [Description("Get the complete platform-level digital twin summary of cmdemo1: pipelines, deployment stages (tdd/uat/prod/pool), DORA metrics, active drift count, work board summary, ingestion health, GitHub quota, and durable intake queue (depth, oldest age, dead letters).")]
@@ -18,6 +23,15 @@ public sealed class TwinMcpTools(TwinQueryService queries)
         [Description(AsOfDescription)] DateTimeOffset? asOf = null,
         CancellationToken ct = default)
         => JsonSerializer.Serialize(await queries.GetSummaryAsync(asOf, ct), JsonOptions);
+
+    [McpServerTool(Name = "get_change_chain", Title = "Get Change Chain", ReadOnly = true, Idempotent = true)]
+    [Description("Trace a change end to end: work item -> branch/PR -> CI build -> release candidate -> Octopus release -> tdd -> uat -> prod, with each stage's status, timings, attempts and failures, plus the journal events of the best match. Omit the query for the most recent changes.")]
+    public async Task<string> GetChangeChainAsync(
+        [Description("Issue number, PR number, commit SHA (prefix), release version (e.g. 2.4.2664), Octopus release/deployment/task id, or chain id. Omit for recent chains.")] string? query = null,
+        [Description("Maximum number of chains to return (1-100, default 5)")] int limit = 5,
+        [Description(AsOfDescription)] DateTimeOffset? asOf = null,
+        CancellationToken ct = default)
+        => JsonSerializer.Serialize(await queries.GetChangeChainsAsync(query, limit, asOf, ct), JsonOptions);
 
     [McpServerTool(Name = "get_state_at", Title = "Get Point-in-Time State", ReadOnly = true, Idempotent = true)]
     [Description("Time travel: what version was deployed to each environment (tdd/uat/prod), which Azure resources existed, the work board columns, and active drift at a given instant, reconstructed from the event journal.")]

@@ -115,6 +115,9 @@ public static class TwinApiEndpoints
         protectedApi.MapGet("/explain", async (string q, DateTimeOffset? asOf, TwinQueryService queries, CancellationToken ct)
             => Results.Ok(await queries.ExplainItemAsync(q, asOf, ct)));
 
+        protectedApi.MapGet("/change-chains", async (string? q, int? limit, DateTimeOffset? asOf, TwinQueryService queries, CancellationToken ct)
+            => Results.Ok(await queries.GetChangeChainsAsync(q, limit ?? 20, asOf, ct)));
+
         protectedApi.MapGet("/state-at", async (DateTimeOffset asOf, TwinQueryService queries, CancellationToken ct)
             => Results.Ok(await queries.GetStateAtAsync(asOf, ct)));
 
@@ -208,6 +211,7 @@ public static class TwinApiEndpoints
             - GET {{baseUrl}}/api/deployments?stage=&deployable=&limit= — Octopus releases, deployments, sign-offs, guided failures [X-Twin-Key]
             - GET {{baseUrl}}/api/metrics?windowDays=7&stage=prod — DORA 5-metric delivery scorecard [X-Twin-Key]
             - GET {{baseUrl}}/api/explain?q=<issue|pr|version|sha|task> — Causal trace across work -> PR -> build -> release -> deploy -> runtime [X-Twin-Key]
+            - GET {{baseUrl}}/api/change-chains?q=<issue|pr|sha|version|release>&limit=&asOf= — Change chains: work item -> PR -> build -> RC -> Octopus release -> tdd -> uat -> prod with stage timings and failures [X-Twin-Key]
             - GET {{baseUrl}}/api/state-at?asOf=<ISO-8601> — Time travel: versions per environment, Azure resources, board columns and drift at that instant [X-Twin-Key]
             - GET {{baseUrl}}/api/intake — Durable intake queue: depth, oldest pending age, dead letters, transport [X-Twin-Key]
             - GET {{baseUrl}}/api/admin/deadletters — Dead-lettered intake messages [X-Twin-Key]
@@ -216,12 +220,12 @@ public static class TwinApiEndpoints
             - POST {{baseUrl}}/api/admin/backfill — Re-poll GitHub, Octopus, Azure and probes now [X-Twin-Key]
 
             ## Time Travel
-            Every read endpoint above (summary, graph, dashboard state, pipelines, environments, drift, workitems, deployments, metrics, explain) accepts `asOf=<ISO-8601>`
+            Every read endpoint above (summary, graph, dashboard state, pipelines, environments, drift, workitems, deployments, metrics, explain, change-chains) accepts `asOf=<ISO-8601>`
             and answers from the state reconstructed from the event journal at that instant. State history starts at the first state observation.
 
             ## MCP Server (Streamable HTTP)
             Endpoint: {{baseUrl}}/mcp (requires `X-Twin-Key` header)
-            Tools: get_summary, get_state_at, query_events, get_environment, get_drift, get_pipeline, explain_item, get_intake_queue (read tools accept `asOf`)
+            Tools: get_summary, get_change_chain, get_state_at, query_events, get_environment, get_drift, get_pipeline, explain_item, get_intake_queue (read tools accept `asOf`)
             """);
     }
 }

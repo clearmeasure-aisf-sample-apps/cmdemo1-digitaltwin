@@ -1,4 +1,5 @@
 using DigitalTwin.Core.BuildAndArtifact;
+using DigitalTwin.Core.ChangeChains;
 using DigitalTwin.Core.Hierarchy;
 using DigitalTwin.Core.Intake;
 using DigitalTwin.Core.Measurement;
@@ -78,7 +79,8 @@ public sealed record DashboardStateDto(
     IReadOnlyList<DriftFinding> ActiveDrifts,
     IReadOnlyList<AzureResourceSnapshot> AzureResources,
     IReadOnlyList<ArtifactPackageSnapshot> Artifacts,
-    DateTimeOffset? HistoryStartsAt = null);
+    DateTimeOffset? HistoryStartsAt = null,
+    IReadOnlyList<ChangeChain>? ChangeChains = null);
 
 public sealed record CausalExplanationDto(
     string Query,
@@ -114,3 +116,11 @@ public sealed record WorkloadAtDto(string Deployable, string? RunningVersion, st
 public sealed record DeliveryAtDto(string Release, string? Deployable, string State, DateTimeOffset QueuedAt, DateTimeOffset? FinishedAt);
 
 public sealed record AzureResourceAtDto(string Name, string Type, string ResourceGroup);
+
+/// <summary>Change chains matching a query (or the most recent ones), with the journal events of the best match.</summary>
+public sealed record ChangeChainsDto(
+    DateTimeOffset? AsOf,
+    string? Query,
+    int MatchCount,
+    IReadOnlyList<ChangeChain> Chains,
+    IReadOnlyList<ObservedEvent> TimelineEvents);
