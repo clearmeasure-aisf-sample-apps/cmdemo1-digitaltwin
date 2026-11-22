@@ -298,14 +298,16 @@ jobs:
           echo "Webhook acknowledged after durable capture: ${ACK}"
           echo "$ACK" | jq -e '.captured == true' >/dev/null
 
-          for i in $(seq 1 30); do
+          # Processing is in capture order, so allow for a backlog (e.g. after a rebuild paused intake).
+          for i in $(seq 1 300); do
             if curl -fsS -H "X-Twin-Key: ${TWIN_API_KEY}" "${TWIN_URL}/api/events?source=GitHub&limit=200" \
                 | jq -e --arg k "github:${DELIVERY}" 'map(select(.idempotencyKey == $k)) | length == 1' >/dev/null; then
               echo "Processed into the event journal after $(( $(date -u +%s) - SENT_AT ))s (idempotency key github:${DELIVERY})"
               break
             fi
-            if [ "$i" -eq 30 ]; then
-              echo "Test webhook ${DELIVERY} was not processed within 60s" >&2
+            if [ $((i % 30)) -eq 0 ]; then curl -fsS "${TWIN_URL}/api/intake/status" | jq -c '{depth, oldestPendingAgeSeconds, deadLetterCount}'; fi
+            if [ "$i" -eq 300 ]; then
+              echo "Test webhook ${DELIVERY} was not processed within 10 minutes" >&2
               exit 1
             fi
             sleep 2
