@@ -10,6 +10,7 @@ public sealed record IntakeRebuildReport(
     int RawEventsFailed,
     int JournalEventsRebuilt,
     bool Identical,
+    bool ReadModelsIdentical,
     IReadOnlyDictionary<string, string> FingerprintBefore,
     IReadOnlyDictionary<string, string> FingerprintAfter,
     IReadOnlyList<string> Differences,
@@ -30,6 +31,8 @@ public sealed class IntakeRebuildService(
     TimeProvider timeProvider)
 {
     private const int PageSize = 200;
+    // The journal can legitimately differ after a normalization change; read models must not.
+    private const string JournalFingerprintKey = "journal";
     private readonly Lock _lock = new();
     private Task<IntakeRebuildReport>? _current;
     private DateTimeOffset? _startedAt;
@@ -118,6 +121,7 @@ public sealed class IntakeRebuildService(
         await realtime.PublishStateRefreshedAsync("rebuilt-from-raw", finishedAt, ct);
         return new IntakeRebuildReport(
             startedAt, finishedAt, cleared, replayed, failures.Count, rebuilt,
-            differences.Count == 0, before, afterFingerprint, differences, failures.Take(20).ToList());
+            differences.Count == 0, differences.All(d => d.StartsWith(JournalFingerprintKey + ":", StringComparison.Ordinal)),
+            before, afterFingerprint, differences, failures.Take(20).ToList());
     }
 }

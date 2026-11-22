@@ -6,6 +6,11 @@ on:
   push:
     branches: [main]
   workflow_dispatch:
+    inputs:
+      verify_rebuild:
+        description: Rebuild all twin state from raw events twice and require identical read models (pauses live intake while it runs)
+        type: boolean
+        default: false
 
 permissions:
   contents: read
@@ -199,19 +204,33 @@ jobs:
         env:
           TWIN_URL: ${{ steps.bicep.outputs.twin_url }}
           TWIN_API_KEY: ${{ secrets.TWIN_API_KEY }}
+          VERIFY_REBUILD: ${{ github.event_name == 'workflow_dispatch' && inputs.verify_rebuild }}
         run: |
           set -euo pipefail
           curl -fsS -m 120 -X POST -H "X-Twin-Key: ${TWIN_API_KEY}" "${TWIN_URL}/api/admin/backfill" | jq '{gitHubOk, octopusOk, azureOk, probesOk, activeDriftCount, notes}'
-          # Full rebuild of journal + every read model from raw events; must reproduce identical read models.
-          curl -fsS -X POST -H "X-Twin-Key: ${TWIN_API_KEY}" "${TWIN_URL}/api/admin/rebuild?wait=false" | jq '{running, startedAt}'
-          for i in $(seq 1 240); do
-            STATUS=$(curl -fsS -H "X-Twin-Key: ${TWIN_API_KEY}" "${TWIN_URL}/api/admin/rebuild/status")
-            if [ "$(echo "$STATUS" | jq -r .running)" = "false" ] && [ "$(echo "$STATUS" | jq -r '.lastReport != null or .lastError != null')" = "true" ]; then break; fi
-            if [ $((i % 12)) -eq 0 ]; then echo "$STATUS" | jq -c '{running, startedAt, rawEventsReplayedSoFar}'; fi
-            sleep 5
-          done
-          echo "$STATUS" | jq '{running, lastError, report: (.lastReport | {identical, startedAt, finishedAt, rawEventsReplayed, rawEventsFailed, journalEventsRebuilt, differences, fingerprintAfter})}'
-          echo "$STATUS" | jq -e '.lastReport.identical == true' >/dev/null
+          # Full rebuild from raw events (opt-in: it pauses live intake on the 5 DTU database while it runs).
+          # Pass 1 may re-normalize the journal after a mapping change but must reproduce identical read models;
+          # pass 2 must then be identical in every fingerprint, journal included.
+          rebuild() {
+            local previous="$1"
+            curl -fsS -X POST -H "X-Twin-Key: ${TWIN_API_KEY}" "${TWIN_URL}/api/admin/rebuild?wait=false" >/dev/null
+            for i in $(seq 1 360); do
+              STATUS=$(curl -fsS -H "X-Twin-Key: ${TWIN_API_KEY}" "${TWIN_URL}/api/admin/rebuild/status")
+              if [ "$(echo "$STATUS" | jq -r .running)" = "false" ] && [ "$(echo "$STATUS" | jq -r --arg p "$previous" '(.lastReport != null and .lastReport.startedAt != $p) or .lastError != null')" = "true" ]; then break; fi
+              if [ $((i % 12)) -eq 0 ]; then echo "$STATUS" | jq -c '{running, startedAt, rawEventsReplayedSoFar}' >&2; fi
+              sleep 5
+            done
+            echo "$STATUS" | jq '{running, lastError, report: (.lastReport | {identical, readModelsIdentical, startedAt, finishedAt, rawEventsReplayed, rawEventsFailed, journalEventsRebuilt, differences, fingerprintAfter})}' >&2
+            echo "$STATUS"
+          }
+          if [ "${VERIFY_REBUILD}" = "true" ]; then
+            FIRST=$(rebuild "")
+            echo "$FIRST" | jq -e '.lastReport.readModelsIdentical == true and .lastReport.rawEventsFailed == 0' >/dev/null
+            SECOND=$(rebuild "$(echo "$FIRST" | jq -r .lastReport.startedAt)")
+            echo "$SECOND" | jq -e '.lastReport.identical == true' >/dev/null
+          else
+            echo "Rebuild verification skipped (run this workflow manually with verify_rebuild=true)."
+          fi
           # Time travel: state reconstructed from the journal ten minutes ago.
           AS_OF=$(date -u -d '10 minutes ago' +%Y-%m-%dT%H:%M:%SZ)
           curl -fsS -H "X-Twin-Key: ${TWIN_API_KEY}" "${TWIN_URL}/api/state-at?asOf=${AS_OF}" \

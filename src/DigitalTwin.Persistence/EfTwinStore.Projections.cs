@@ -190,23 +190,37 @@ public sealed partial class EfTwinStore
     public async Task ClearReadModelsAsync(CancellationToken ct)
     {
         await using var db = await factory.CreateDbContextAsync(ct);
-        await db.Repositories.ExecuteDeleteAsync(ct);
-        await db.SourceChanges.ExecuteDeleteAsync(ct);
-        await db.PipelineRuns.ExecuteDeleteAsync(ct);
-        await db.Artifacts.ExecuteDeleteAsync(ct);
-        await db.WorkItems.ExecuteDeleteAsync(ct);
-        await db.Releases.ExecuteDeleteAsync(ct);
-        await db.Deliveries.ExecuteDeleteAsync(ct);
-        await db.RunbookExecutions.ExecuteDeleteAsync(ct);
-        await db.DeploymentFreezes.ExecuteDeleteAsync(ct);
-        await db.DesiredSystemConfigs.ExecuteDeleteAsync(ct);
-        await db.EnvironmentInstances.ExecuteDeleteAsync(ct);
-        await db.WorkloadRevisions.ExecuteDeleteAsync(ct);
-        await db.AzureResources.ExecuteDeleteAsync(ct);
-        await db.HealthProbes.ExecuteDeleteAsync(ct);
-        await db.DriftFindings.ExecuteDeleteAsync(ct);
-        await db.WebhookRegistrationStatuses.ExecuteDeleteAsync(ct);
-        await db.ProjectionVersions.ExecuteDeleteAsync(ct);
+        await ClearAsync(db, db.Repositories, ct);
+        await ClearAsync(db, db.SourceChanges, ct);
+        await ClearAsync(db, db.PipelineRuns, ct);
+        await ClearAsync(db, db.Artifacts, ct);
+        await ClearAsync(db, db.WorkItems, ct);
+        await ClearAsync(db, db.Releases, ct);
+        await ClearAsync(db, db.Deliveries, ct);
+        await ClearAsync(db, db.RunbookExecutions, ct);
+        await ClearAsync(db, db.DeploymentFreezes, ct);
+        await ClearAsync(db, db.DesiredSystemConfigs, ct);
+        await ClearAsync(db, db.EnvironmentInstances, ct);
+        await ClearAsync(db, db.WorkloadRevisions, ct);
+        await ClearAsync(db, db.AzureResources, ct);
+        await ClearAsync(db, db.HealthProbes, ct);
+        await ClearAsync(db, db.DriftFindings, ct);
+        await ClearAsync(db, db.WebhookRegistrationStatuses, ct);
+        await ClearAsync(db, db.ProjectionVersions, ct);
+    }
+
+    /// <summary>TRUNCATE on SQL Server (minimally logged; a fully logged DELETE of the journal crawls on small tiers).</summary>
+    private static async Task ClearAsync<T>(TwinDbContext db, DbSet<T> rows, CancellationToken ct) where T : class
+    {
+        if (!db.Database.IsSqlServer())
+        {
+            await rows.ExecuteDeleteAsync(ct);
+            return;
+        }
+        // Table names come from the EF model, never from input.
+        var entity = db.Model.FindEntityType(typeof(T))!;
+        var sql = "TRUNCATE TABLE [" + (entity.GetSchema() ?? "dbo") + "].[" + entity.GetTableName() + "]";
+        await db.Database.ExecuteSqlRawAsync(sql, ct);
     }
 
     /// <summary>Per read model "count:hash" over every row (journal excludes its surrogate Id).</summary>
@@ -234,7 +248,31 @@ public sealed partial class EfTwinStore
             ["projection-version"] = await Fingerprint(db.ProjectionVersions, r => $"{r.Kind}|{r.Key}", ct)
         };
 
-        // Journal: streamed in key order so the (large) payload column is never held in memory at once.
+        result["journal"] = db.Database.IsSqlServer() ? await JournalFingerprintSqlServerAsync(db, ct) : await JournalFingerprintStreamedAsync(db, ct);
+        return result;
+    }
+
+    /// <summary>
+    /// Computed in the database: streaming every payload to the app reads the whole journal through a 5 DTU tier.
+    /// BINARY_CHECKSUM is case-sensitive; CHECKSUM_AGG is order-independent and rows are unique by idempotency key.
+    /// Payloads above 16 KB (legacy unbounded source payloads, large state sets) contribute their length only, so the
+    /// fingerprint never reads off-row LOB pages; state content is covered by the read-model fingerprints.
+    /// </summary>
+    private static async Task<string> JournalFingerprintSqlServerAsync(TwinDbContext db, CancellationToken ct)
+    {
+        var row = await db.Database.SqlQueryRaw<JournalChecksum>("""
+            SELECT COUNT_BIG(*) AS [Count], ISNULL(CHECKSUM_AGG(BINARY_CHECKSUM(
+                IdempotencyKey, EventId, Source, SourceEventId, SpecVersion, EventType, SubjectType, SubjectId, Predicate,
+                OccurredAt, IngestedAt, Channel, CorrelationId, ChainId, PipelineId, StageName, DeployableName, Actor, Outcome,
+                Summary, SourceUrl,
+                CASE WHEN DATALENGTH(PayloadJson) <= 16384 THEN HASHBYTES('SHA2_256', PayloadJson) ELSE CAST(DATALENGTH(PayloadJson) AS varbinary(8)) END)), 0) AS [Checksum]
+            FROM dbo.ObservedEvents
+            """).SingleAsync(ct);
+        return $"{row.Count}:{row.Checksum:x8}";
+    }
+
+    private static async Task<string> JournalFingerprintStreamedAsync(TwinDbContext db, CancellationToken ct)
+    {
         using var hash = IncrementalHash.CreateHash(HashAlgorithmName.SHA256);
         var count = 0;
         await foreach (var e in db.ObservedEvents.AsNoTracking().OrderBy(e => e.IdempotencyKey).AsAsyncEnumerable().WithCancellation(ct))
@@ -243,9 +281,10 @@ public sealed partial class EfTwinStore
             hash.AppendData(Encoding.UTF8.GetBytes(JsonSerializer.Serialize(e, IntakeJson.Options)));
             count++;
         }
-        result["journal"] = $"{count}:{Convert.ToHexStringLower(hash.GetHashAndReset())[..16]}";
-        return result;
+        return $"{count}:{Convert.ToHexStringLower(hash.GetHashAndReset())[..16]}";
     }
+
+    private sealed record JournalChecksum(long Count, int Checksum);
 
     private static async Task<string> Fingerprint<T>(IQueryable<T> rows, Func<T, string> key, CancellationToken ct) where T : class
     {

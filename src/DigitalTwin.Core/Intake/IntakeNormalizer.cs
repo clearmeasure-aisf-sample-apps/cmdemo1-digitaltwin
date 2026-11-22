@@ -20,6 +20,9 @@ public static class IntakeJson
 public static class IntakeNormalizer
 {
     public static IReadOnlyList<ObservedEvent> Normalize(RawIntakeEvent raw)
+        => NormalizeUnbounded(raw).Select(JournalPayload.Bound).ToList();
+
+    private static IReadOnlyList<ObservedEvent> NormalizeUnbounded(RawIntakeEvent raw)
     {
         switch (raw.Kind)
         {

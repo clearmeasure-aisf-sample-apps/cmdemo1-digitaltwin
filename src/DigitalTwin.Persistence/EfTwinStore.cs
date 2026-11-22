@@ -187,7 +187,13 @@ public sealed partial class EfTwinStore(IDbContextFactory<TwinDbContext> factory
     public async Task<int> ClearEventJournalAsync(CancellationToken ct)
     {
         await using var db = await factory.CreateDbContextAsync(ct);
-        return await db.ObservedEvents.ExecuteDeleteAsync(ct);
+        if (!db.Database.IsSqlServer())
+        {
+            return await db.ObservedEvents.ExecuteDeleteAsync(ct);
+        }
+        var count = await db.ObservedEvents.CountAsync(ct);
+        await db.Database.ExecuteSqlRawAsync("TRUNCATE TABLE dbo.ObservedEvents", ct);
+        return count;
     }
 
     public async Task<IReadOnlyList<ObservedEvent>> QueryEventsAsync(
