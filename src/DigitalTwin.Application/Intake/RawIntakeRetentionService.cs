@@ -35,8 +35,41 @@ public sealed class RawIntakeRetentionService(
     TimeProvider timeProvider)
 {
     private const int PageSize = 500;
+    private readonly Lock _lock = new();
+    private Task<RetentionReport>? _current;
 
     public RetentionReport? LastReport { get; private set; }
+
+    public string? LastError { get; private set; }
+
+    public bool Running => _current is { IsCompleted: false };
+
+    /// <summary>Starts a run (or joins the running one), detached from callers: an HTTP timeout never cancels it.</summary>
+    public Task<RetentionReport> StartOrJoin(double? olderThanDays)
+    {
+        lock (_lock)
+        {
+            if (_current is { IsCompleted: false })
+            {
+                return _current;
+            }
+            _current = Task.Run(async () =>
+            {
+                try
+                {
+                    var report = await RunAsync(olderThanDays, CancellationToken.None);
+                    LastError = null;
+                    return report;
+                }
+                catch (Exception ex)
+                {
+                    LastError = $"{ex.GetType().Name}: {ex.GetBaseException().Message}";
+                    throw;
+                }
+            });
+            return _current;
+        }
+    }
 
     public async Task<RetentionReport> RunAsync(double? olderThanDays, CancellationToken ct)
     {

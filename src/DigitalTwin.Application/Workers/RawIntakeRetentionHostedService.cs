@@ -32,7 +32,7 @@ public sealed partial class RawIntakeRetentionHostedService(
         {
             try
             {
-                var report = await retention.RunAsync(null, stoppingToken);
+                var report = await retention.StartOrJoin(null).WaitAsync(stoppingToken);
                 var archived = report.Days.Sum(d => d.Archived);
                 LogRun(report.Days.Count, archived, report.Skipped);
             }

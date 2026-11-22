@@ -130,8 +130,11 @@ public static class TwinApiEndpoints
         });
 
         // Raw intake retention: archive whole days older than the window (default Twin:Retention:Days), then prune SQL.
-        protectedApi.MapPost("/admin/retention/run", async (double? olderThanDays, RawIntakeRetentionService retention, CancellationToken ct)
-            => Results.Ok(await retention.RunAsync(olderThanDays is null ? null : Math.Max(0, olderThanDays.Value), ct)));
+        protectedApi.MapPost("/admin/retention/run", async (double? olderThanDays, bool? wait, RawIntakeRetentionService retention) =>
+        {
+            var running = retention.StartOrJoin(olderThanDays is null ? null : Math.Max(0, olderThanDays.Value));
+            return wait == false ? Results.Accepted("/api/admin/storage", new { running = retention.Running }) : Results.Ok(await running);
+        });
 
         protectedApi.MapGet("/admin/storage", async (RawIntakeRetentionService retention, IRawIntakeArchive archive, IRawIntakeStore rawStore, ITwinStore store, CancellationToken ct) =>
         {
@@ -141,7 +144,7 @@ public static class TwinApiEndpoints
                 database = await store.GetDatabaseUsageAsync(ct),
                 rawIntake = await rawStore.GetStatsAsync(ct),
                 archive = new { enabled = archive.IsEnabled, location = archive.Location, days = days.Count, oldestDay = days.Count > 0 ? days[0] : (DateOnly?)null, newestDay = days.Count > 0 ? days[^1] : (DateOnly?)null },
-                lastRetention = retention.LastReport
+                retention = new { running = retention.Running, lastReport = retention.LastReport, lastError = retention.LastError }
             });
         });
 
@@ -237,7 +240,7 @@ public static class TwinApiEndpoints
             - GET {{baseUrl}}/api/admin/deadletters — Dead-lettered intake messages [X-Twin-Key]
             - POST {{baseUrl}}/api/admin/deadletters/replay — Replay dead letters (all, or ids in the JSON body) [X-Twin-Key]
             - POST {{baseUrl}}/api/admin/rebuild[?force=true] — Rebuild the journal and ALL read models from the raw intake table; refuses when raw events cannot reproduce every live row; reports before/after fingerprints [X-Twin-Key]
-            - POST {{baseUrl}}/api/admin/retention/run[?olderThanDays=] — Archive whole days of processed raw events to Blob Storage, then prune them from SQL [X-Twin-Key]
+            - POST {{baseUrl}}/api/admin/retention/run[?olderThanDays=&wait=false] — Archive whole days of processed raw events to Blob Storage, then prune them from SQL [X-Twin-Key]
             - GET {{baseUrl}}/api/admin/storage — Database usage, raw intake counts, archive days, last retention run [X-Twin-Key]
             - GET {{baseUrl}}/api/admin/rebuild/preflight — What a rebuild would produce versus the live read models, per kind [X-Twin-Key]
             - POST {{baseUrl}}/api/admin/backfill — Re-poll GitHub, Octopus, Azure and probes now [X-Twin-Key]
