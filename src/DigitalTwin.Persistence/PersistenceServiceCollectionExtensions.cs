@@ -13,7 +13,7 @@ public static partial class PersistenceServiceCollectionExtensions
         var connectionString = ResolveConnectionString(configuration);
         var useSqlServer = IsSqlServer(connectionString);
 
-        services.AddDbContextFactory<TwinDbContext>(dbOpts =>
+        void Configure(DbContextOptionsBuilder dbOpts)
         {
             if (useSqlServer)
             {
@@ -23,8 +23,11 @@ public static partial class PersistenceServiceCollectionExtensions
             {
                 dbOpts.UseSqlite(connectionString);
             }
-        });
+        }
+        services.AddDbContextFactory<TwinDbContext>(Configure);
+        services.AddDbContextFactory<ShadowTwinDbContext>(Configure);
         services.AddSingleton<ITwinStore, EfTwinStore>();
+        services.AddSingleton<IRebuildTarget, ShadowRebuildTarget>();
         return services;
     }
 
@@ -61,6 +64,8 @@ public static partial class PersistenceServiceCollectionExtensions
                     await db.Database.ExecuteSqlRawAsync(ProjectionVersionsDdl, ct);
                     await db.Database.ExecuteSqlRawAsync(StateAsOfIndexDdl, ct);
                     await db.Database.ExecuteSqlRawAsync(ChainIndexDdl, ct);
+                    // A rebuild interrupted by a restart left its shadow behind; live tables were never touched.
+                    await services.GetRequiredService<IRebuildTarget>().DiscardAsync(ct);
                 }
                 return;
             }

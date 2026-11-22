@@ -260,14 +260,12 @@ public sealed partial class EfTwinStore
     /// </summary>
     private static async Task<string> JournalFingerprintSqlServerAsync(TwinDbContext db, CancellationToken ct)
     {
-        var row = await db.Database.SqlQueryRaw<JournalChecksum>("""
-            SELECT COUNT_BIG(*) AS [Count], ISNULL(CHECKSUM_AGG(BINARY_CHECKSUM(
-                IdempotencyKey, EventId, Source, SourceEventId, SpecVersion, EventType, SubjectType, SubjectId, Predicate,
-                OccurredAt, IngestedAt, Channel, CorrelationId, ChainId, PipelineId, StageName, DeployableName, Actor, Outcome,
-                Summary, SourceUrl,
-                CASE WHEN DATALENGTH(PayloadJson) <= 16384 THEN HASHBYTES('SHA2_256', PayloadJson) ELSE CAST(DATALENGTH(PayloadJson) AS varbinary(8)) END)), 0) AS [Checksum]
-            FROM dbo.ObservedEvents
-            """).SingleAsync(ct);
+        var sql = "SELECT COUNT_BIG(*) AS [Count], ISNULL(CHECKSUM_AGG(BINARY_CHECKSUM(" +
+            "IdempotencyKey, EventId, Source, SourceEventId, SpecVersion, EventType, SubjectType, SubjectId, Predicate, " +
+            "OccurredAt, IngestedAt, Channel, CorrelationId, ChainId, PipelineId, StageName, DeployableName, Actor, Outcome, " +
+            "Summary, SourceUrl, CASE WHEN DATALENGTH(PayloadJson) <= 16384 THEN HASHBYTES('SHA2_256', PayloadJson) " +
+            "ELSE CAST(DATALENGTH(PayloadJson) AS varbinary(8)) END)), 0) AS [Checksum] FROM " + JournalTable(db);
+        var row = await db.Database.SqlQueryRaw<JournalChecksum>(sql).SingleAsync(ct);
         return $"{row.Count}:{row.Checksum:x8}";
     }
 

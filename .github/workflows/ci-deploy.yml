@@ -84,6 +84,22 @@ jobs:
           echo "acr_user=${ACR_USER}" >> "$GITHUB_OUTPUT"
           echo "acr_pass=${ACR_PASS}" >> "$GITHUB_OUTPUT"
 
+      - name: Defer the deploy while a twin rebuild is running
+        env:
+          TWIN_API_KEY: ${{ secrets.TWIN_API_KEY }}
+        run: |
+          # Restarting mid-rebuild would discard its shadow tables (live state is safe, but the work is lost).
+          FQDN=$(az containerapp show -n ca-cmdemo1-twin -g rg-cmdemo1-nonprod --query properties.configuration.ingress.fqdn -o tsv 2>/dev/null || true)
+          if [ -z "$FQDN" ]; then echo "Twin not deployed yet."; exit 0; fi
+          for i in $(seq 1 120); do
+            RUNNING=$(curl -fsS -m 20 -H "X-Twin-Key: ${TWIN_API_KEY}" "https://${FQDN}/api/admin/rebuild/status" | jq -r '.running' 2>/dev/null || echo unknown)
+            if [ "$RUNNING" != "true" ]; then echo "No rebuild running (${RUNNING}); deploying."; exit 0; fi
+            [ $((i % 4)) -eq 1 ] && curl -fsS -m 20 -H "X-Twin-Key: ${TWIN_API_KEY}" "https://${FQDN}/api/admin/rebuild/status" | jq -c '{running, phase, rawEventsReplayedSoFar}'
+            sleep 30
+          done
+          echo "A rebuild has been running for an hour; deploy blocked. Cancel it with POST /api/admin/rebuild/cancel or wait." >&2
+          exit 1
+
       - name: Deploy Bicep infrastructure to rg-cmdemo1-nonprod
         id: bicep
         env:
@@ -208,7 +224,7 @@ jobs:
         run: |
           set -euo pipefail
           curl -fsS -m 120 -X POST -H "X-Twin-Key: ${TWIN_API_KEY}" "${TWIN_URL}/api/admin/backfill" | jq '{gitHubOk, octopusOk, azureOk, probesOk, activeDriftCount, notes}'
-          # Full rebuild from raw events (opt-in: it pauses live intake on the 5 DTU database while it runs).
+          # Full rebuild from raw events into shadow tables (opt-in: it is IO-heavy on the 5 DTU database; intake keeps flowing).
           # Pass 1 may re-normalize the journal after a mapping change but must reproduce identical read models;
           # pass 2 must then be identical in every fingerprint, journal included.
           rebuild() {
@@ -220,7 +236,7 @@ jobs:
               if [ $((i % 12)) -eq 0 ]; then echo "$STATUS" | jq -c '{running, startedAt, rawEventsReplayedSoFar}' >&2; fi
               sleep 5
             done
-            echo "$STATUS" | jq '{running, lastError, report: (.lastReport | {aborted, identical, readModelsIdentical, startedAt, finishedAt, rawEventsReplayed, rawEventsFailed, journalEventsRebuilt, differences, fingerprintAfter})}' >&2
+            echo "$STATUS" | jq '{running, lastError, report: (.lastReport | {swapped, livePausedMilliseconds, catchUpEventsReplayed, aborted, identical, readModelsIdentical, startedAt, finishedAt, rawEventsReplayed, rawEventsFailed, journalEventsRebuilt, differences, fingerprintAfter})}' >&2
             echo "$STATUS"
           }
           # Storage: database usage stays well under the Basic tier's 2 GB; old raw events live in the Blob archive.
@@ -229,7 +245,7 @@ jobs:
           curl -fsS -H "X-Twin-Key: ${TWIN_API_KEY}" "${TWIN_URL}/api/admin/storage" | jq -e '.archive.enabled == true and .database.usedMb < 1500' >/dev/null
           if [ "${VERIFY_REBUILD}" = "true" ]; then
             FIRST=$(rebuild "")
-            echo "$FIRST" | jq -e '.lastReport.readModelsIdentical == true and .lastReport.rawEventsFailed == 0' >/dev/null
+            echo "$FIRST" | jq -e '.lastReport.swapped == true and .lastReport.readModelsIdentical == true and .lastReport.rawEventsFailed == 0' >/dev/null
             SECOND=$(rebuild "$(echo "$FIRST" | jq -r .lastReport.startedAt)")
             echo "$SECOND" | jq -e '.lastReport.identical == true' >/dev/null
           else

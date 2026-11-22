@@ -50,10 +50,10 @@ public sealed class IntakeEventApplier(
     }
 
     /// <summary>
-    /// Rebuild path: replays already-processed raw events without side effects. Appending (earliest observation wins)
+    /// Rebuild path: replays already-processed raw events into <paramref name="target"/> (the shadow store) without side effects. Appending (earliest observation wins)
     /// and projecting (latest wins) do not depend on order, so a whole page is written at once.
     /// </summary>
-    internal async Task<IntakeReplayResult> ReplayAsync(IReadOnlyList<RawIntakeEvent> rawEvents, CancellationToken ct)
+    internal async Task<IntakeReplayResult> ReplayAsync(IReadOnlyList<RawIntakeEvent> rawEvents, ITwinStore target, CancellationToken ct)
     {
         var normalized = new List<ObservedEvent>();
         var failures = new List<string>();
@@ -78,12 +78,12 @@ public sealed class IntakeEventApplier(
         var appended = 0;
         foreach (var chunk in normalized.OrderBy(e => e.OccurredAt).Chunk(ReplayAppendChunk))
         {
-            appended += (await store.AppendEventsReturnNewAsync(chunk, ct)).Count;
+            appended += (await target.AppendEventsReturnNewAsync(chunk, ct)).Count;
         }
         var stateEvents = normalized.Where(StateObservations.IsStateEvent).ToList();
         if (stateEvents.Count > 0)
         {
-            await store.ApplyStateObservationsAsync(stateEvents, ct);
+            await target.ApplyStateObservationsAsync(stateEvents, ct);
         }
         return new IntakeReplayResult(replayed, appended, failures);
     }
