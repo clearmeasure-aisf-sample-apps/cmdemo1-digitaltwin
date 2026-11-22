@@ -121,6 +121,17 @@ public static class SourceEventCatalog
         Octopus("RunbookSnapshotDeletedByRetention", "twin.octopus.retention.deleted", "RetentionApplied"),
         Octopus("EphemeralEnvironmentCreationSucceeded", "dev.cdevents.environment.created", "EnvironmentCreated", RuntimeAndPlatform),
         Octopus("EphemeralEnvironmentCreationFailed", "twin.octopus.ephemeral.failed", "EnvironmentCreationFailed", RuntimeAndPlatform),
+        Octopus("Modified", "twin.octopus.process.changed", "DeploymentProcessChanged", condition: "related = deploymentprocess-Projects-1"),
+        Octopus("Modified", "twin.octopus.variables.changed", "VariablesChanged", condition: "related = variableset-Projects-1"),
+        Octopus("Modified", "twin.octopus.variables.changed", "VariablesChanged", condition: "related = LibraryVariableSets-1"),
+        Octopus("Modified", "twin.octopus.interruption.submitted", "ManualInterventionSignedOff", condition: "related = Interruptions-1; message = Submitted interruption Sign-off with notes: ok"),
+        Octopus("Modified", "twin.octopus.interruption.assigned", "ManualInterventionAssigned", condition: "related = Interruptions-1; message = Took responsibility for interruption Sign-off"),
+        Octopus("Modified", "twin.octopus.runbook.changed", "RunbookChanged", condition: "related = Runbooks-1"),
+        Octopus("Modified", "twin.octopus.trigger.changed", "TriggerChanged", condition: "related = ProjectTriggers-1"),
+        Octopus("Modified", "twin.octopus.project.changed", "ProjectSettingsChanged", condition: "related = Projects-1"),
+        Octopus("Created", "twin.octopus.release.created", "ReleaseCreated", condition: "related = Releases-1"),
+        Octopus("Created", "twin.octopus.process.changed", "DeploymentProcessChanged", condition: "related = deploymentprocess-Projects-1"),
+        Octopus("Created", "twin.octopus.variables.changed", "VariablesChanged", condition: "related = variableset-Projects-1"),
         Octopus("Created", "twin.octopus.document.created", "DeliveryConfigurationCreated"),
         Octopus("Modified", "twin.octopus.document.modified", "DeliveryConfigurationModified"),
         Octopus("Deleted", "twin.octopus.document.deleted", "DeliveryConfigurationDeleted"),
@@ -150,8 +161,9 @@ public static class SourceEventCatalog
             ? [new SourceEventMapping(SourceSystem.GitHub, sourceEvent, null, condition, twinType, domainEvent, context)]
             : actions.Select(a => new SourceEventMapping(SourceSystem.GitHub, sourceEvent, a, condition, twinType, domainEvent, context));
 
-    private static SourceEventMapping Octopus(string category, string twinType, string domainEvent, string context = ReleaseAndDelivery)
-        => new(SourceSystem.Octopus, category, null, null, twinType, domainEvent, context);
+    /// <param name="condition">"related = &lt;document id&gt;; message = &lt;text&gt;": which related documents (and message) select this row.</param>
+    private static SourceEventMapping Octopus(string category, string twinType, string domainEvent, string context = ReleaseAndDelivery, string? condition = null)
+        => new(SourceSystem.Octopus, category, null, condition, twinType, domainEvent, context);
 
     private static SourceEventMapping Azure(string eventType, string twinType, string domainEvent)
         => new(SourceSystem.AzureEventGrid, eventType, null, null, twinType, domainEvent, RuntimeAndPlatform);

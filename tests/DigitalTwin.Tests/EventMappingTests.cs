@@ -34,7 +34,7 @@ public sealed class EventMappingTests
         var produced = row.Source switch
         {
             SourceSystem.GitHub => GitHubEventNormalizer.NormalizeWebhook(row.SourceEvent, "map-1", GitHubPayload(row), At).EventType,
-            SourceSystem.Octopus => OctopusEventNormalizer.NormalizeSubscriptionPayload(OctopusPayload(row.SourceEvent), null, null, At)!.EventType,
+            SourceSystem.Octopus => OctopusEventNormalizer.NormalizeSubscriptionPayload(OctopusPayload(row.SourceEvent, row.Condition), null, null, At)!.EventType,
             SourceSystem.AzureEventGrid => Assert.Single(AzureEventNormalizer.NormalizeEventGridWebhook(AzurePayload(row.SourceEvent), At).Events).EventType,
             SourceSystem.AzureResourceGraph when row.Action is not null => AzureEventNormalizer.NormalizeResourceChange(
                 "change-1", "/subscriptions/x/resourceGroups/rg-cmdemo1-nonprod/providers/Microsoft.App/containerApps/ca-cmdemo1-tdd-ui",
@@ -125,7 +125,8 @@ public sealed class EventMappingTests
         foreach (var r in rows.Where(r => r.Source == SourceSystem.Octopus))
         {
             var memberOf = groups.Where(kv => kv.Value.Contains(r.SourceEvent)).Select(kv => kv.Key).Order(StringComparer.Ordinal).ToList();
-            Line($"| {Code(r.SourceEvent)} | {(memberOf.Count == 0 ? "-" : string.Join(", ", memberOf))} | {Code(r.TwinEventType)} | {r.DomainEvent} | {r.BoundedContext} |");
+            var category = r.Condition is null ? Code(r.SourceEvent) : $"{Code(r.SourceEvent)} when {Code(r.Condition)}";
+            Line($"| {category} | {(memberOf.Count == 0 ? "-" : string.Join(", ", memberOf))} | {Code(r.TwinEventType)} | {r.DomainEvent} | {r.BoundedContext} |");
         }
         Line();
 
@@ -198,13 +199,30 @@ public sealed class EventMappingTests
         return payload.ToJsonString();
     }
 
-    private static string OctopusPayload(string category)
-        => JsonSerializer.Serialize(new
+    private static string OctopusPayload(string category, string? condition)
+    {
+        var parts = (condition ?? "").Split(';', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries)
+            .Select(p => p.Split(" = ", 2))
+            .ToDictionary(p => p[0], p => p[1], StringComparer.Ordinal);
+        return JsonSerializer.Serialize(new
         {
             Timestamp = "2026-11-22T00:00:00Z",
             EventType = "SubscriptionPayload",
-            Payload = new { ServerUri = "https://clearmeasure.octopus.app", Event = new { Id = "Events-1", Category = category, Message = $"{category} for cmdemo1-ui", Occurred = "2026-11-22T00:00:00Z", Username = "system", RelatedDocumentIds = Array.Empty<string>() } }
+            Payload = new
+            {
+                ServerUri = "https://clearmeasure.octopus.app",
+                Event = new
+                {
+                    Id = "Events-1",
+                    Category = category,
+                    Message = parts.GetValueOrDefault("message") ?? $"{category} for cmdemo1-ui",
+                    Occurred = "2026-11-22T00:00:00Z",
+                    Username = "system",
+                    RelatedDocumentIds = parts.TryGetValue("related", out var related) ? new[] { related } : Array.Empty<string>()
+                }
+            }
         });
+    }
 
     private static string AzurePayload(string eventType)
         => JsonSerializer.Serialize(new[]

@@ -34,6 +34,12 @@ Before this mapping pass, these source events reached the journal only as generi
 - GitHub `release` with action `deleted` or `unpublished` was journaled as `dev.cdevents.artifact.published`. It is now `dev.cdevents.artifact.deleted`.
 - Azure `ResourceDeleteFailure` and the three `*Cancel` types had no explicit mapping. They now map to `twin.azure.resource.failed` and `twin.azure.resource.canceled`.
 
+## High-value events now used (phase 3)
+
+- **Octopus `Modified` / `Created`**: these carry the real change in their related documents. Deployment process edits (`deploymentprocess-*`) and variable sets (`variableset-*`, `LibraryVariableSets-*`) become `twin.octopus.process.changed` and `twin.octopus.variables.changed`. Interruption sign-offs and assignments, with the person and their notes, become `twin.octopus.interruption.submitted` and `.assigned`. Release creation, runbook, trigger and project setting changes get their own types too. `GET /api/config-changes` and MCP `get_config_changes` list the configuration changes.
+- **Octopus deployment failures and manual interventions** (`DeploymentFailed`, `GuidedFailureInterruptionRaised`, `ManualInterventionInterruptionRaised`) were already subscribed and mapped. They now also attach to change-chain stages as signals.
+- **GitHub check runs, reviews and workflow jobs**: the hooks already receive them (`*`). Reviews, failed jobs and failed checks now attach to the chain's PR and build stages, correlated by `pr:` and `sha:` chain ids.
+
 ## Issues flagged, not changed
 
 - Octopus `DailyUsageCaptured` belongs to the `UsageDeclaration` event group, but the subscription excludes categories by name prefix, so it still arrives (journaled generically, about one a day). Excluding by event group instead would change the live subscription, so that is left for a deliberate change.
@@ -116,6 +122,17 @@ Before this mapping pass, these source events reached the journal only as generi
 | `RunbookSnapshotDeletedByRetention` | - | `twin.octopus.retention.deleted` | RetentionApplied | Release & Delivery |
 | `EphemeralEnvironmentCreationSucceeded` | EphemeralEnvironments | `dev.cdevents.environment.created` | EnvironmentCreated | Runtime & Platform |
 | `EphemeralEnvironmentCreationFailed` | EphemeralEnvironments | `twin.octopus.ephemeral.failed` | EnvironmentCreationFailed | Runtime & Platform |
+| `Modified` when `related = deploymentprocess-Projects-1` | Document | `twin.octopus.process.changed` | DeploymentProcessChanged | Release & Delivery |
+| `Modified` when `related = variableset-Projects-1` | Document | `twin.octopus.variables.changed` | VariablesChanged | Release & Delivery |
+| `Modified` when `related = LibraryVariableSets-1` | Document | `twin.octopus.variables.changed` | VariablesChanged | Release & Delivery |
+| `Modified` when `related = Interruptions-1; message = Submitted interruption Sign-off with notes: ok` | Document | `twin.octopus.interruption.submitted` | ManualInterventionSignedOff | Release & Delivery |
+| `Modified` when `related = Interruptions-1; message = Took responsibility for interruption Sign-off` | Document | `twin.octopus.interruption.assigned` | ManualInterventionAssigned | Release & Delivery |
+| `Modified` when `related = Runbooks-1` | Document | `twin.octopus.runbook.changed` | RunbookChanged | Release & Delivery |
+| `Modified` when `related = ProjectTriggers-1` | Document | `twin.octopus.trigger.changed` | TriggerChanged | Release & Delivery |
+| `Modified` when `related = Projects-1` | Document | `twin.octopus.project.changed` | ProjectSettingsChanged | Release & Delivery |
+| `Created` when `related = Releases-1` | Document | `twin.octopus.release.created` | ReleaseCreated | Release & Delivery |
+| `Created` when `related = deploymentprocess-Projects-1` | Document | `twin.octopus.process.changed` | DeploymentProcessChanged | Release & Delivery |
+| `Created` when `related = variableset-Projects-1` | Document | `twin.octopus.variables.changed` | VariablesChanged | Release & Delivery |
 | `Created` | Document | `twin.octopus.document.created` | DeliveryConfigurationCreated | Release & Delivery |
 | `Modified` | Document | `twin.octopus.document.modified` | DeliveryConfigurationModified | Release & Delivery |
 | `Deleted` | Document | `twin.octopus.document.deleted` | DeliveryConfigurationDeleted | Release & Delivery |

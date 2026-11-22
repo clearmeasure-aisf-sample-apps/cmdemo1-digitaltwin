@@ -593,7 +593,8 @@
     dom.chainList.innerHTML = chains.map((c, ci) => {
       const stages = c.stages || [];
       const parts = stages.map((st, i) => {
-        const cls = [chainStatusClass[st.status] || '', st.failedAttempts > 0 && st.status !== 'Failed' ? 'recovered' : ''].join(' ');
+        const failedSignal = (c.signals || []).some(sig => sig.stage === st.kind && /failed|guided/.test(sig.kind));
+        const cls = [chainStatusClass[st.status] || '', (st.failedAttempts > 0 || failedSignal) && st.status !== 'Failed' ? 'recovered' : ''].join(' ');
         const node = `<span class="chain-node ${cls}" style="--i:${i}" title="${esc(`${chainStageLabels[st.kind]}: ${st.status}${st.reference ? ' · ' + st.reference : ''}${st.detail ? ' · ' + st.detail : ''}`)}"><span class="lbl">${chainStageLabels[st.kind] || st.kind}${st.durationMinutes != null ? ' ' + fmtMinutes(st.durationMinutes) : ''}</span></span>`;
         if (i === stages.length - 1) return node;
         const next = stages[i + 1];
@@ -622,6 +623,9 @@
         st.failedAttempts > 0 ? `${st.failedAttempts}/${st.attempts} attempts failed` : null, st.detail].filter(Boolean);
       kv[chainStageLabels[st.kind] || st.kind] = bits.join(' · ');
     }
+    (c.signals || []).forEach((sig, i) => {
+      kv[`Signal ${i + 1}`] = `${chainStageLabels[sig.stage] || sig.stage} · ${sig.kind}${sig.actor ? ' · ' + sig.actor : ''} · ${sig.summary}`;
+    });
     kv.LeadTime = c.leadTimeHours != null ? `${c.leadTimeHours}h commit → prod` : '--';
     kv.CycleTime = c.cycleTimeHours != null ? `${c.cycleTimeHours}h work item → prod` : '--';
     const url = (c.stages || []).map(st => st.url).filter(Boolean).pop();

@@ -114,7 +114,7 @@ public static class OctopusEventNormalizer
         var pipelineId = Cmdemo1PlatformCatalog.ResolvePipelineIdFromOctopusProject(projectName);
         var deployable = Cmdemo1PlatformCatalog.ResolveDeployableFromOctopusProject(projectName);
 
-        var (eventType, subjectType, predicate, outcome) = MapCategory(category);
+        var (eventType, subjectType, predicate, outcome) = MapDocumentChange(category, related, message) ?? MapCategory(category);
         var subjectId = deploymentId ?? releaseId ?? taskId ?? projectId ?? eventId;
         var sourceUrl = taskId is not null
             ? $"{serverUri}/app#/{Cmdemo1PlatformCatalog.OctopusSpaceId}/tasks/{taskId}"
@@ -143,6 +143,31 @@ public static class OctopusEventNormalizer
             Summary = message,
             SourceUrl = sourceUrl,
             PayloadJson = rawPayloadOverride ?? ev.GetRawText()
+        };
+    }
+
+    /// <summary>
+    /// Generic document categories (Created/Modified) carry the real change in their related documents: deployment
+    /// process and variable edits, interruption sign-offs, release creation, runbook, trigger and project settings.
+    /// </summary>
+    private static (string eventType, string subjectType, string predicate, EventOutcome outcome)? MapDocumentChange(
+        string category, List<string> related, string message)
+    {
+        bool Has(string prefix) => related.Any(r => r.StartsWith(prefix, StringComparison.OrdinalIgnoreCase));
+        return category switch
+        {
+            "Modified" when Has("deploymentprocess-") => ("twin.octopus.process.changed", "deploymentProcess", "modified", EventOutcome.None),
+            "Modified" when Has("variableset-") || Has("LibraryVariableSets-") => ("twin.octopus.variables.changed", "variableSet", "modified", EventOutcome.None),
+            "Modified" when Has("Interruptions-") && message.StartsWith("Submitted interruption", StringComparison.OrdinalIgnoreCase)
+                => ("twin.octopus.interruption.submitted", "humanGate", "submitted", EventOutcome.Success),
+            "Modified" when Has("Interruptions-") => ("twin.octopus.interruption.assigned", "humanGate", "assigned", EventOutcome.None),
+            "Modified" when Has("Runbooks-") => ("twin.octopus.runbook.changed", "runbook", "modified", EventOutcome.None),
+            "Modified" when Has("ProjectTriggers-") => ("twin.octopus.trigger.changed", "trigger", "modified", EventOutcome.None),
+            "Modified" when Has("Projects-") && related.Count == 1 => ("twin.octopus.project.changed", "project", "modified", EventOutcome.None),
+            "Created" when Has("Releases-") => ("twin.octopus.release.created", "release", "created", EventOutcome.Success),
+            "Created" when Has("deploymentprocess-") => ("twin.octopus.process.changed", "deploymentProcess", "created", EventOutcome.None),
+            "Created" when Has("variableset-") || Has("LibraryVariableSets-") => ("twin.octopus.variables.changed", "variableSet", "created", EventOutcome.None),
+            _ => null
         };
     }
 

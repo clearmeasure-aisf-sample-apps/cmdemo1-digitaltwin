@@ -33,6 +33,15 @@ public sealed class TwinMcpTools(TwinQueryService queries)
         CancellationToken ct = default)
         => JsonSerializer.Serialize(await queries.GetChangeChainsAsync(query, limit, asOf, ct), JsonOptions);
 
+    [McpServerTool(Name = "get_config_changes", Title = "Get Octopus Configuration Changes", ReadOnly = true, Idempotent = true)]
+    [Description("List Octopus configuration changes in the cmdemo1 space, newest first: deployment process edits, variable set changes, project settings, triggers and runbooks, with who made them. Useful when a deployment starts failing.")]
+    public async Task<string> GetConfigChangesAsync(
+        [Description("Look back this many hours (default 168 = 7 days)")] int sinceHours = 168,
+        [Description("Maximum number of changes (1-500, default 50)")] int limit = 50,
+        [Description(AsOfDescription)] DateTimeOffset? asOf = null,
+        CancellationToken ct = default)
+        => JsonSerializer.Serialize(await queries.GetConfigChangesAsync((asOf ?? DateTimeOffset.UtcNow).AddHours(-Math.Max(1, sinceHours)), limit, asOf, ct), JsonOptions);
+
     [McpServerTool(Name = "get_state_at", Title = "Get Point-in-Time State", ReadOnly = true, Idempotent = true)]
     [Description("Time travel: what version was deployed to each environment (tdd/uat/prod), which Azure resources existed, the work board columns, and active drift at a given instant, reconstructed from the event journal.")]
     public async Task<string> GetStateAtAsync(

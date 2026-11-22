@@ -132,6 +132,7 @@ flowchart LR
 
 - `GET /api/events?since=&until=&source=&pipeline=&stage=&eventType=&limit=`
 - `GET /api/state-at?asOf=<ISO-8601>`: time travel (see below)
+- `GET /api/config-changes?since=&limit=&asOf=`: Octopus deployment process, variable, project, trigger and runbook changes, with who made them
 - `GET /api/change-chains?q=<issue|pr|sha|version|release>&limit=&asOf=`: change chains (see below)
 - `GET /api/pipelines` and `GET /api/pipelines/{id}`
 - `GET /api/environments/{env}` (`tdd`, `uat`, `prod`, `pool`)
@@ -151,6 +152,7 @@ Pass header `X-Twin-Key: <TWIN_API_KEY>`:
 
 - `get_summary`
 - `get_change_chain` (by issue, PR, commit, release or version)
+- `get_config_changes` (Octopus process, variable, project, trigger and runbook changes)
 - `get_state_at` (time travel)
 - `query_events`
 - `get_environment`
@@ -171,6 +173,7 @@ A change chain follows one change end to end: work item, branch/PR, CI build, re
   - Open PRs without an RC yet form chains of their own.
 - **Correlation**: chains carry the journal's correlation keys (`sha:<commit>`, `pr:<repo>#<n>`, Octopus release, deployment and task ids). `GET /api/change-chains?q=` returns the matching chains plus the journal events of the best match.
 - **Query**: `q` accepts an issue or PR number, a commit SHA prefix, a version, an Octopus release, deployment or task id, or a chain id such as `ui@2.4.2664`. Omit it for the most recent chains. `asOf` works here too.
+- **Signals**: each chain carries the journal facts that explain it, attached to their stage. These are PR reviews, failed workflow jobs and check runs, manual interventions, who took and signed them off (with notes), guided failures and failed deployments.
 - **Dashboard**: the change-chains panel shows up to six recent changes as animated paths with stage durations. Failed stages are red, retried stages have a red dot, and the running stage pulses. Click a row for the stage details.
 
 ### Time Travel (`asOf`)
