@@ -3,6 +3,7 @@ using DigitalTwin.Api.Auth;
 using DigitalTwin.Api.Endpoints;
 using DigitalTwin.Api.Mcp;
 using DigitalTwin.Archive;
+using DigitalTwin.Notifications;
 using DigitalTwin.Api.Realtime;
 using DigitalTwin.Application;
 using DigitalTwin.Azure;
@@ -46,6 +47,7 @@ builder.Services
     .AddTwinOctopus(builder.Configuration)
     .AddTwinAzure(builder.Configuration)
     .AddTwinArchive(builder.Configuration)
+    .AddTwinNotifications(builder.Configuration)
     .AddTwinHealthProbes();
 builder.AddTwinMessaging();
 

@@ -59,6 +59,18 @@ param serviceBusAuth string = 'ManagedIdentity'
 @description('Archive raw intake events older than the retention window as compressed daily files in a private Blob container.')
 param deployArchive bool = true
 
+@description('Incoming-webhook URL for alerts (Teams or Slack). Empty (default) keeps alerts off.')
+@secure()
+param alertWebhookUrl string = ''
+
+@description('Alert payload format for the webhook.')
+@allowed([
+  'Slack'
+  'Teams'
+  'Generic'
+])
+param alertFormat string = 'Slack'
+
 @description('Days raw intake events stay in SQL before they move to the archive.')
 param retentionDays int = 30
 
@@ -237,6 +249,9 @@ var archiveEnv = deployArchive
       { name: 'Twin__Archive__Provider', value: 'None' }
     ]
 
+var alertSecrets = empty(alertWebhookUrl) ? [] : [{ name: 'alert-webhook-url', value: alertWebhookUrl }]
+var alertEnv = concat([{ name: 'Twin__Alerts__Format', value: alertFormat }], empty(alertWebhookUrl) ? [] : [{ name: 'Twin__Alerts__WebhookUrl', secretRef: 'alert-webhook-url' }])
+
 var twinIdentityName = 'id-cmdemo1-twin'
 
 module serviceBus 'servicebus.bicep' = if (deployServiceBus) {
@@ -323,7 +338,7 @@ resource twinApp 'Microsoft.App/containerApps@2025-01-01' = {
         { name: 'gh-pat', value: gitHubPat }
         { name: 'webhook-secret', value: webhookSecret }
         { name: 'twin-api-key', value: twinApiKey }
-      ], archiveSecrets, serviceBusSecrets)
+      ], archiveSecrets, serviceBusSecrets, alertSecrets)
     }
     template: {
       containers: [
@@ -347,7 +362,7 @@ resource twinApp 'Microsoft.App/containerApps@2025-01-01' = {
             { name: 'GH_PAT', secretRef: 'gh-pat' }
             { name: 'WEBHOOK_SECRET', secretRef: 'webhook-secret' }
             { name: 'TWIN_API_KEY', secretRef: 'twin-api-key' }
-          ], intakeEnv, archiveEnv)
+          ], intakeEnv, archiveEnv, alertEnv)
           probes: [
             {
               type: 'Startup'
