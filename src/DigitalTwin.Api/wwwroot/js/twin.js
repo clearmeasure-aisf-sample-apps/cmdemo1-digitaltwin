@@ -44,7 +44,8 @@
     ttSlider: document.getElementById('tt-slider'),
     ttLabel: document.getElementById('tt-label'),
     ttLive: document.getElementById('tt-live'),
-    ttPlay: document.getElementById('tt-play')
+    ttPlay: document.getElementById('tt-play'),
+    chainList: document.getElementById('chain-list')
   };
 
   // "Now" for relative times: the selected instant while time travelling.
@@ -110,6 +111,7 @@
     if (!state.data) return;
     renderHeaderAndMetrics();
     renderSwimLanes();
+    renderChains();
     renderEnvironmentsAndDrift();
     renderWorkBoard();
     renderEventTicker();
@@ -567,6 +569,63 @@
       }, ev.sourceUrl));
       dom.eventTicker.appendChild(row);
     }
+  }
+
+  const chainStageLabels = {
+    WorkItem: 'WORK', PullRequest: 'PR', Build: 'BUILD', ReleaseCandidate: 'RC',
+    OctopusRelease: 'REL', Tdd: 'TDD', Uat: 'UAT', Prod: 'PROD'
+  };
+  const chainStatusClass = { Succeeded: 'ok', Running: 'run', Waiting: 'wait', Failed: 'fail', Skipped: 'skip', Pending: '' };
+
+  function fmtMinutes(m) {
+    if (m == null) return '';
+    if (m < 60) return `${Math.round(m)}m`;
+    if (m < 1440) return `${(m / 60).toFixed(1)}h`;
+    return `${(m / 1440).toFixed(1)}d`;
+  }
+
+  function renderChains() {
+    const chains = state.data.changeChains || [];
+    if (!chains.length) {
+      dom.chainList.innerHTML = '<div class="chain-sub">No changes observed yet.</div>';
+      return;
+    }
+    dom.chainList.innerHTML = chains.map((c, ci) => {
+      const stages = c.stages || [];
+      const parts = stages.map((st, i) => {
+        const cls = [chainStatusClass[st.status] || '', st.failedAttempts > 0 && st.status !== 'Failed' ? 'recovered' : ''].join(' ');
+        const node = `<span class="chain-node ${cls}" style="--i:${i}" title="${esc(`${chainStageLabels[st.kind]}: ${st.status}${st.reference ? ' · ' + st.reference : ''}${st.detail ? ' · ' + st.detail : ''}`)}"><span class="lbl">${chainStageLabels[st.kind] || st.kind}${st.durationMinutes != null ? ' ' + fmtMinutes(st.durationMinutes) : ''}</span></span>`;
+        if (i === stages.length - 1) return node;
+        const next = stages[i + 1];
+        const linkCls = next.status === 'Failed' ? 'fail'
+          : next.status === 'Running' || next.status === 'Waiting' ? 'live'
+          : (st.status === 'Succeeded' || st.status === 'Skipped') && next.status !== 'Pending' ? 'done' : '';
+        return node + `<span class="chain-link ${linkCls}"></span>`;
+      }).join('');
+      const outcome = { Delivered: 'DELIVERED', Failed: 'FAILED', Waiting: 'WAITING', InProgress: 'IN FLIGHT' }[c.outcome] || c.outcome;
+      const ref = [c.version, c.workItemNumber ? `#${c.workItemNumber}` : null, c.pullRequestNumber ? `PR ${c.pullRequestNumber}` : null].filter(Boolean).join(' · ');
+      return `<div class="chain-row" data-chain="${ci}">
+        <div><div class="chain-title" title="${esc(c.title)}">${esc(c.title)}</div><div class="chain-sub">${esc(c.deployable || c.pipelineId)} ${esc(ref)}</div></div>
+        <div class="chain-path">${parts}</div>
+        <div class="chain-outcome"><strong class="${esc(c.outcome)}">${outcome}</strong>${c.leadTimeHours != null ? `lead ${c.leadTimeHours}h` : relTime(c.lastActivityAt) + ' ago'}</div>
+      </div>`;
+    }).join('');
+    dom.chainList.querySelectorAll('.chain-row').forEach(row => {
+      row.addEventListener('click', () => openChainInspector(chains[Number(row.dataset.chain)]));
+    });
+  }
+
+  function openChainInspector(c) {
+    const kv = { Chain: c.chainId, Outcome: c.outcome, Commit: c.commitSha ? c.commitSha.substring(0, 12) : '--' };
+    for (const st of c.stages || []) {
+      const bits = [st.status, st.reference, st.durationMinutes != null ? fmtMinutes(st.durationMinutes) : null,
+        st.failedAttempts > 0 ? `${st.failedAttempts}/${st.attempts} attempts failed` : null, st.detail].filter(Boolean);
+      kv[chainStageLabels[st.kind] || st.kind] = bits.join(' · ');
+    }
+    kv.LeadTime = c.leadTimeHours != null ? `${c.leadTimeHours}h commit → prod` : '--';
+    kv.CycleTime = c.cycleTimeHours != null ? `${c.cycleTimeHours}h work item → prod` : '--';
+    const url = (c.stages || []).map(st => st.url).filter(Boolean).pop();
+    openObjectInspector('CHANGE CHAIN', c.title, kv, url);
   }
 
   function openObjectInspector(kicker, title, kv, linkUrl) {

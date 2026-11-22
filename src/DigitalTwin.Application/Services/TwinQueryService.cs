@@ -2,6 +2,7 @@ using System.Globalization;
 using System.Text.Json;
 using DigitalTwin.Core.Ports;
 using DigitalTwin.Application.Models;
+using DigitalTwin.Core.ChangeChains;
 using DigitalTwin.Core.Hierarchy;
 using DigitalTwin.Core.Intake;
 using DigitalTwin.Core.Measurement;
@@ -19,6 +20,8 @@ public sealed class TwinQueryService(
     IIntakeQueueMonitor intakeMonitor)
 {
     private static readonly string[] ActiveStageNames = ["tdd", "uat", "prod"];
+    private const int DashboardChainCount = 6;
+    private const int MaxDashboardPullRequestChains = 2;
     private static readonly string[] BoardWipColumns = ["Todo", "In Progress", "Review", "Merged", "TDD", "UAT"];
 
     public async Task<TwinSummaryDto> GetSummaryAsync(DateTimeOffset? asOf, CancellationToken ct)
@@ -214,7 +217,44 @@ public sealed class TwinQueryService(
             drifts,
             resources,
             artifacts,
-            await timeTravel.GetHistoryStartAsync(ct));
+            await timeTravel.GetHistoryStartAsync(ct),
+            SelectDashboardChains(await BuildChainsAsync(scope, ct)));
+    }
+
+    public async Task<ChangeChainsDto> GetChangeChainsAsync(string? query, int limit, DateTimeOffset? asOf, CancellationToken ct)
+    {
+        var scope = await timeTravel.ResolveAsync(asOf, ct);
+        var chains = await BuildChainsAsync(scope, ct);
+        var matches = string.IsNullOrWhiteSpace(query) ? chains : ChangeChainBuilder.Find(chains, query);
+        var top = matches.Take(Math.Clamp(limit, 1, 100)).ToList();
+        var timeline = !string.IsNullOrWhiteSpace(query) && top.Count > 0
+            ? await store.GetEventsByChainAsync(top[0].CorrelationIds, scope.AsOf, 60, ct)
+            : [];
+        return new ChangeChainsDto(scope.AsOf, query, matches.Count, top, timeline);
+    }
+
+    /// <summary>Most recent changes, favouring ones that reached a build: the dashboard stays sparse.</summary>
+    private static List<ChangeChain> SelectDashboardChains(IReadOnlyList<ChangeChain> chains)
+    {
+        var pullRequestOnly = chains.Where(c => c.Version is null).Take(MaxDashboardPullRequestChains);
+        return chains.Where(c => c.Version is not null).Take(DashboardChainCount)
+            .Concat(pullRequestOnly)
+            .OrderByDescending(c => c.LastActivityAt)
+            .Take(DashboardChainCount)
+            .ToList();
+    }
+
+    private static async Task<IReadOnlyList<ChangeChain>> BuildChainsAsync(TwinReadScope scope, CancellationToken ct)
+    {
+        var model = scope.Model;
+        var sources = new ChangeChainSources(
+            await model.GetWorkItemsAsync(ct),
+            await model.GetSourceChangesAsync(ct),
+            await model.GetPipelineRunsAsync(1000, ct),
+            await model.GetArtifactsAsync(ct),
+            await model.GetReleasesAsync(500, ct),
+            await model.GetDeliveriesAsync(1000, ct));
+        return ChangeChainBuilder.Build(sources, scope.Now);
     }
 
     public async Task<PointInTimeStateDto> GetStateAtAsync(DateTimeOffset asOf, CancellationToken ct)

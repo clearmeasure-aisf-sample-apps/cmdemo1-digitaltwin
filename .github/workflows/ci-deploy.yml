@@ -235,6 +235,9 @@ jobs:
           AS_OF=$(date -u -d '10 minutes ago' +%Y-%m-%dT%H:%M:%SZ)
           curl -fsS -H "X-Twin-Key: ${TWIN_API_KEY}" "${TWIN_URL}/api/state-at?asOf=${AS_OF}" \
             | jq '{asOf, historyStartsAt, beforeHistory, environments: [.environments[] | {stage, deployedVersions, lastDeployment}], azureResources: (.azureResources | length), boardColumns, activeDrift}'
+          # Change chains: the most recent delivered change end to end, and the number of chains observed.
+          curl -fsS -H "X-Twin-Key: ${TWIN_API_KEY}" "${TWIN_URL}/api/change-chains?limit=100" \
+            | jq '{chains: .matchCount, latestDelivered: ([.chains[] | select(.outcome == "Delivered")][0] | {chainId, title, workItemNumber, pullRequestNumber, releaseId, leadTimeHours, stages: [.stages[] | {kind, status, reference, durationMinutes, failedAttempts}]})}'
           curl -fsS -H "X-Twin-Key: ${TWIN_API_KEY}" "${TWIN_URL}/api/twin/summary" | jq '{systemSlug, activeDriftCount, criticalDriftCount, pipelinesCount: (.pipelines | length), stagesCount: (.stages | length), webhooksCount: (.webhooks | length), webhooks: [.webhooks[] | {id, source, target, isActive, lastDeliveryStatusCode, detail}], costMonthToDateUsd, gitHubQuota}'
           curl -fsS -H "X-Twin-Key: ${TWIN_API_KEY}" "${TWIN_URL}/api/drift" | jq 'length'
           curl -fsS -H "X-Twin-Key: ${TWIN_API_KEY}" "${TWIN_URL}/api/metrics?windowDays=7&stage=prod" | jq '{totalDeployments, deploymentsPerDay, medianLeadTimeHours, changeFailRatePercent}'

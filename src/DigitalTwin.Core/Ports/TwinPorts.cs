@@ -79,6 +79,9 @@ public interface ITwinStore : ITwinReadModel
         int limit,
         CancellationToken ct);
 
+    /// <summary>Journal events (not state observations) whose chain id is one of <paramref name="chainIds"/>, newest first.</summary>
+    Task<IReadOnlyList<ObservedEvent>> GetEventsByChainAsync(IReadOnlyCollection<string> chainIds, DateTimeOffset? until, int limit, CancellationToken ct);
+
     Task UpsertCursorAsync(IngestionCursor cursor, CancellationToken ct);
 }
 
