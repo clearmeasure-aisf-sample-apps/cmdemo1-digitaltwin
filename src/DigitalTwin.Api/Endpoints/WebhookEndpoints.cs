@@ -120,7 +120,7 @@ public static partial class WebhookEndpoints
             var receipt = await intake.CaptureAsync(raw, ct);
             return Results.Ok(new { captured = true, rawEventId = receipt.RawEventId, dedupeKey = raw.DedupeKey });
         }
-        catch (Exception ex) when (ex is not OperationCanceledException)
+        catch (Exception ex) when (ex is not OperationCanceledException || !ct.IsCancellationRequested)
         {
             LogCaptureFailed(loggerFactory.CreateLogger("WebhookIntake"), ex, source);
             return Results.Problem("Event could not be durably captured; please redeliver.", statusCode: StatusCodes.Status503ServiceUnavailable);

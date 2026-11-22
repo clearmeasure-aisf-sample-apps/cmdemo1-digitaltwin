@@ -201,7 +201,16 @@ jobs:
           TWIN_API_KEY: ${{ secrets.TWIN_API_KEY }}
         run: |
           set -euo pipefail
-          curl -fsS -m 120 -X POST -H "X-Twin-Key: ${TWIN_API_KEY}" "${TWIN_URL}/api/admin/rebuild" | jq '{gitHubOk, octopusOk, azureOk, probesOk, activeDriftCount, notes}'
+          curl -fsS -m 120 -X POST -H "X-Twin-Key: ${TWIN_API_KEY}" "${TWIN_URL}/api/admin/backfill" | jq '{gitHubOk, octopusOk, azureOk, probesOk, activeDriftCount, notes}'
+          # Full rebuild of journal + every read model from raw events; must reproduce identical read models.
+          curl -fsS -X POST -H "X-Twin-Key: ${TWIN_API_KEY}" "${TWIN_URL}/api/admin/rebuild?wait=false" | jq '{running, startedAt}'
+          for i in $(seq 1 120); do
+            STATUS=$(curl -fsS -H "X-Twin-Key: ${TWIN_API_KEY}" "${TWIN_URL}/api/admin/rebuild/status")
+            if [ "$(echo "$STATUS" | jq -r .running)" = "false" ] && [ "$(echo "$STATUS" | jq -r '.lastReport != null or .lastError != null')" = "true" ]; then break; fi
+            sleep 5
+          done
+          echo "$STATUS" | jq '{running, lastError, report: (.lastReport | {identical, startedAt, finishedAt, rawEventsReplayed, rawEventsFailed, journalEventsRebuilt, differences, fingerprintAfter})}'
+          echo "$STATUS" | jq -e '.lastReport.identical == true' >/dev/null
           curl -fsS -H "X-Twin-Key: ${TWIN_API_KEY}" "${TWIN_URL}/api/twin/summary" | jq '{systemSlug, activeDriftCount, criticalDriftCount, pipelinesCount: (.pipelines | length), stagesCount: (.stages | length), webhooksCount: (.webhooks | length), webhooks: [.webhooks[] | {id, source, target, isActive, lastDeliveryStatusCode, detail}], costMonthToDateUsd, gitHubQuota}'
           curl -fsS -H "X-Twin-Key: ${TWIN_API_KEY}" "${TWIN_URL}/api/drift" | jq 'length'
           curl -fsS -H "X-Twin-Key: ${TWIN_API_KEY}" "${TWIN_URL}/api/metrics?windowDays=7&stage=prod" | jq '{totalDeployments, deploymentsPerDay, medianLeadTimeHours, changeFailRatePercent}'

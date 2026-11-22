@@ -2,6 +2,7 @@ using System.Collections.Concurrent;
 using System.Globalization;
 using System.Text.Json;
 using DigitalTwin.Core.Ports;
+using DigitalTwin.Core.Projections;
 using DigitalTwin.Core.BuildAndArtifact;
 using DigitalTwin.Core.Hierarchy;
 using DigitalTwin.Core.Intake;
@@ -17,6 +18,7 @@ namespace DigitalTwin.GitHub;
 public sealed partial class GitHubSyncService(
     GitHubApiClient gh,
     ITwinStore store,
+    StateObservationPublisher state,
     ObservedEventIntake intake,
     IOptions<GitHubOptions> options,
     TimeProvider timeProvider,
@@ -126,15 +128,15 @@ public sealed partial class GitHubSyncService(
                 }
             }
 
-            if (repoSnapshots.Count > 0) await store.UpsertRepositoriesAsync(repoSnapshots, ct);
-            if (prSnapshots.Count > 0) await store.UpsertSourceChangesAsync(prSnapshots, ct);
-            if (runSnapshots.Count > 0) await store.UpsertPipelineRunsAsync(runSnapshots, ct);
-            if (artifactSnapshots.Count > 0) await store.UpsertArtifactsAsync(artifactSnapshots, ct);
+            if (repoSnapshots.Count > 0) await state.PublishAsync(StateKinds.Repository, repoSnapshots, EventSourceKind.GitHub, ct);
+            if (prSnapshots.Count > 0) await state.PublishAsync(StateKinds.SourceChange, prSnapshots, EventSourceKind.GitHub, ct);
+            if (runSnapshots.Count > 0) await state.PublishAsync(StateKinds.PipelineRun, runSnapshots, EventSourceKind.GitHub, ct);
+            if (artifactSnapshots.Count > 0) await state.PublishAsync(StateKinds.Artifact, artifactSnapshots, EventSourceKind.GitHub, ct);
 
             // Save REST webhook statuses whenever REST was not rate-limited (independent of GraphQL quota)
             if (fullBackfill && webhookStatuses.Count > 0 && !restRateLimited)
             {
-                await store.ReplaceWebhookStatusesAsync("github", webhookStatuses, ct);
+                await state.PublishSetAsync(StateKinds.WebhookStatus, "github", webhookStatuses, EventSourceKind.GitHub, ct);
             }
 
             // 4. Sync Work Items (status/workitems.json via 0-quota raw + Project 679 GraphQL)
@@ -158,7 +160,7 @@ public sealed partial class GitHubSyncService(
             cursor.LastCursor = now.ToString("O", CultureInfo.InvariantCulture);
             await store.UpsertCursorAsync(cursor, ct);
         }
-        catch (Exception ex) when (ex is not OperationCanceledException)
+        catch (Exception ex) when (ex is not OperationCanceledException || !ct.IsCancellationRequested)
         {
             LogGitHubSyncFailed(ex);
             cursor.Status = "error";
@@ -212,10 +214,10 @@ public sealed partial class GitHubSyncService(
         await FetchBatchRepositoriesGraphQlAsync([repositoryName], fullBackfill: false, now, repoSnapshots, prSnapshots, artifactSnapshots, newEvents, ct);
         await SyncWorkflowRunsForRepoAsync(repositoryName, fullBackfill: false, now, runSnapshots, newEvents, ct);
 
-        if (repoSnapshots.Count > 0) await store.UpsertRepositoriesAsync(repoSnapshots, ct);
-        if (prSnapshots.Count > 0) await store.UpsertSourceChangesAsync(prSnapshots, ct);
-        if (runSnapshots.Count > 0) await store.UpsertPipelineRunsAsync(runSnapshots, ct);
-        if (artifactSnapshots.Count > 0) await store.UpsertArtifactsAsync(artifactSnapshots, ct);
+        if (repoSnapshots.Count > 0) await state.PublishAsync(StateKinds.Repository, repoSnapshots, EventSourceKind.GitHub, ct);
+        if (prSnapshots.Count > 0) await state.PublishAsync(StateKinds.SourceChange, prSnapshots, EventSourceKind.GitHub, ct);
+        if (runSnapshots.Count > 0) await state.PublishAsync(StateKinds.PipelineRun, runSnapshots, EventSourceKind.GitHub, ct);
+        if (artifactSnapshots.Count > 0) await state.PublishAsync(StateKinds.Artifact, artifactSnapshots, EventSourceKind.GitHub, ct);
 
         await intake.PublishAsync(newEvents, EventSourceKind.GitHub, IngestionChannel.Poll, ct);
     }
@@ -335,7 +337,7 @@ public sealed partial class GitHubSyncService(
                     CheckedAt = now
                 });
             }
-            catch (Exception ex) when (ex is not OperationCanceledException)
+            catch (Exception ex) when (ex is not OperationCanceledException || !ct.IsCancellationRequested)
             {
                 LogWebhookRegistrationFailed(ex, repo);
             }
@@ -343,7 +345,7 @@ public sealed partial class GitHubSyncService(
 
         if (results.Count > 0)
         {
-            await store.ReplaceWebhookStatusesAsync("github", results, ct);
+            await state.PublishSetAsync(StateKinds.WebhookStatus, "github", results, EventSourceKind.GitHub, ct);
         }
         return results;
     }
@@ -370,7 +372,7 @@ public sealed partial class GitHubSyncService(
         var costJson = await gh.GetRawPublicAsync(Cmdemo1PlatformCatalog.GitHubOrg, Cmdemo1PlatformCatalog.SystemRepository, "status", "cost.json", ct);
         var containersJson = await gh.GetRawPublicAsync(Cmdemo1PlatformCatalog.GitHubOrg, Cmdemo1PlatformCatalog.SystemRepository, "status", "containers.json", ct);
 
-        await store.UpsertDesiredConfigAsync(new DesiredSystemConfigSnapshot
+        await state.PublishAsync(StateKinds.DesiredConfig, [new DesiredSystemConfigSnapshot
         {
             Id = Cmdemo1PlatformCatalog.SystemSlug,
             SystemName = Cmdemo1PlatformCatalog.SystemName,
@@ -379,7 +381,7 @@ public sealed partial class GitHubSyncService(
             NodesJson = containersJson,
             CostJson = costJson,
             UpdatedAt = now
-        }, ct);
+        }], EventSourceKind.GitOps, ct);
 
         if (!string.IsNullOrWhiteSpace(costJson))
         {
@@ -415,7 +417,7 @@ public sealed partial class GitHubSyncService(
                     }
                     updated.Add(inst);
                 }
-                await store.UpsertEnvironmentInstancesAsync(updated, ct);
+                await state.PublishAsync(StateKinds.Environment, updated, EventSourceKind.GitHub, ct);
             }
         }
     }
@@ -942,7 +944,7 @@ public sealed partial class GitHubSyncService(
 
         if (!queryBoardGraphQl || gh.IsGraphQlPaused(out _))
         {
-            if (itemsById.Count > 0) await store.UpsertWorkItemsAsync(itemsById.Values.ToList(), ct);
+            if (itemsById.Count > 0) await state.PublishAsync(StateKinds.WorkItem, itemsById.Values.ToList(), EventSourceKind.GitHub, ct);
             return;
         }
 
@@ -1075,7 +1077,7 @@ public sealed partial class GitHubSyncService(
 
         if (itemsById.Count > 0)
         {
-            await store.UpsertWorkItemsAsync(itemsById.Values.ToList(), ct);
+            await state.PublishAsync(StateKinds.WorkItem, itemsById.Values.ToList(), EventSourceKind.GitHub, ct);
         }
     }
 

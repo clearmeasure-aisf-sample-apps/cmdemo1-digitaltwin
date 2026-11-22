@@ -49,7 +49,7 @@ public sealed class ApiIntegrationTests(SqlServerFixture sql) : IAsyncLifetime, 
 
         Assert.Equal(HttpStatusCode.OK, (await client.GetAsync("/api/intake/status")).StatusCode);
         Assert.Equal(HttpStatusCode.Unauthorized, (await client.GetAsync("/api/admin/deadletters")).StatusCode);
-        Assert.Equal(HttpStatusCode.Unauthorized, (await client.PostAsync("/api/admin/rebuild-from-raw", null)).StatusCode);
+        Assert.Equal(HttpStatusCode.Unauthorized, (await client.PostAsync("/api/admin/rebuild", null)).StatusCode);
         Assert.Equal(HttpStatusCode.Unauthorized, (await client.PostAsync("/api/admin/deadletters/replay", null)).StatusCode);
 
         var graphNoKey = await client.GetAsync("/api/twin/graph");

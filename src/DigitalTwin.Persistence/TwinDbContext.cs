@@ -29,6 +29,7 @@ public sealed class TwinDbContext(DbContextOptions<TwinDbContext> options) : DbC
     public DbSet<AzureResourceSnapshot> AzureResources => Set<AzureResourceSnapshot>();
     public DbSet<HealthProbeSnapshot> HealthProbes => Set<HealthProbeSnapshot>();
     public DbSet<DriftFinding> DriftFindings => Set<DriftFinding>();
+    public DbSet<ProjectionVersion> ProjectionVersions => Set<ProjectionVersion>();
 
     protected override void OnModelCreating(ModelBuilder modelBuilder)
     {
@@ -149,6 +150,16 @@ public sealed class TwinDbContext(DbContextOptions<TwinDbContext> options) : DbC
         {
             e.HasKey(x => x.TargetKey);
             e.Property(x => x.TargetKey).HasMaxLength(160);
+        });
+
+        modelBuilder.Entity<ProjectionVersion>(e =>
+        {
+            e.ToTable("TwinProjectionVersions");
+            e.HasKey(x => new { x.Kind, x.Key });
+            e.Property(x => x.Kind).HasMaxLength(64);
+            e.Property(x => x.Key).HasMaxLength(256);
+            e.Property(x => x.EventKey).HasMaxLength(256);
+            e.Property(x => x.ContentHash).HasMaxLength(32);
         });
 
         modelBuilder.Entity<DriftFinding>(e =>

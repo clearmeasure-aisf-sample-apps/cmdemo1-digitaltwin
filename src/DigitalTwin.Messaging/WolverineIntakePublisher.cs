@@ -43,7 +43,7 @@ public sealed partial class WolverineIntakePublisher(
         {
             await bus.FlushOutgoingMessagesAsync();
         }
-        catch (Exception ex) when (ex is not OperationCanceledException)
+        catch (Exception ex) when (ex is not OperationCanceledException || !ct.IsCancellationRequested)
         {
             LogFlushDeferred(ex, rawEvent.Id);
         }

@@ -75,7 +75,7 @@ public sealed partial class FollowUpRefreshScheduler(
                 await RunAsync(refresh, stoppingToken);
                 await drift.EvaluateAsync(stoppingToken);
             }
-            catch (Exception ex) when (ex is not OperationCanceledException)
+            catch (Exception ex) when (ex is not OperationCanceledException || !stoppingToken.IsCancellationRequested)
             {
                 LogFollowUpFailed(ex, refresh.Target, refresh.Repository);
             }

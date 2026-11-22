@@ -5,6 +5,7 @@ using System.Text.Json;
 using Azure.Core;
 using Azure.Identity;
 using DigitalTwin.Core.Ports;
+using DigitalTwin.Core.Projections;
 using DigitalTwin.Core.BuildAndArtifact;
 using DigitalTwin.Core.Hierarchy;
 using DigitalTwin.Core.Intake;
@@ -19,6 +20,7 @@ namespace DigitalTwin.Azure;
 public sealed partial class AzureSyncService(
     IHttpClientFactory httpClientFactory,
     ITwinStore store,
+    StateObservationPublisher state,
     ObservedEventIntake intake,
     IOptions<AzureOptions> options,
     TimeProvider timeProvider,
@@ -87,7 +89,7 @@ public sealed partial class AzureSyncService(
 
             // 2. Resource Graph query for all resources in both RGs
             var resources = await QueryResourcesAsync(arm, subId, healthById, now, ct);
-            await store.ReplaceAzureResourcesAsync(resources, ct);
+            await state.PublishSetAsync(StateKinds.AzureResource, "azure", resources, EventSourceKind.Azure, ct);
 
             // 3. Deployment Stacks (stack-cmdemo1-tdd, stack-cmdemo1-uat, stack-cmdemo1-prod)
             var stacksByStage = await FetchStacksAsync(arm, subId, ct);
@@ -169,7 +171,7 @@ public sealed partial class AzureSyncService(
                     });
                 }
             }
-            await store.ReplaceWorkloadsAsync(workloads, ct);
+            await state.PublishSetAsync(StateKinds.Workload, "azure", workloads, EventSourceKind.Azure, ct);
 
             // 5. Update EnvironmentInstances
             var existingStages = (await store.GetEnvironmentInstancesAsync(ct))
@@ -204,7 +206,7 @@ public sealed partial class AzureSyncService(
                 inst.LastEvaluatedAt = now;
                 stageUpdates.Add(inst);
             }
-            await store.UpsertEnvironmentInstancesAsync(stageUpdates, ct);
+            await state.PublishAsync(StateKinds.Environment, stageUpdates, EventSourceKind.Azure, ct);
 
             // 6. Resource Graph resourcechanges (last 14 days history!) -> Normalized Events
             var changes = await QueryResourceChangesAsync(arm, subId, fullBackfill ? 40 : 15, now, ct);
@@ -217,7 +219,7 @@ public sealed partial class AzureSyncService(
             var acrArtifacts = await QueryAcrTagsAsync(token, now, ct);
             if (acrArtifacts.Count > 0)
             {
-                await store.UpsertArtifactsAsync(acrArtifacts, ct);
+                await state.PublishAsync(StateKinds.Artifact, acrArtifacts, EventSourceKind.Azure, ct);
             }
 
             var ingested = await intake.PublishAsync(newEvents, EventSourceKind.Azure, fullBackfill ? IngestionChannel.Backfill : IngestionChannel.Poll, ct);
@@ -228,7 +230,7 @@ public sealed partial class AzureSyncService(
             cursor.LastCursor = now.ToString("O", CultureInfo.InvariantCulture);
             await store.UpsertCursorAsync(cursor, ct);
         }
-        catch (Exception ex) when (ex is not OperationCanceledException)
+        catch (Exception ex) when (ex is not OperationCanceledException || !ct.IsCancellationRequested)
         {
             LogAzureSyncFailed(ex);
             cursor.Status = "error";
@@ -284,7 +286,7 @@ public sealed partial class AzureSyncService(
                         Detail = msg,
                         CheckedAt = now
                     };
-                    await store.ReplaceWebhookStatusesAsync("azure", [gapStatus], ct);
+                    await state.PublishSetAsync(StateKinds.WebhookStatus, "azure", [gapStatus], EventSourceKind.Azure, ct);
                     return gapStatus;
                 }
             }
@@ -352,10 +354,10 @@ public sealed partial class AzureSyncService(
                 });
             }
 
-            await store.ReplaceWebhookStatusesAsync("azure", statuses, ct);
+            await state.PublishSetAsync(StateKinds.WebhookStatus, "azure", statuses, EventSourceKind.Azure, ct);
             return statuses.First();
         }
-        catch (Exception ex) when (ex is not OperationCanceledException)
+        catch (Exception ex) when (ex is not OperationCanceledException || !ct.IsCancellationRequested)
         {
             LogEventGridProbeFailed(ex);
             var err = new WebhookRegistrationStatus
@@ -368,7 +370,7 @@ public sealed partial class AzureSyncService(
                 Detail = ex.Message,
                 CheckedAt = now
             };
-            await store.ReplaceWebhookStatusesAsync("azure", [err], ct);
+            await state.PublishSetAsync(StateKinds.WebhookStatus, "azure", [err], EventSourceKind.Azure, ct);
             return err;
         }
     }
@@ -733,8 +735,7 @@ public sealed partial class AzureSyncService(
         var providerState = await GetEventGridRegistrationStateAsync(arm, subId, ct);
         if (!string.Equals(providerState, "Registered", StringComparison.OrdinalIgnoreCase))
         {
-            await store.ReplaceWebhookStatusesAsync("azure",
-            [
+            await state.PublishSetAsync(StateKinds.WebhookStatus, "azure", [
                 new WebhookRegistrationStatus
                 {
                     Id = "azure:eventgrid",
@@ -745,7 +746,7 @@ public sealed partial class AzureSyncService(
                     Detail = $"Microsoft.EventGrid provider is {providerState}; Resource Graph & ARM reconciliation pollers active",
                     CheckedAt = now
                 }
-            ], ct);
+            ], EventSourceKind.Azure, ct);
             return;
         }
 
@@ -778,7 +779,7 @@ public sealed partial class AzureSyncService(
                 CheckedAt = now
             });
         }
-        await store.ReplaceWebhookStatusesAsync("azure", list, ct);
+        await state.PublishSetAsync(StateKinds.WebhookStatus, "azure", list, EventSourceKind.Azure, ct);
     }
 
     private static async Task<string> GetEventGridRegistrationStateAsync(HttpClient arm, string subId, CancellationToken ct)
@@ -846,7 +847,7 @@ public sealed partial class AzureSyncService(
                 }
             }
         }
-        catch (Exception ex) when (ex is not OperationCanceledException)
+        catch (Exception ex) when (ex is not OperationCanceledException || !ct.IsCancellationRequested)
         {
             LogAcrSkipped(ex);
         }

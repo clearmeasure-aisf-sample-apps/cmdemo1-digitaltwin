@@ -1,4 +1,5 @@
 using DigitalTwin.Core.Ports;
+using DigitalTwin.Application.Intake;
 using DigitalTwin.Application.Services;
 using Microsoft.Extensions.Hosting;
 using Microsoft.Extensions.Logging;
@@ -55,7 +56,7 @@ public sealed partial class BackfillCoordinator(
                     await gitHub.SyncAsync(fullBackfill: true, ct);
                     ghOk = true;
                 }
-                catch (Exception ex) when (ex is not OperationCanceledException)
+                catch (Exception ex) when (ex is not OperationCanceledException || !ct.IsCancellationRequested)
                 {
                     lock (notes) { notes.Add($"GitHub: {ex.Message}"); }
                     LogBackfillStepFailed(ex, "GitHub");
@@ -69,7 +70,7 @@ public sealed partial class BackfillCoordinator(
                     await octopus.SyncAsync(fullBackfill: true, ct);
                     octoOk = true;
                 }
-                catch (Exception ex) when (ex is not OperationCanceledException)
+                catch (Exception ex) when (ex is not OperationCanceledException || !ct.IsCancellationRequested)
                 {
                     lock (notes) { notes.Add($"Octopus: {ex.Message}"); }
                     LogBackfillStepFailed(ex, "Octopus");
@@ -83,7 +84,7 @@ public sealed partial class BackfillCoordinator(
                     await azure.SyncAsync(fullBackfill: true, ct);
                     azOk = true;
                 }
-                catch (Exception ex) when (ex is not OperationCanceledException)
+                catch (Exception ex) when (ex is not OperationCanceledException || !ct.IsCancellationRequested)
                 {
                     lock (notes) { notes.Add($"Azure: {ex.Message}"); }
                     LogBackfillStepFailed(ex, "Azure");
@@ -97,7 +98,7 @@ public sealed partial class BackfillCoordinator(
                 await probes.ProbeAllAsync(ct);
                 probeOk = true;
             }
-            catch (Exception ex) when (ex is not OperationCanceledException)
+            catch (Exception ex) when (ex is not OperationCanceledException || !ct.IsCancellationRequested)
             {
                 notes.Add($"Probes: {ex.Message}");
                 LogBackfillStepFailed(ex, "Probes");
@@ -126,9 +127,12 @@ public sealed partial class TwinPollingHostedService(
     IAzureSyncService azure,
     IHealthProbeService probes,
     DriftReconciliationService drift,
+    ProjectionBaselineSeeder baseline,
     IOptions<PollingOptions> options,
     ILogger<TwinPollingHostedService> logger) : BackgroundService
 {
+    [LoggerMessage(Level = LogLevel.Information, Message = "Seeded existing read models into the raw store as baseline state observations")]
+    private partial void LogBaselineSeeded();
     [LoggerMessage(Level = LogLevel.Information, Message = "Starting initial digital twin backfill...")]
     private partial void LogBackfillStarting();
 
@@ -151,11 +155,15 @@ public sealed partial class TwinPollingHostedService(
         await Task.Delay(TimeSpan.FromSeconds(2), stoppingToken);
         try
         {
+            if (await baseline.SeedIfNeededAsync(stoppingToken))
+            {
+                LogBaselineSeeded();
+            }
             LogBackfillStarting();
             var report = await backfill.RebuildAllAsync("startup-backfill", stoppingToken);
             LogBackfillCompleted(report.GitHubOk, report.OctopusOk, report.AzureOk, report.ProbesOk, report.ActiveDriftCount);
         }
-        catch (Exception ex) when (ex is not OperationCanceledException)
+        catch (Exception ex) when (ex is not OperationCanceledException || !stoppingToken.IsCancellationRequested)
         {
             LogBackfillError(ex);
         }
@@ -219,7 +227,7 @@ public sealed partial class TwinPollingHostedService(
             {
                 await action(ct);
             }
-            catch (Exception ex) when (ex is not OperationCanceledException)
+            catch (Exception ex) when (ex is not OperationCanceledException || !ct.IsCancellationRequested)
             {
                 LogReconciliationFailed(ex, name);
             }

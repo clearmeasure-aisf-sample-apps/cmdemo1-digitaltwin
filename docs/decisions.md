@@ -160,3 +160,18 @@ Following the domain research in the prompt's prior-art references:
 - **Context**: `Microsoft.EventGrid` was registered on the subscription (by a subscription Owner) between 06:03 and 15:08 UTC on 2026-11-21. `register-hooks.sh` deployed `infra/eventgrid.bicep` automatically whenever it saw the provider as `Registered`, so the 15:08 and 15:40 deploys created and updated the Event Grid system topics and subscriptions in `rg-cmdemo1-nonprod` and `rg-cmdemo1-prod`, even though the instruction for this work was not to run Event Grid infra.
 - **Decision**: The deploy now only reports the provider state and the existing system topics (read-only). Deploying Event Grid infra requires `ENABLE_EVENT_GRID_DEPLOY=true`, and the script no longer attempts `az provider register`. The topics and subscriptions that already exist were left in place: they deliver to `/hooks/azure`, and those events go through the durable intake like every other webhook.
 - **Decision (Jeffrey, 2026-11-21)**: Keep `eg-twin-rg-cmdemo1-nonprod` and `eg-twin-rg-cmdemo1-prod` and manage them in code. `ENABLE_EVENT_GRID_DEPLOY` now defaults to `true` in `ci-deploy.yml` (a repo variable `ENABLE_EVENT_GRID_DEPLOY=false` turns it off). Before each deploy, `register-hooks.sh` runs `what-if` and refuses any Create/Delete of an existing topic. Afterwards it checks that the topic's resource ID and `metricResourceId` (assigned at creation) are unchanged (no recreate) and prints the subscription state and 24h delivery metrics. CI also proves the path end to end: a harmless tag change on the twin-owned `log-cmdemo1-twin` in `rg-cmdemo1-nonprod` must arrive through `/hooks/azure` and appear in the event journal.
+
+---
+
+## ADR-016: Event-Sourced Read Models (Pollers Are Event Producers Only)
+
+- **Context**: Pollers wrote current-state tables directly, so a rebuild could restore only the event journal, and state history was lost.
+- **Decision**:
+  - The `ITwinStore` port no longer exposes read-model writes, and an architecture test enforces that.
+  - Pollers report what they observe through `StateObservationPublisher`, which compares each entity's content hash with the projection's last hash (volatile fields excluded per kind in `StateKinds`). Only material changes become `twin.state.observed` events, captured through the durable intake like webhooks.
+  - Upsert kinds emit one event per entity. Replace-set kinds (Azure resources, workloads, freezes, drift, webhook statuses) emit one event per scope carrying the complete set.
+  - The projector in Persistence applies events latest-wins on (observation time, event key), tracked in `TwinProjectionVersions`. Re-applying is idempotent, so a crash between journal append and projection is harmless.
+  - The intake listeners run sequentially, so live application order equals capture order, which is the order a rebuild replays.
+  - On the first start, existing rows are seeded into the raw store as baseline state observations, so history outside the pollers' windows survives a rebuild.
+- **Rebuild**: `/api/admin/rebuild` runs under a gate that pauses live application. It fingerprints every read model and the journal, clears them, replays the processed raw rows, fingerprints again, and reports `identical`. Rows still queued behind the gate are left for live processing. The rebuild runs detached, so an HTTP timeout cannot abort it.
+- **Not projected**: ingestion cursors and the GitHub quota are operational telemetry.

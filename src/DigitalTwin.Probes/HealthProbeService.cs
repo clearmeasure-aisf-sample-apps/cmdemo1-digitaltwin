@@ -1,6 +1,7 @@
 using System.Diagnostics;
 using System.Text.Json;
 using DigitalTwin.Core.Ports;
+using DigitalTwin.Core.Projections;
 using DigitalTwin.Core.Intake;
 using DigitalTwin.Core.Observation;
 using DigitalTwin.Core.ReliabilityAndDrift;
@@ -11,6 +12,7 @@ namespace DigitalTwin.Probes;
 public sealed partial class HealthProbeService(
     IHttpClientFactory httpClientFactory,
     ITwinStore store,
+    StateObservationPublisher state,
     ObservedEventIntake intake,
     TimeProvider timeProvider,
     ILogger<HealthProbeService> logger) : IHealthProbeService
@@ -108,7 +110,7 @@ public sealed partial class HealthProbeService(
                 }
             }
 
-            await store.UpsertHealthProbesAsync(probes, ct);
+            await state.PublishAsync(StateKinds.HealthProbe, probes, EventSourceKind.Probe, ct);
 
             // Enrich SWA workloads with live build-facts.json reported version
             if (swaVersions.Count > 0 && workloads.Count > 0)
@@ -121,7 +123,7 @@ public sealed partial class HealthProbeService(
                     }
                     return w;
                 }).ToList();
-                await store.ReplaceWorkloadsAsync(updated, ct);
+                await state.PublishSetAsync(StateKinds.Workload, "azure", updated, EventSourceKind.Probe, ct);
             }
 
             cursor.LastSuccessAt = timeProvider.GetUtcNow();
@@ -129,7 +131,7 @@ public sealed partial class HealthProbeService(
             cursor.ItemsProcessed = probes.Count;
             await store.UpsertCursorAsync(cursor, ct);
         }
-        catch (Exception ex) when (ex is not OperationCanceledException)
+        catch (Exception ex) when (ex is not OperationCanceledException || !ct.IsCancellationRequested)
         {
             LogProbeFailed(ex);
             cursor.Status = "error";
@@ -172,7 +174,7 @@ public sealed partial class HealthProbeService(
                 }
             }
         }
-        catch (Exception ex) when (ex is not OperationCanceledException)
+        catch (Exception ex) when (ex is not OperationCanceledException || !ct.IsCancellationRequested)
         {
             errMsg = ex.Message;
         }

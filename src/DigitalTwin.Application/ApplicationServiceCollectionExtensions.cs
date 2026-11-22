@@ -3,6 +3,7 @@ using DigitalTwin.Application.Services;
 using DigitalTwin.Application.Workers;
 using DigitalTwin.Core.Intake;
 using DigitalTwin.Core.Ports;
+using DigitalTwin.Core.Projections;
 using Microsoft.Extensions.Configuration;
 using Microsoft.Extensions.DependencyInjection;
 
@@ -16,6 +17,9 @@ public static class ApplicationServiceCollectionExtensions
         services.Configure<PollingOptions>(configuration.GetSection("Twin"));
 
         services.AddSingleton<ObservedEventIntake>();
+        services.AddSingleton<StateObservationPublisher>();
+        services.AddSingleton<ProjectionGate>();
+        services.AddSingleton<ProjectionBaselineSeeder>();
         services.AddSingleton<DriftReconciliationService>();
         services.AddSingleton<TwinQueryService>();
 

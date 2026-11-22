@@ -96,14 +96,15 @@ flowchart LR
 - **Ack after commit**: the webhook returns `200` only after the raw row and the Wolverine envelope are committed together; any failure returns `503` so GitHub/Octopus/Event Grid redeliver. Signature/secret headers are never persisted.
 - **Idempotent processing**: the handler dedupes on the event's idempotency key, so redeliveries, replays and webhook/poll overlap are harmless.
 - **Failures**: 3 retries with backoff (1s, 5s, 15s), then the message is dead-lettered (Wolverine dead-letter table) and the raw row is marked. Replay via `POST /api/admin/deadletters/replay`.
-- **Rebuild**: `POST /api/admin/rebuild-from-raw` clears the event journal and replays every raw row in capture order; normalization is deterministic, so the journal comes back identical. Reconciled snapshots (repos, runs, deployments, Azure resources) are current-state reads that the pollers re-derive from source.
+- **Event-sourced read models**: pollers are event producers only. Every current-state read model (repositories, PRs, workflow runs, artifacts/RCs, work items, Octopus releases, deployments and runbooks, freezes, desired GitOps config, environments, workloads, Azure resources, health probes, drift, webhook statuses) changes only when a `twin.state.observed` event is applied: one per changed entity, or one per scope for complete sets. A content hash that ignores volatile fields (timestamps, probe latency) means unchanged state produces no events. The latest observation wins by observation time.
+- **Rebuild**: `POST /api/admin/rebuild` (add `?wait=false` and poll `/api/admin/rebuild/status`) clears the journal and **all** read models and replays every processed raw row in capture order. It reports before/after fingerprints of every read model and must come back identical; CI checks this on each deploy. `POST /api/admin/backfill` re-polls all sources. Ingestion cursors are operational telemetry and are not projected.
 - **Visibility**: queue depth (captured but not yet applied), oldest pending age and dead-letter count appear on `/api/twin/summary` (`intakeQueue`), `/api/intake/status`, the dashboard "Intake" pill, and the MCP `get_intake_queue` tool.
 - **Transport is configuration** (`Twin:Messaging:Transport`): `LocalDurable` (in-process durable queue backed by the SQL message store), `SqlServer` (queue table in `sqldb-cmdemo1-twin`, used by the deployed twin), `AzureServiceBus` (queue `twin-intake` on `sb-cmdemo1-twin` with managed identity; `infra/servicebus.bicep`, enabled with `deployServiceBus=true` once `Microsoft.ServiceBus` is registered).
 - **Processor role**: `Twin:Messaging:ProcessorEnabled=false` turns a host into intake-only (queue transports). The deployed twin runs both roles in one container app; see `docs/decisions.md` (ADR-012).
 
 ## How Ingestion Works (Hooks + Reconciliation Polls)
 
-1. **Startup Backfill & Full Rebuild**: On startup (and via `POST /api/admin/rebuild`), `BackfillCoordinator` hydrates desired state (`cmdemo1-system/system.json`, `environments/*/versions.json`, `status/*`), GitHub repos/PRs/runs/Project #679 board, Octopus `Spaces-355`, Azure Resource Graph + ARM revisions, and live HTTP probes, then evaluates drift.
+1. **Startup Backfill**: On startup (and via `POST /api/admin/backfill`), `BackfillCoordinator` hydrates desired state (`cmdemo1-system/system.json`, `environments/*/versions.json`, `status/*`), GitHub repos/PRs/runs/Project #679 board, Octopus `Spaces-355`, Azure Resource Graph + ARM revisions, and live HTTP probes, then evaluates drift.
 2. **GitHub (Rate-Budgeted <= 1,500 REST calls/hr)**:
    - **Webhook** `POST /hooks/github` verifies `X-Hub-Signature-256` (HMAC-SHA256 with `WEBHOOK_SECRET`) and durably captures the raw delivery; the processor normalizes `push`, `pull_request`, `workflow_run`, `workflow_job`, `check_run`, `issues`, `release`, `deployment`, `package`, etc., streams via SignalR/SSE, and schedules a coalesced single-repo refresh.
    - **Conditional & Batched Reconciliation**: Full backfill once at startup; incremental repo/workflow runs reconciliation every **10 minutes** using `If-None-Match` ETags (`304 Not Modified` = 0 quota), aliased GraphQL repo batching, and zero-quota `raw.githubusercontent.com` reads for `cmdemo1-system`; Project #679 GraphQL board check every **5 minutes**. Tracks `X-RateLimit-Remaining`, enters `backoff` below 1,000, pauses polling below 500, and exposes `gitHubQuota` on `/api/twin/summary`.
@@ -135,8 +136,8 @@ flowchart LR
 - `GET /api/explain?q=<issue|pr|version|sha|task>`
 - `GET /api/intake` (also public read at `GET /api/intake/status`)
 - `GET /api/admin/deadletters` and `POST /api/admin/deadletters/replay` (optional body `{"ids":[...]}`)
-- `POST /api/admin/rebuild-from-raw`
-- `POST /api/admin/rebuild` and `POST /api/admin/register-hooks`
+- `POST /api/admin/rebuild[?wait=false]`, `GET /api/admin/rebuild/status`
+- `POST /api/admin/backfill` and `POST /api/admin/register-hooks`
 
 ### MCP Server (Streamable HTTP at `/mcp`)
 
