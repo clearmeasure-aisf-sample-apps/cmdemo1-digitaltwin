@@ -11,11 +11,15 @@ set -euo pipefail
 : "${OCTOPUS_URL:?}" "${OCTOPUS_API_KEY:?}" "${GH_PAT:?}" "${WEBHOOK_SECRET:?}" "${TWIN_API_KEY:?}"
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
-RG="${TWIN_RESOURCE_GROUP:-rg-cmdemo1-nonprod}"
-APP="${TWIN_APP_NAME:-ca-cmdemo1-twin}"
+SLUG="${TWIN_SYSTEM_SLUG:-cmdemo1}"
+RG="${TWIN_RESOURCE_GROUP:-rg-${SLUG}-nonprod}"
+APP="${TWIN_APP_NAME:-ca-${SLUG}-twin}"
 ACR_NAME="${ACR_NAME:-acrcmdemo1chu4gq}"
 ACR_RG="${ACR_RESOURCE_GROUP:-$RG}"
-DEPLOYMENT_NAME="${TWIN_DEPLOYMENT_NAME:-deploy-cmdemo1-twin}"
+DEPLOYMENT_NAME="${TWIN_DEPLOYMENT_NAME:-deploy-${SLUG}-twin}"
+# Another platform: TWIN_SYSTEM_SLUG names the twin's resources, TWIN_PLATFORM_FILE is its *.platform.json (docs/setup/README.md).
+PLATFORM_JSON=""
+if [ -n "${TWIN_PLATFORM_FILE:-}" ]; then PLATFORM_JSON=$(grep -vE '^[[:space:]]*//' "$TWIN_PLATFORM_FILE" | jq -c .); fi
 # The Octopus package ships the compiled ARM template, so workers need no Bicep CLI; a checkout uses the Bicep source.
 if [ -z "${TEMPLATE_FILE:-}" ]; then
   if [ -f "$ROOT/infra/main.json" ]; then TEMPLATE_FILE="$ROOT/infra/main.json"; else TEMPLATE_FILE="$ROOT/infra/main.bicep"; fi
@@ -59,7 +63,7 @@ trap 'rm -f "$PARAMS_FILE"' EXIT
 jq -n \
   --arg img "$IMAGE" --arg acrUser "$ACR_USER" --arg acrPass "$ACR_PASS" --arg oid "$DEPLOYER_OID" --arg sqlPass "$SQL_PASS" \
   --arg azCid "$ARM_CLIENT_ID" --arg azSec "$ARM_CLIENT_SECRET" --arg azTid "$ARM_TENANT_ID" --arg azSub "$ARM_SUBSCRIPTION_ID" \
-  --arg octoUrl "$OCTOPUS_URL" --arg octoKey "$OCTOPUS_API_KEY" --arg ghPat "$GH_PAT" --arg whSec "$WEBHOOK_SECRET" --arg apiKey "$TWIN_API_KEY" \
+  --arg octoUrl "$OCTOPUS_URL" --arg octoKey "$OCTOPUS_API_KEY" --arg ghPat "$GH_PAT" --arg whSec "$WEBHOOK_SECRET" --arg apiKey "$TWIN_API_KEY" --arg slug "$SLUG" --arg platformJson "$PLATFORM_JSON" \
   '{
     "$schema": "https://schema.management.azure.com/schemas/2019-04-01/deploymentParameters.json#",
     "contentVersion": "1.0.0.0",
@@ -77,7 +81,9 @@ jq -n \
       "octopusApiKey": { "value": $octoKey },
       "gitHubPat": { "value": $ghPat },
       "webhookSecret": { "value": $whSec },
-      "twinApiKey": { "value": $apiKey }
+      "twinApiKey": { "value": $apiKey },
+      "systemSlug": { "value": $slug },
+      "platformJson": { "value": $platformJson }
     }
   }' > "$PARAMS_FILE"
 

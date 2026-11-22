@@ -231,6 +231,15 @@ The Bicep has `deployServiceBus` (default **false**) and `serviceBusAuth`:
 
 `TWIN_TEST_SERVICEBUS=1 dotnet test` runs the transport end to end against the Testcontainers Service Bus emulator (with SQL Server 2022 as its engine). In the cloud agent sandbox used for this work, the emulator container crashed (exit 139) when connecting to its database, so that test has not been run successfully yet. The default suite covers selection and validation by configuration.
 
+## Observing Another Platform
+
+Everything specific to cmdemo1 comes from one platform definition, [`docs/platforms/cmdemo1.platform.json`](docs/platforms/cmdemo1.platform.json): the GitHub organization and repositories, Octopus space and projects, Azure subscription and resource groups, pipelines, stages and stage inference rules. A test keeps it identical to the built-in default. To point a twin at another client's platform:
+- Write a definition (example: [`docs/platforms/contoso.platform.json`](docs/platforms/contoso.platform.json)).
+- Set `Twin:Platform:File` or `Twin:Platform:Json`.
+- Set the repository variables `TWIN_SYSTEM_SLUG`, `TWIN_RESOURCE_GROUP`, `TWIN_ACR_NAME`, `TWIN_PLATFORM_FILE`, `TWIN_GITHUB_ORG` and `TWIN_OCTOPUS_SPACE`. They name the twin's resources and drive hook registration.
+
+The setup guide is [docs/setup/README.md](docs/setup/README.md). [docs/teaching/README.md](docs/teaching/README.md) is a teaching guide to the twin's concepts, with hands-on exercises that run locally.
+
 ## The Twin's Own Release Pipeline (as code)
 
 Each push to `main` builds a **release candidate**: the image `cmdemo1/digitaltwin:1.0.<run>` in ACR, plus the Octopus package `cmdemo1-digitaltwin.1.0.<run>.zip`. The package holds the compiled ARM template, the Bicep sources, `deploy/scripts/*` and `scripts/register-hooks.sh`, and is kept as a workflow artifact. GitHub Actions deploys it with `deploy/scripts/deploy-twin.sh`, then gates it with `deploy/scripts/verify-twin.sh`: Healthy at the release version, 0 dead letters, database under budget, MCP answering.

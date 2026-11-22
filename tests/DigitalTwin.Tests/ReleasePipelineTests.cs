@@ -10,8 +10,8 @@ public sealed partial class ReleasePipelineTests
     [Fact]
     public void DeploymentsOfTheTwinsOwnOctopusProjectAreAttributedToTheObserverNotTheSystem()
     {
-        Assert.Equal("twin-observer", Cmdemo1PlatformCatalog.ResolvePipelineIdFromOctopusProject("cmdemo1-digitaltwin"));
-        Assert.Null(Cmdemo1PlatformCatalog.ResolveDeployableFromOctopusProject("cmdemo1-digitaltwin"));
+        Assert.Equal("twin-observer", PlatformCatalog.ResolvePipelineIdFromOctopusProject("cmdemo1-digitaltwin"));
+        Assert.Null(PlatformCatalog.ResolveDeployableFromOctopusProject("cmdemo1-digitaltwin"));
     }
 
     [Fact]

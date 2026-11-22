@@ -1,4 +1,5 @@
 using System.Text.Json;
+using DigitalTwin.Core.Hierarchy;
 using DigitalTwin.Core.ReliabilityAndDrift;
 using DigitalTwin.Core.RuntimeAndPlatform;
 using DigitalTwin.Core.SourceAndChange;
@@ -43,7 +44,7 @@ public static class DriftEvaluator
 
         var pinnedByStage = ParsePinnedVersions(desiredConfig.PinnedVersionsJson);
         var specs = ParseDeployableSpecs(desiredConfig.SystemJson);
-        var activeStages = new[] { "tdd", "uat", "prod" };
+        var activeStages = PlatformCatalog.DeliveryStages;
 
         // 1. Compare pinned versions (GitOps versions.json) vs observed running versions (Container App image tag / SWA build-facts)
         foreach (var stage in activeStages)
@@ -162,8 +163,8 @@ public static class DriftEvaluator
             }
 
             // Pending promotion check (uat/prod behind tdd)
-            if (!stage.Equals("tdd", StringComparison.OrdinalIgnoreCase) &&
-                pinnedByStage.TryGetValue("tdd", out var tddPins))
+            if (!stage.Equals(PlatformCatalog.FirstStage, StringComparison.OrdinalIgnoreCase) &&
+                pinnedByStage.TryGetValue(PlatformCatalog.FirstStage, out var tddPins))
             {
                 foreach (var (depName, tddVersion) in tddPins)
                 {

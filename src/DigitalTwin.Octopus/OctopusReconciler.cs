@@ -11,7 +11,7 @@ namespace DigitalTwin.Octopus;
 /// </summary>
 public sealed class OctopusReconciler(IHttpClientFactory httpClientFactory, IOptions<OctopusOptions> options, IOctopusSyncService sync) : ISourceReconciler
 {
-    private static readonly string[] Stages = ["tdd", "uat", "prod"];
+    private static IReadOnlyList<string> Stages => PlatformCatalog.DeliveryStages;
 
     public string Source => "Octopus";
 
@@ -19,12 +19,12 @@ public sealed class OctopusReconciler(IHttpClientFactory httpClientFactory, IOpt
     {
         if (string.IsNullOrWhiteSpace(options.Value.ApiKey))
         {
-            return [new ReconciliationCheck(Source, "deployed versions", Cmdemo1PlatformCatalog.OctopusSpaceId, 0, 0, [], [], "OCTOPUS_API_KEY not configured")];
+            return [new ReconciliationCheck(Source, "deployed versions", PlatformCatalog.OctopusSpaceId, 0, 0, [], [], "OCTOPUS_API_KEY not configured")];
         }
         using var client = httpClientFactory.CreateClient("octopus");
         client.BaseAddress = new Uri(options.Value.Url.TrimEnd('/'));
         client.DefaultRequestHeaders.Add("X-Octopus-ApiKey", options.Value.ApiKey);
-        var space = Cmdemo1PlatformCatalog.OctopusSpaceId;
+        var space = PlatformCatalog.OctopusSpaceId;
         var checks = new List<ReconciliationCheck>
         {
             await DeployedVersionsAsync(client, space, twin, ct),
@@ -59,7 +59,7 @@ public sealed class OctopusReconciler(IHttpClientFactory httpClientFactory, IOpt
                 projects.TryGetValue(item.GetProperty("ProjectId").GetString() ?? "", out var project) &&
                 environments.TryGetValue(item.GetProperty("EnvironmentId").GetString() ?? "", out var stage) &&
                 Stages.Contains(stage) &&
-                Cmdemo1PlatformCatalog.ResolveDeployableFromOctopusProject(project) is { } deployable)
+                PlatformCatalog.ResolveDeployableFromOctopusProject(project) is { } deployable)
             {
                 source[$"{deployable}@{stage}"] = item.GetProperty("ReleaseVersion").GetString() ?? "";
             }

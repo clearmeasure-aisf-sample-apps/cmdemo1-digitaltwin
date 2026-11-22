@@ -23,7 +23,7 @@ public static class OctopusEventNormalizer
             {
                 return null;
             }
-            var serverUri = GetString(payload, "ServerUri")?.TrimEnd('/') ?? Cmdemo1PlatformCatalog.OctopusUrl;
+            var serverUri = GetString(payload, "ServerUri")?.TrimEnd('/') ?? PlatformCatalog.OctopusUrl;
             return NormalizeAuditEventElement(ev, serverUri, projectNamesById, environmentNamesById, IngestionChannel.Webhook, receivedAt, rawJson);
         }
 
@@ -36,7 +36,7 @@ public static class OctopusEventNormalizer
             {
                 return null;
             }
-            return NormalizeAuditEventElement(root, Cmdemo1PlatformCatalog.OctopusUrl, projectNamesById, environmentNamesById, IngestionChannel.Webhook, receivedAt, rawJson);
+            return NormalizeAuditEventElement(root, PlatformCatalog.OctopusUrl, projectNamesById, environmentNamesById, IngestionChannel.Webhook, receivedAt, rawJson);
         }
 
         return null;
@@ -111,14 +111,14 @@ public static class OctopusEventNormalizer
             ? en
             : InferStageFromMessage(message);
 
-        var pipelineId = Cmdemo1PlatformCatalog.ResolvePipelineIdFromOctopusProject(projectName);
-        var deployable = Cmdemo1PlatformCatalog.ResolveDeployableFromOctopusProject(projectName);
+        var pipelineId = PlatformCatalog.ResolvePipelineIdFromOctopusProject(projectName);
+        var deployable = PlatformCatalog.ResolveDeployableFromOctopusProject(projectName);
 
         var (eventType, subjectType, predicate, outcome) = MapDocumentChange(category, related, message) ?? MapCategory(category);
         var subjectId = deploymentId ?? releaseId ?? taskId ?? projectId ?? eventId;
         var sourceUrl = taskId is not null
-            ? $"{serverUri}/app#/{Cmdemo1PlatformCatalog.OctopusSpaceId}/tasks/{taskId}"
-            : $"{serverUri}/app#/{Cmdemo1PlatformCatalog.OctopusSpaceId}";
+            ? $"{serverUri}/app#/{PlatformCatalog.OctopusSpaceId}/tasks/{taskId}"
+            : $"{serverUri}/app#/{PlatformCatalog.OctopusSpaceId}";
 
         return new ObservedEvent
         {
@@ -219,7 +219,7 @@ public static class OctopusEventNormalizer
 
     private static string? InferProjectFromMessage(string message)
     {
-        foreach (var slug in new[] { "cmdemo1-ui", "cmdemo1-dashboard", "cmdemo1-system", "cmdemo1-scorecard-space", "cmdemo1-scorecard", "cmdemo1-aisf", "cmdemo1-fworker" })
+        foreach (var slug in PlatformCatalog.Current.OctopusProjectPipelines.Keys.OrderByDescending(k => k.Length))
         {
             if (message.Contains(slug, StringComparison.OrdinalIgnoreCase))
             {
@@ -231,7 +231,7 @@ public static class OctopusEventNormalizer
 
     private static string? InferStageFromMessage(string message)
     {
-        foreach (var stage in new[] { "tdd", "uat", "prod" })
+        foreach (var stage in PlatformCatalog.DeliveryStages)
         {
             if (message.Contains($" to {stage}", StringComparison.OrdinalIgnoreCase) ||
                 message.Contains($" on {stage}", StringComparison.OrdinalIgnoreCase) ||

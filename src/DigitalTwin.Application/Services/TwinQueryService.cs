@@ -19,7 +19,7 @@ public sealed class TwinQueryService(
     IGitHubRateLimitProvider rateLimitProvider,
     IIntakeQueueMonitor intakeMonitor)
 {
-    private static readonly string[] ActiveStageNames = ["tdd", "uat", "prod"];
+    private static IReadOnlyList<string> ActiveStageNames => PlatformCatalog.DeliveryStages;
     private const int DashboardChainCount = 6;
     private const int MaxDashboardPullRequestChains = 2;
     private static readonly string[] BoardWipColumns = ["Todo", "In Progress", "Review", "Merged", "TDD", "UAT"];
@@ -46,7 +46,7 @@ public sealed class TwinQueryService(
         var webhooks = await model.GetWebhookStatusesAsync(ct);
         var intakeQueue = await intakeMonitor.GetStatusAsync(ct);
 
-        var pipelines = Cmdemo1PlatformCatalog.Pipelines.Select(def =>
+        var pipelines = PlatformCatalog.Pipelines.Select(def =>
         {
             var repo = repos.FirstOrDefault(r => r.Name.Equals(def.Repository, StringComparison.OrdinalIgnoreCase));
             var stageVersions = new Dictionary<string, string?>(StringComparer.OrdinalIgnoreCase);
@@ -83,7 +83,7 @@ public sealed class TwinQueryService(
             return new PipelineSummaryDto(def, stageVersions, latestRun, openPrCount, activeDeployments, repo);
         }).ToList();
 
-        var stageSummaries = Cmdemo1PlatformCatalog.Stages.Select(stageDef =>
+        var stageSummaries = PlatformCatalog.Stages.Select(stageDef =>
         {
             var inst = stages.FirstOrDefault(s => s.StageName.Equals(stageDef.Name, StringComparison.OrdinalIgnoreCase));
             var stageWorkloads = workloads.Where(w => w.StageName.Equals(stageDef.Name, StringComparison.OrdinalIgnoreCase)).ToList();
@@ -94,15 +94,15 @@ public sealed class TwinQueryService(
         }).ToList();
 
         var workSummary = ComputeWorkSummary(workItems);
-        var dora7 = DoraMetricsCalculator.Calculate(deliveries, workSummary.ReworkRate, now, 7, "prod");
-        var dora28 = DoraMetricsCalculator.Calculate(deliveries, workSummary.ReworkRate, now, 28, "prod");
+        var dora7 = DoraMetricsCalculator.Calculate(deliveries, workSummary.ReworkRate, now, 7, PlatformCatalog.ProductionStage);
+        var dora28 = DoraMetricsCalculator.Calculate(deliveries, workSummary.ReworkRate, now, 28, PlatformCatalog.ProductionStage);
 
         var (costMtd, costYesterday) = ParseSystemCost(desired?.CostJson);
 
         return new TwinSummaryDto(
-            PlatformName: Cmdemo1PlatformCatalog.PlatformName,
-            SystemSlug: Cmdemo1PlatformCatalog.SystemSlug,
-            SystemName: Cmdemo1PlatformCatalog.SystemName,
+            PlatformName: PlatformCatalog.PlatformName,
+            SystemSlug: PlatformCatalog.SystemSlug,
+            SystemName: PlatformCatalog.SystemName,
             GeneratedAt: now,
             Pipelines: pipelines,
             Stages: stageSummaries,
@@ -117,7 +117,9 @@ public sealed class TwinQueryService(
             IntakeQueue: intakeQueue,
             CostMonthToDateUsd: costMtd,
             CostYesterdayUsd: costYesterday,
-            AsOf: scope.AsOf);
+            AsOf: scope.AsOf,
+            WorkItemsProjectNumber: PlatformCatalog.WorkItemsProjectNumber,
+            WorkItemRepository: PlatformCatalog.Current.GitHub.DefaultWorkItemRepository);
     }
 
     public Task<IntakeQueueStatus> GetIntakeQueueAsync(CancellationToken ct) => intakeMonitor.GetStatusAsync(ct);
@@ -130,11 +132,11 @@ public sealed class TwinQueryService(
         var nodes = new List<GraphNodeDto>();
         var edges = new List<GraphEdgeDto>();
 
-        nodes.Add(new GraphNodeDto("platform:cm", "Platform", Cmdemo1PlatformCatalog.PlatformName, "One level above observed systems", "healthy",
+        nodes.Add(new GraphNodeDto("platform:cm", "Platform", PlatformCatalog.PlatformName, "One level above observed systems", "healthy",
             new Dictionary<string, string?> { ["role"] = "Platform" }));
-        nodes.Add(new GraphNodeDto("system:cmdemo1", "System", Cmdemo1PlatformCatalog.SystemSlug, Cmdemo1PlatformCatalog.SystemName,
+        nodes.Add(new GraphNodeDto("system:cmdemo1", "System", PlatformCatalog.SystemSlug, PlatformCatalog.SystemName,
             summary.CriticalDriftCount > 0 ? "degraded" : "healthy",
-            new Dictionary<string, string?> { ["octopusSpace"] = Cmdemo1PlatformCatalog.OctopusSpaceId, ["gitopsRepo"] = Cmdemo1PlatformCatalog.SystemRepository }));
+            new Dictionary<string, string?> { ["octopusSpace"] = PlatformCatalog.OctopusSpaceId, ["gitopsRepo"] = PlatformCatalog.SystemRepository }));
         edges.Add(new GraphEdgeDto("platform:cm", "system:cmdemo1", "OBSERVES"));
 
         foreach (var p in summary.Pipelines)
@@ -148,7 +150,7 @@ public sealed class TwinQueryService(
                 p.Definition.IsTwinObserver ? "HOSTS_OBSERVER" : "HAS_PIPELINE"));
         }
 
-        foreach (var hb in Cmdemo1PlatformCatalog.HostingBoundaries)
+        foreach (var hb in PlatformCatalog.HostingBoundaries)
         {
             var hbId = $"boundary:{hb.Name}";
             nodes.Add(new GraphNodeDto(hbId, "HostingBoundary", hb.Name, $"{hb.Kind} ({hb.Location})", "healthy",
@@ -181,7 +183,7 @@ public sealed class TwinQueryService(
             }
         }
 
-        return new TwinGraphDto(Cmdemo1PlatformCatalog.PlatformName, Cmdemo1PlatformCatalog.SystemSlug, nodes, edges);
+        return new TwinGraphDto(PlatformCatalog.PlatformName, PlatformCatalog.SystemSlug, nodes, edges);
     }
 
     public async Task<DashboardStateDto> GetDashboardStateAsync(DateTimeOffset? asOf, CancellationToken ct)

@@ -76,6 +76,24 @@ variable "worker_container_image" {
   default     = "octopusdeploy/worker-tools:6-ubuntu.22.04"
 }
 
+variable "system_slug" {
+  description = "Short name of the observed system; names the twin's Azure resources (ca-<slug>-twin, ...)."
+  type        = string
+  default     = "cmdemo1"
+}
+
+variable "github_org" {
+  description = "GitHub organization the twin registers webhooks in."
+  type        = string
+  default     = "clearmeasure-aisf-sample-apps"
+}
+
+variable "platform_file" {
+  description = "Platform definition inside the package (for example docs/platforms/contoso.platform.json); empty observes cmdemo1."
+  type        = string
+  default     = ""
+}
+
 variable "resource_group" {
   description = "Azure resource group that hosts the twin."
   type        = string

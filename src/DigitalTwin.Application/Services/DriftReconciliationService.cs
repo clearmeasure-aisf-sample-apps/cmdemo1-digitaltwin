@@ -29,7 +29,7 @@ public sealed class DriftReconciliationService(
             .ToHashSet(StringComparer.OrdinalIgnoreCase);
 
         var evaluated = DriftEvaluator.Evaluate(desired, workloads, probes, resources, repos, now);
-        await state.PublishSetAsync(StateKinds.Drift, Cmdemo1PlatformCatalog.SystemSlug, evaluated, EventSourceKind.Twin, ct);
+        await state.PublishSetAsync(StateKinds.Drift, PlatformCatalog.SystemSlug, evaluated, EventSourceKind.Twin, ct);
 
         var opened = evaluated
             .Where(f => !previousActive.Contains(f.DriftKey))

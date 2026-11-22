@@ -30,7 +30,9 @@ public sealed record TwinSummaryDto(
     IntakeQueueStatus IntakeQueue,
     double? CostMonthToDateUsd,
     double? CostYesterdayUsd,
-    DateTimeOffset? AsOf = null);
+    DateTimeOffset? AsOf = null,
+    int WorkItemsProjectNumber = 0,
+    string? WorkItemRepository = null);
 
 public sealed record PipelineSummaryDto(
     PipelineDefinition Definition,

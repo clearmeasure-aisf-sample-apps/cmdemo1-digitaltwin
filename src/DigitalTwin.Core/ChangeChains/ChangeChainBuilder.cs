@@ -22,13 +22,12 @@ public sealed record ChangeChainSources(
 /// </summary>
 public static partial class ChangeChainBuilder
 {
-    private static readonly string[] DeliveryStages = ["tdd", "uat", "prod"];
     private static readonly string[] FailedConclusions = ["failure", "timed_out", "startup_failure"];
     private static readonly TimeSpan OpenPullRequestWindow = TimeSpan.FromDays(14);
 
     public static IReadOnlyList<ChangeChain> Build(ChangeChainSources sources, DateTimeOffset now)
     {
-        var observerPipelines = Cmdemo1PlatformCatalog.Pipelines.Where(p => p.IsTwinObserver).Select(p => p.Id).ToHashSet(StringComparer.OrdinalIgnoreCase);
+        var observerPipelines = PlatformCatalog.Pipelines.Where(p => p.IsTwinObserver).Select(p => p.Id).ToHashSet(StringComparer.OrdinalIgnoreCase);
         var anchors = sources.Releases.Select(r => (r.PipelineId, r.Version))
             .Concat(sources.Runs.Where(r => IsReleaseCandidateVersion(r.Version)).Select(r => (r.PipelineId, Version: r.Version!)))
             .Where(a => !observerPipelines.Contains(a.PipelineId))
@@ -102,10 +101,10 @@ public static partial class ChangeChainBuilder
             ReleaseCandidateStage(artifact, release, build, version),
             OctopusReleaseStage(release, artifact, build)
         };
-        stages.AddRange(DeliveryStages.Select(stage => DeliveryStage(stage, deliveries.Where(d => Same(d.StageName, stage)).ToList())));
+        stages.AddRange(PlatformCatalog.DeliveryStages.Select(stage => DeliveryStage(stage, deliveries.Where(d => Same(d.StageName, stage)).ToList())));
 
         var deployable = release?.DeployableName ?? deliveries.Select(d => d.DeployableName).FirstOrDefault(d => d is not null)
-            ?? Cmdemo1PlatformCatalog.Pipelines.FirstOrDefault(p => Same(p.Id, pipelineId))?.DeployableName;
+            ?? PlatformCatalog.Pipelines.FirstOrDefault(p => Same(p.Id, pipelineId))?.DeployableName;
         var prodDone = stages[^1].Status == ChainStageStatus.Succeeded ? stages[^1].FinishedAt : null;
         var commitAt = release?.CommittedAt ?? build?.CreatedAt;
 
@@ -128,7 +127,7 @@ public static partial class ChangeChainBuilder
     {
         var workItem = FindWorkItem(s, pr.Repository, pr, pr.HeadBranch, version: null);
         var stages = new List<ChainStage> { WorkStage(workItem, pr), PullRequestStage(pr, build: null) };
-        stages.AddRange(new[] { ChainStageKind.Build, ChainStageKind.ReleaseCandidate, ChainStageKind.OctopusRelease, ChainStageKind.Tdd, ChainStageKind.Uat, ChainStageKind.Prod }
+        stages.AddRange(new[] { ChainStageKind.Build, ChainStageKind.ReleaseCandidate, ChainStageKind.OctopusRelease }.Concat(DeliveryStageSlots.Kinds)
             .Select(kind => Pending(kind)));
         return Assemble(
             chainId: $"pr:{pr.Repository}#{pr.Number}",
@@ -278,12 +277,7 @@ public static partial class ChangeChainBuilder
 
     private static ChainStage DeliveryStage(string stage, List<DeliveryExecutionSnapshot> attempts)
     {
-        var kind = stage switch
-        {
-            "tdd" => ChainStageKind.Tdd,
-            "uat" => ChainStageKind.Uat,
-            _ => ChainStageKind.Prod
-        };
+        var kind = DeliveryStageSlots.KindOf(stage) ?? ChainStageKind.Prod;
         var latest = attempts.OrderBy(d => d.QueuedAt).LastOrDefault();
         if (latest is null)
         {

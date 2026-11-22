@@ -24,7 +24,7 @@ public sealed partial class OctopusSyncService(
     TimeProvider timeProvider,
     ILogger<OctopusSyncService> logger) : IOctopusSyncService
 {
-    private const string TwinSubscriptionName = "cmdemo1-digitaltwin";
+    private static string TwinSubscriptionName => PlatformCatalog.TwinServiceName;
 
     [GeneratedRegex(@"\b(?<sha>[0-9a-f]{40})\b", RegexOptions.Compiled)]
     private static partial Regex CommitShaRegex();
@@ -56,7 +56,7 @@ public sealed partial class OctopusSyncService(
             }
 
             using var client = CreateClient();
-            var space = Cmdemo1PlatformCatalog.OctopusSpaceId;
+            var space = PlatformCatalog.OctopusSpaceId;
             var baseUri = options.Value.Url.TrimEnd('/');
 
             var projectsJson = await GetRequiredAsync(client, $"/api/{space}/projects?take=100", ct);
@@ -130,8 +130,8 @@ public sealed partial class OctopusSyncService(
                     {
                         ReleaseId = rid,
                         ProjectSlug = projSlug,
-                        DeployableName = Cmdemo1PlatformCatalog.ResolveDeployableFromOctopusProject(projSlug),
-                        PipelineId = Cmdemo1PlatformCatalog.ResolvePipelineIdFromOctopusProject(projSlug),
+                        DeployableName = PlatformCatalog.ResolveDeployableFromOctopusProject(projSlug),
+                        PipelineId = PlatformCatalog.ResolvePipelineIdFromOctopusProject(projSlug),
                         ChannelName = cid is not null && channelById.TryGetValue(cid, out var cn) ? cn : "Default",
                         Version = version,
                         GitCommitSha = sha,
@@ -249,8 +249,8 @@ public sealed partial class OctopusSyncService(
                         DeploymentId = depId,
                         TaskId = taskId,
                         ProjectSlug = projSlug,
-                        DeployableName = Cmdemo1PlatformCatalog.ResolveDeployableFromOctopusProject(projSlug),
-                        PipelineId = Cmdemo1PlatformCatalog.ResolvePipelineIdFromOctopusProject(projSlug),
+                        DeployableName = PlatformCatalog.ResolveDeployableFromOctopusProject(projSlug),
+                        PipelineId = PlatformCatalog.ResolvePipelineIdFromOctopusProject(projSlug),
                         StageName = stageName,
                         ReleaseVersion = rel?.Version ?? releaseId,
                         ChannelName = channelId is not null && channelById.TryGetValue(channelId, out var cn) ? cn : rel?.ChannelName ?? "Default",
@@ -261,7 +261,7 @@ public sealed partial class OctopusSyncService(
                         StartedBy = SanitizeUser(deployedBy),
                         SignedOffBy = signOffReason is not null ? SanitizeUser(deployedBy) : null,
                         SignOffReason = signOffReason,
-                        IsPersonSignOff = signOffReason is not null && !string.Equals(deployedBy, "cmdemo1-github", StringComparison.OrdinalIgnoreCase),
+                        IsPersonSignOff = signOffReason is not null && !PlatformCatalog.Current.Octopus.AutomationUsers.Contains(deployedBy ?? "", StringComparer.OrdinalIgnoreCase),
                         HasPendingInterruption = hasPending,
                         HasGuidedFailure = hasGuided,
                         WaitsForKind = pendingHold is { ValueKind: JsonValueKind.Object } ph ? ph.GetProperty("Type").GetString() : null,
@@ -333,7 +333,7 @@ public sealed partial class OctopusSyncService(
                         Name = pkgId,
                         Version = ver,
                         RegistryOrFeed = "octopus-builtin-feed",
-                        PipelineId = Cmdemo1PlatformCatalog.ResolvePipelineIdFromOctopusProject(pkgId),
+                        PipelineId = PlatformCatalog.ResolvePipelineIdFromOctopusProject(pkgId),
                         PublishedAt = pub
                     });
                 }
@@ -405,7 +405,7 @@ public sealed partial class OctopusSyncService(
                     {
                         Id = $"octopus:{sub.GetProperty("Id").GetString()}",
                         Source = "octopus",
-                        Target = Cmdemo1PlatformCatalog.OctopusSpaceId,
+                        Target = PlatformCatalog.OctopusSpaceId,
                         EndpointUrl = hookUri,
                         IsActive = !disabled,
                         ExternalId = sub.GetProperty("Id").GetString(),
@@ -462,7 +462,7 @@ public sealed partial class OctopusSyncService(
     {
         var now = timeProvider.GetUtcNow();
         var endpointUrl = $"{twinPublicBaseUrl.TrimEnd('/')}/hooks/octopus";
-        var space = Cmdemo1PlatformCatalog.OctopusSpaceId;
+        var space = PlatformCatalog.OctopusSpaceId;
 
         if (string.IsNullOrWhiteSpace(options.Value.ApiKey) || string.IsNullOrWhiteSpace(options.Value.WebhookSecret))
         {

@@ -26,11 +26,9 @@ public sealed partial class AzureSyncService(
     TimeProvider timeProvider,
     ILogger<AzureSyncService> logger) : IAzureSyncService
 {
-    private static readonly string[] ArmResourceGroups =
-    [
-        Cmdemo1PlatformCatalog.NonprodResourceGroup,
-        Cmdemo1PlatformCatalog.ProdResourceGroup
-    ];
+    private static IReadOnlyList<string> ArmResourceGroups => PlatformCatalog.ResourceGroups;
+
+    private static string ResourceGroupList => string.Join(", ", PlatformCatalog.ResourceGroups.Select(rg => $"\"{rg}\""));
 
     private static readonly string[] EventGridIncludedEventTypes =
     [
@@ -144,7 +142,7 @@ public sealed partial class AzureSyncService(
                 }
                 else if (res.Type.Equals("microsoft.web/staticsites", StringComparison.OrdinalIgnoreCase))
                 {
-                    var stage = res.StageName ?? "tdd";
+                    var stage = res.StageName ?? PlatformCatalog.FirstStage;
                     var deployable = res.DeployableName ?? "dashboard";
                     pinned.TryGetValue(stage, out var stagePins);
                     string? pinnedVer = null;
@@ -178,7 +176,7 @@ public sealed partial class AzureSyncService(
                 .ToDictionary(s => s.StageName, StringComparer.OrdinalIgnoreCase);
 
             var stageUpdates = new List<EnvironmentInstanceSnapshot>();
-            foreach (var stageDef in Cmdemo1PlatformCatalog.Stages)
+            foreach (var stageDef in PlatformCatalog.Stages)
             {
                 existingStages.TryGetValue(stageDef.Name, out var inst);
                 inst ??= new EnvironmentInstanceSnapshot
@@ -280,7 +278,7 @@ public sealed partial class AzureSyncService(
                     {
                         Id = "azure:eventgrid",
                         Source = "azure",
-                        Target = "rg-cmdemo1-nonprod,rg-cmdemo1-prod",
+                        Target = string.Join(",", PlatformCatalog.ResourceGroups),
                         EndpointUrl = endpointUrl,
                         IsActive = false,
                         Detail = msg,
@@ -439,9 +437,9 @@ public sealed partial class AzureSyncService(
         DateTimeOffset now,
         CancellationToken ct)
     {
-        var kql = """
+        var kql = $"""
             resources
-            | where resourceGroup in~ ("rg-cmdemo1-nonprod", "rg-cmdemo1-prod")
+            | where resourceGroup in~ ({ResourceGroupList})
             | project id, name, type, resourceGroup, location, tags,
                       provisioningState = tostring(properties.provisioningState),
                       fqdn = tostring(properties.configuration.ingress.fqdn),
@@ -498,7 +496,7 @@ public sealed partial class AzureSyncService(
 
             var stage = !string.IsNullOrWhiteSpace(tagEnv)
                 ? tagEnv
-                : Cmdemo1PlatformCatalog.InferStageFromAzureResourceName(name, rg);
+                : PlatformCatalog.InferStageFromAzureResourceName(name, rg);
 
             var address = !string.IsNullOrWhiteSpace(fqdn) ? $"https://{fqdn}"
                 : !string.IsNullOrWhiteSpace(defaultHost) ? $"https://{defaultHost}"
@@ -622,7 +620,7 @@ public sealed partial class AzureSyncService(
             }
         }
 
-        var stage = res.StageName ?? "tdd";
+        var stage = res.StageName ?? PlatformCatalog.FirstStage;
         var deployable = res.DeployableName ?? "ui";
         string? pinnedVer = null;
         if (pinned.TryGetValue(stage, out var stagePins))
@@ -670,7 +668,7 @@ public sealed partial class AzureSyncService(
     {
         var kql = $"""
             resourcechanges
-            | where resourceGroup in~ ("rg-cmdemo1-nonprod", "rg-cmdemo1-prod")
+            | where resourceGroup in~ ({ResourceGroupList})
             | project id,
                       targetResourceId = tostring(properties.targetResourceId),
                       targetResourceType = tostring(properties.targetResourceType),
@@ -740,7 +738,7 @@ public sealed partial class AzureSyncService(
                 {
                     Id = "azure:eventgrid",
                     Source = "azure",
-                    Target = "rg-cmdemo1-nonprod,rg-cmdemo1-prod",
+                    Target = string.Join(",", PlatformCatalog.ResourceGroups),
                     EndpointUrl = "/hooks/azure",
                     IsActive = false,
                     Detail = $"Microsoft.EventGrid provider is {providerState}; Resource Graph & ARM reconciliation pollers active",
@@ -797,12 +795,12 @@ public sealed partial class AzureSyncService(
         try
         {
             using var acr = httpClientFactory.CreateClient("acr");
-            acr.BaseAddress = new Uri($"https://{Cmdemo1PlatformCatalog.AcrLoginServer}");
+            acr.BaseAddress = new Uri($"https://{PlatformCatalog.AcrLoginServer}");
 
             var exchangeContent = new FormUrlEncodedContent(new Dictionary<string, string>
             {
                 ["grant_type"] = "access_token",
-                ["service"] = Cmdemo1PlatformCatalog.AcrLoginServer,
+                ["service"] = PlatformCatalog.AcrLoginServer,
                 ["tenant"] = options.Value.TenantId,
                 ["access_token"] = armToken
             });
@@ -815,7 +813,7 @@ public sealed partial class AzureSyncService(
             var tokenContent = new FormUrlEncodedContent(new Dictionary<string, string>
             {
                 ["grant_type"] = "refresh_token",
-                ["service"] = Cmdemo1PlatformCatalog.AcrLoginServer,
+                ["service"] = PlatformCatalog.AcrLoginServer,
                 ["scope"] = "repository:cmdemo1/ui:metadata_read",
                 ["refresh_token"] = refreshToken
             });
@@ -840,7 +838,7 @@ public sealed partial class AzureSyncService(
                         Kind = "ContainerImage",
                         Name = "cmdemo1/ui",
                         Version = tag,
-                        RegistryOrFeed = Cmdemo1PlatformCatalog.AcrLoginServer,
+                        RegistryOrFeed = PlatformCatalog.AcrLoginServer,
                         PipelineId = "app-ui",
                         PublishedAt = created
                     });
