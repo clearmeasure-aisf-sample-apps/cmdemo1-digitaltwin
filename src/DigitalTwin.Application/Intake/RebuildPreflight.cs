@@ -11,10 +11,10 @@ public sealed record RebuildKindComparison(int Live, int FromRaw, int MissingFro
 public sealed record RebuildPreflightReport(bool CanRebuild, int StateObservationsFolded, IReadOnlyDictionary<string, RebuildKindComparison> Kinds);
 
 /// <summary>
-/// Folds every processed raw state observation in memory (the same fold as time travel) and compares entity keys with the
+/// Folds every processed raw state observation (archive and SQL) in memory (the same fold as time travel) and compares entity keys with the
 /// live read models. A live row the raw store cannot reproduce would be lost by a rebuild, so the rebuild refuses to start.
 /// </summary>
-public sealed class RebuildPreflight(IRawIntakeStore rawStore, ITwinStore store)
+public sealed class RebuildPreflight(RawIntakeHistory history, ITwinStore store)
 {
     private const int PageSize = 200;
 
@@ -23,15 +23,8 @@ public sealed class RebuildPreflight(IRawIntakeStore rawStore, ITwinStore store)
         var latest = new Dictionary<(string Kind, string Subject), ObservedEvent>();
         var drift = new List<ObservedEvent>();
         var folded = 0;
-        long after = 0;
-        while (true)
+        await foreach (var page in history.ReadPagesAsync(PageSize, ct))
         {
-            var page = await rawStore.ReadPageAsync(after, PageSize, ct);
-            if (page.Count == 0)
-            {
-                break;
-            }
-            after = page[^1].Sequence;
             foreach (var raw in page.Where(r => r.ProcessedAt is not null && r.Kind == IntakeKind.ObservedBatch))
             {
                 foreach (var ev in IntakeNormalizer.Normalize(raw).Where(StateObservations.IsStateEvent))

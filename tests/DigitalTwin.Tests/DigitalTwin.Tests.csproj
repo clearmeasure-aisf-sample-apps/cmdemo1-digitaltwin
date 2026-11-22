@@ -24,6 +24,7 @@
     <ProjectReference Include="..\..\src\DigitalTwin.Probes\DigitalTwin.Probes.csproj" />
     <ProjectReference Include="..\..\src\DigitalTwin.Persistence\DigitalTwin.Persistence.csproj" />
     <ProjectReference Include="..\..\src\DigitalTwin.Messaging\DigitalTwin.Messaging.csproj" />
+    <ProjectReference Include="..\..\src\DigitalTwin.Archive\DigitalTwin.Archive.csproj" />
   </ItemGroup>
 
 </Project>

@@ -223,6 +223,10 @@ jobs:
             echo "$STATUS" | jq '{running, lastError, report: (.lastReport | {aborted, identical, readModelsIdentical, startedAt, finishedAt, rawEventsReplayed, rawEventsFailed, journalEventsRebuilt, differences, fingerprintAfter})}' >&2
             echo "$STATUS"
           }
+          # Storage: database usage stays well under the Basic tier's 2 GB; old raw events live in the Blob archive.
+          curl -fsS -H "X-Twin-Key: ${TWIN_API_KEY}" "${TWIN_URL}/api/admin/storage" \
+            | jq '{database: {usedMb: .database.usedMb, maxMb: .database.maxMb, largestTablesMb: .database.largestTablesMb}, rawIntake: {total: .rawIntake.total, deadLettered: .rawIntake.deadLettered}, archive: {enabled: .archive.enabled, days: .archive.days, oldestDay: .archive.oldestDay}}'
+          curl -fsS -H "X-Twin-Key: ${TWIN_API_KEY}" "${TWIN_URL}/api/admin/storage" | jq -e '.archive.enabled == true and .database.usedMb < 1500' >/dev/null
           if [ "${VERIFY_REBUILD}" = "true" ]; then
             FIRST=$(rebuild "")
             echo "$FIRST" | jq -e '.lastReport.readModelsIdentical == true and .lastReport.rawEventsFailed == 0' >/dev/null

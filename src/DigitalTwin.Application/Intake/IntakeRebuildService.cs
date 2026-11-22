@@ -25,7 +25,8 @@ public sealed record IntakeRebuildReport(
 public sealed record IntakeRebuildStatus(bool Running, DateTimeOffset? StartedAt, int RawEventsReplayedSoFar, IntakeRebuildReport? LastReport, string? LastError);
 
 public sealed class IntakeRebuildService(
-    IRawIntakeStore rawStore,
+    RawIntakeHistory history,
+    MaintenanceLock maintenance,
     ITwinStore store,
     IntakeEventApplier applier,
     ProjectionGate gate,
@@ -77,6 +78,8 @@ public sealed class IntakeRebuildService(
     /// <param name="force">Rebuild even when the raw store cannot reproduce every live read-model row (those rows are lost).</param>
     public async Task<IntakeRebuildReport> RebuildFromRawAsync(bool force, CancellationToken ct)
     {
+        using var maintenanceHeld = await maintenance.TryEnterAsync("rebuild", TimeSpan.FromMinutes(10), ct)
+            ?? throw new InvalidOperationException($"Rebuild could not start: {maintenance.Holder} is running.");
         using var _ = await gate.EnterAsync(ct);
         var startedAt = timeProvider.GetUtcNow();
         _startedAt = startedAt;
@@ -98,16 +101,8 @@ public sealed class IntakeRebuildService(
         var replayed = 0;
         var rebuilt = 0;
         var failures = new List<string>();
-        long after = 0;
-        while (true)
+        await foreach (var page in history.ReadPagesAsync(PageSize, ct))
         {
-            var page = await rawStore.ReadPageAsync(after, PageSize, ct);
-            if (page.Count == 0)
-            {
-                break;
-            }
-
-            after = page[^1].Sequence;
             // Rows still queued behind the gate are not in the "before" state; live processing applies them next.
             var processed = page.Where(r => r.ProcessedAt is not null).ToList();
             try
