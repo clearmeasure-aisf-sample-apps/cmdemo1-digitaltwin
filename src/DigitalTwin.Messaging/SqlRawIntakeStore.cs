@@ -43,7 +43,12 @@ public sealed class SqlRawIntakeStore(IOptions<MessagingOptions> options) : IRaw
             CREATE UNIQUE CLUSTERED INDEX ix_raw_intake_sequence ON twin.raw_intake_events (sequence);
             CREATE INDEX ix_raw_intake_pending ON twin.raw_intake_events (processed_at, dead_lettered_at, received_at);
         END
+        IF NOT EXISTS (SELECT 1 FROM sys.indexes WHERE name = 'ix_raw_intake_received' AND object_id = OBJECT_ID('twin.raw_intake_events'))
+            CREATE INDEX ix_raw_intake_received ON twin.raw_intake_events (received_at) INCLUDE (processed_at);
         """;
+
+    // Retention reads and deletes whole days; the Basic tier needs more than the 30 s default.
+    private const int RetentionCommandTimeoutSeconds = 120;
 
     private string ConnectionString => options.Value.ConnectionString;
 
@@ -159,43 +164,64 @@ public sealed class SqlRawIntakeStore(IOptions<MessagingOptions> options) : IRaw
             LastProcessedAt: reader.IsDBNull(6) ? null : reader.GetDateTimeOffset(6));
     }
 
+    /// <summary>Walks the days with index seeks on received_at: one probe per day instead of a scan of the raw table.</summary>
     public async Task<IReadOnlyList<DateOnly>> GetArchivableDaysAsync(DateTimeOffset before, CancellationToken ct)
     {
         await using var conn = new SqlConnection(ConnectionString);
         await conn.OpenAsync(ct);
-        await using var cmd = new SqlCommand("""
-            SELECT DISTINCT CAST(SWITCHOFFSET(received_at, '+00:00') AS date)
-            FROM twin.raw_intake_events
-            WHERE processed_at IS NOT NULL AND received_at < @before
-            """, conn);
-        cmd.Parameters.AddWithValue("@before", before);
         var days = new List<DateOnly>();
-        await using var reader = await cmd.ExecuteReaderAsync(ct);
-        while (await reader.ReadAsync(ct))
+        var from = DateTimeOffset.MinValue;
+        while (true)
         {
-            var day = DateOnly.FromDateTime(reader.GetDateTime(0));
-            if (new DateTimeOffset(day.AddDays(1).ToDateTime(TimeOnly.MinValue), TimeSpan.Zero) <= before)
+            await using var cmd = new SqlCommand("""
+                SELECT MIN(received_at) FROM twin.raw_intake_events
+                WHERE received_at >= @from AND received_at < @before AND processed_at IS NOT NULL
+                """, conn) { CommandTimeout = RetentionCommandTimeoutSeconds };
+            cmd.Parameters.AddWithValue("@from", from);
+            cmd.Parameters.AddWithValue("@before", before);
+            if (await cmd.ExecuteScalarAsync(ct) is not DateTimeOffset first)
             {
-                days.Add(day);
+                return days;
             }
+            var day = DateOnly.FromDateTime(first.UtcDateTime);
+            var dayEnd = new DateTimeOffset(day.AddDays(1).ToDateTime(TimeOnly.MinValue), TimeSpan.Zero);
+            if (dayEnd > before)
+            {
+                return days;
+            }
+            days.Add(day);
+            from = dayEnd;
         }
-        return days.Order().ToList();
     }
 
     public async Task<IReadOnlyList<RawIntakeEvent>> ReadProcessedDayPageAsync(DateOnly day, long afterSequence, int take, CancellationToken ct)
     {
         await using var conn = new SqlConnection(ConnectionString);
         await conn.OpenAsync(ct);
+        var start = new DateTimeOffset(day.ToDateTime(TimeOnly.MinValue), TimeSpan.Zero);
+
+        // The sequence bound comes from the received_at index; the page itself is a clustered seek on sequence.
+        await using var bounds = new SqlCommand(
+            "SELECT MAX(sequence) FROM twin.raw_intake_events WHERE received_at >= @start AND received_at < @end", conn)
+            { CommandTimeout = RetentionCommandTimeoutSeconds };
+        bounds.Parameters.AddWithValue("@start", start);
+        bounds.Parameters.AddWithValue("@end", start.AddDays(1));
+        if (await bounds.ExecuteScalarAsync(ct) is not long last)
+        {
+            return [];
+        }
+
         await using var cmd = new SqlCommand($"""
             SELECT TOP (@take) {Columns} FROM twin.raw_intake_events
-            WHERE processed_at IS NOT NULL AND received_at >= @start AND received_at < @end AND sequence > @after
+            WHERE sequence > @after AND sequence <= @last
+              AND processed_at IS NOT NULL AND received_at >= @start AND received_at < @end
             ORDER BY sequence
-            """, conn);
-        var start = new DateTimeOffset(day.ToDateTime(TimeOnly.MinValue), TimeSpan.Zero);
+            """, conn) { CommandTimeout = RetentionCommandTimeoutSeconds };
         cmd.Parameters.AddWithValue("@take", take);
+        cmd.Parameters.AddWithValue("@after", afterSequence);
+        cmd.Parameters.AddWithValue("@last", last);
         cmd.Parameters.AddWithValue("@start", start);
         cmd.Parameters.AddWithValue("@end", start.AddDays(1));
-        cmd.Parameters.AddWithValue("@after", afterSequence);
         var list = new List<RawIntakeEvent>();
         await using var reader = await cmd.ExecuteReaderAsync(ct);
         while (await reader.ReadAsync(ct))
@@ -213,7 +239,8 @@ public sealed class SqlRawIntakeStore(IOptions<MessagingOptions> options) : IRaw
         foreach (var chunk in ids.Chunk(500))
         {
             await using var cmd = new SqlCommand(
-                "DELETE FROM twin.raw_intake_events WHERE id IN (SELECT CAST(value AS uniqueidentifier) FROM OPENJSON(@ids))", conn);
+                "DELETE FROM twin.raw_intake_events WHERE id IN (SELECT CAST(value AS uniqueidentifier) FROM OPENJSON(@ids))", conn)
+                { CommandTimeout = RetentionCommandTimeoutSeconds };
             cmd.Parameters.AddWithValue("@ids", JsonSerializer.Serialize(chunk));
             deleted += await cmd.ExecuteNonQueryAsync(ct);
         }
