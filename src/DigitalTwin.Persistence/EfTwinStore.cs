@@ -192,6 +192,7 @@ public sealed partial class EfTwinStore(IDbContextFactory<TwinDbContext> factory
 
     public async Task<IReadOnlyList<ObservedEvent>> QueryEventsAsync(
         DateTimeOffset? since,
+        DateTimeOffset? until,
         EventSourceKind? source,
         string? pipelineId,
         string? stageName,
@@ -201,10 +202,15 @@ public sealed partial class EfTwinStore(IDbContextFactory<TwinDbContext> factory
     {
         await using var db = await factory.CreateDbContextAsync(ct);
         var query = db.ObservedEvents.AsNoTracking().AsQueryable();
+        var sqlite = db.Database.IsSqlite();
 
-        if (since is not null)
+        if (since is not null && !sqlite)
         {
             query = query.Where(e => e.OccurredAt >= since.Value);
+        }
+        if (until is not null && !sqlite)
+        {
+            query = query.Where(e => e.OccurredAt <= until.Value);
         }
         if (source is not null)
         {
@@ -227,7 +233,7 @@ public sealed partial class EfTwinStore(IDbContextFactory<TwinDbContext> factory
             query = query.Where(e => e.EventType != StateKinds.EventType);
         }
 
-        if (!db.Database.IsSqlite())
+        if (!sqlite)
         {
             return await query
                 .OrderByDescending(e => e.OccurredAt)
@@ -236,9 +242,10 @@ public sealed partial class EfTwinStore(IDbContextFactory<TwinDbContext> factory
                 .ToListAsync(ct);
         }
 
-        // SQLite (unit tests) cannot ORDER BY DateTimeOffset server-side.
+        // SQLite (unit tests) cannot filter or ORDER BY DateTimeOffset server-side.
         var rows = await query.ToListAsync(ct);
         return rows
+            .Where(e => (since is null || e.OccurredAt >= since) && (until is null || e.OccurredAt <= until))
             .OrderByDescending(e => e.OccurredAt)
             .ThenByDescending(e => e.Id)
             .Take(limit)
@@ -438,7 +445,7 @@ public sealed partial class EfTwinStore(IDbContextFactory<TwinDbContext> factory
     public async Task<IReadOnlyList<DeploymentFreezeSnapshot>> GetFreezesAsync(CancellationToken ct)
     {
         await using var db = await factory.CreateDbContextAsync(ct);
-        return await db.DeploymentFreezes.AsNoTracking().ToListAsync(ct);
+        return await db.DeploymentFreezes.AsNoTracking().OrderBy(f => f.FreezeId).ToListAsync(ct);
     }
 
     public async Task UpsertDesiredConfigAsync(DesiredSystemConfigSnapshot config, CancellationToken ct)
@@ -467,7 +474,7 @@ public sealed partial class EfTwinStore(IDbContextFactory<TwinDbContext> factory
     public async Task<IReadOnlyList<EnvironmentInstanceSnapshot>> GetEnvironmentInstancesAsync(CancellationToken ct)
     {
         await using var db = await factory.CreateDbContextAsync(ct);
-        return await db.EnvironmentInstances.AsNoTracking().ToListAsync(ct);
+        return await db.EnvironmentInstances.AsNoTracking().OrderBy(e => e.StageName).ToListAsync(ct);
     }
 
     public async Task ReplaceWorkloadsAsync(IReadOnlyList<WorkloadRevisionSnapshot> workloads, CancellationToken ct)
@@ -482,7 +489,7 @@ public sealed partial class EfTwinStore(IDbContextFactory<TwinDbContext> factory
     public async Task<IReadOnlyList<WorkloadRevisionSnapshot>> GetWorkloadsAsync(CancellationToken ct)
     {
         await using var db = await factory.CreateDbContextAsync(ct);
-        return await db.WorkloadRevisions.AsNoTracking().ToListAsync(ct);
+        return await db.WorkloadRevisions.AsNoTracking().OrderBy(w => w.Id).ToListAsync(ct);
     }
 
     public async Task ReplaceAzureResourcesAsync(IReadOnlyList<AzureResourceSnapshot> resources, CancellationToken ct)
@@ -511,7 +518,7 @@ public sealed partial class EfTwinStore(IDbContextFactory<TwinDbContext> factory
     public async Task<IReadOnlyList<HealthProbeSnapshot>> GetHealthProbesAsync(CancellationToken ct)
     {
         await using var db = await factory.CreateDbContextAsync(ct);
-        return await db.HealthProbes.AsNoTracking().ToListAsync(ct);
+        return await db.HealthProbes.AsNoTracking().OrderBy(p => p.TargetKey).ToListAsync(ct);
     }
 
     public async Task ReconcileDriftFindingsAsync(IReadOnlyList<DriftFinding> evaluated, DateTimeOffset evaluatedAt, CancellationToken ct)

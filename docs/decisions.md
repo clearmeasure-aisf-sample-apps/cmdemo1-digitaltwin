@@ -175,3 +175,16 @@ Following the domain research in the prompt's prior-art references:
   - On the first start, existing rows are seeded into the raw store as baseline state observations, so history outside the pollers' windows survives a rebuild.
 - **Rebuild**: `/api/admin/rebuild` runs under a gate that pauses live application. It fingerprints every read model and the journal, clears them, replays the processed raw rows, fingerprints again, and reports `identical`. Rows still queued behind the gate are left for live processing. The rebuild runs detached, so an HTTP timeout cannot abort it.
 - **Not projected**: ingestion cursors and the GitHub quota are operational telemetry.
+
+## ADR-017: Time Travel by Folding State Observations
+
+- **Context**: Point-in-time questions ("what was in uat at 14:00?", "which resources existed yesterday?") need state history. ADR-016 makes every read-model change an event, so the journal already holds that history.
+- **Decision**:
+  - Read models are reached through `ITwinReadModel`, implemented by the live store and by `PointInTimeReadModel`.
+  - For `asOf`, `ITwinStore.GetLatestStateEventsAsync` returns the newest state observation per (kind, subject) at or before that instant: a `RANK()` window over the new `IX_ObservedEvents_StateAsOf` index on SQL Server. Drift additionally folds its full history, because the live projection keeps detection and resolution times.
+  - The fold reuses the projection's latest-wins rule (`StateObservations.IsNewer`), so as-of-now equals the live tables, which a test checks.
+  - `TwinQueryService` resolves `asOf` once per request into a `TwinReadScope` (model plus "now"), so DORA windows and relative ages are computed at that instant.
+  - Built models are cached briefly per instant, which keeps a dashboard replay cheap.
+- **Not historical**: ingestion cursors (empty as of a past instant), the GitHub quota and the intake queue are live operational telemetry.
+- **Rebuild interplay**: live intake messages that cannot enter the projection gate within 20 seconds (a rebuild is running) throw `IntakeApplyDeferredException`, which Wolverine reschedules indefinitely instead of dead-lettering. A rebuild replays raw rows page by page: appending is earliest-wins and projecting is latest-wins, so batching gives the identical result with far fewer database round trips.
+

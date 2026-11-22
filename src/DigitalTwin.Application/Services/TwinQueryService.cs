@@ -14,29 +14,33 @@ namespace DigitalTwin.Application.Services;
 
 public sealed class TwinQueryService(
     ITwinStore store,
+    TwinTimeTravel timeTravel,
     IGitHubRateLimitProvider rateLimitProvider,
-    IIntakeQueueMonitor intakeMonitor,
-    TimeProvider timeProvider)
+    IIntakeQueueMonitor intakeMonitor)
 {
     private static readonly string[] ActiveStageNames = ["tdd", "uat", "prod"];
     private static readonly string[] BoardWipColumns = ["Todo", "In Progress", "Review", "Merged", "TDD", "UAT"];
 
-    public async Task<TwinSummaryDto> GetSummaryAsync(CancellationToken ct)
+    public async Task<TwinSummaryDto> GetSummaryAsync(DateTimeOffset? asOf, CancellationToken ct)
+        => await GetSummaryAsync(await timeTravel.ResolveAsync(asOf, ct), ct);
+
+    private async Task<TwinSummaryDto> GetSummaryAsync(TwinReadScope scope, CancellationToken ct)
     {
-        var now = timeProvider.GetUtcNow();
-        var desired = await store.GetDesiredConfigAsync(ct);
+        var model = scope.Model;
+        var now = scope.Now;
+        var desired = await model.GetDesiredConfigAsync(ct);
         var pinned = DriftEvaluator.ParsePinnedVersions(desired?.PinnedVersionsJson);
-        var repos = await store.GetRepositoriesAsync(ct);
-        var prs = await store.GetSourceChangesAsync(ct);
-        var runs = await store.GetPipelineRunsAsync(200, ct);
-        var deliveries = await store.GetDeliveriesAsync(300, ct);
-        var stages = await store.GetEnvironmentInstancesAsync(ct);
-        var workloads = await store.GetWorkloadsAsync(ct);
-        var probes = await store.GetHealthProbesAsync(ct);
-        var drifts = await store.GetDriftFindingsAsync(includeResolved: false, ct);
-        var workItems = await store.GetWorkItemsAsync(ct);
-        var cursors = await store.GetCursorsAsync(ct);
-        var webhooks = await store.GetWebhookStatusesAsync(ct);
+        var repos = await model.GetRepositoriesAsync(ct);
+        var prs = await model.GetSourceChangesAsync(ct);
+        var runs = await model.GetPipelineRunsAsync(200, ct);
+        var deliveries = await model.GetDeliveriesAsync(300, ct);
+        var stages = await model.GetEnvironmentInstancesAsync(ct);
+        var workloads = await model.GetWorkloadsAsync(ct);
+        var probes = await model.GetHealthProbesAsync(ct);
+        var drifts = await model.GetDriftFindingsAsync(includeResolved: false, ct);
+        var workItems = await model.GetWorkItemsAsync(ct);
+        var cursors = await model.GetCursorsAsync(ct);
+        var webhooks = await model.GetWebhookStatusesAsync(ct);
         var intakeQueue = await intakeMonitor.GetStatusAsync(ct);
 
         var pipelines = Cmdemo1PlatformCatalog.Pipelines.Select(def =>
@@ -109,15 +113,17 @@ public sealed class TwinQueryService(
             GitHubQuota: rateLimitProvider.GetStatus(),
             IntakeQueue: intakeQueue,
             CostMonthToDateUsd: costMtd,
-            CostYesterdayUsd: costYesterday);
+            CostYesterdayUsd: costYesterday,
+            AsOf: scope.AsOf);
     }
 
     public Task<IntakeQueueStatus> GetIntakeQueueAsync(CancellationToken ct) => intakeMonitor.GetStatusAsync(ct);
 
-    public async Task<TwinGraphDto> GetGraphAsync(CancellationToken ct)
+    public async Task<TwinGraphDto> GetGraphAsync(DateTimeOffset? asOf, CancellationToken ct)
     {
-        var summary = await GetSummaryAsync(ct);
-        var resources = await store.GetAzureResourcesAsync(ct);
+        var scope = await timeTravel.ResolveAsync(asOf, ct);
+        var summary = await GetSummaryAsync(scope, ct);
+        var resources = await scope.Model.GetAzureResourcesAsync(ct);
         var nodes = new List<GraphNodeDto>();
         var edges = new List<GraphEdgeDto>();
 
@@ -175,19 +181,21 @@ public sealed class TwinQueryService(
         return new TwinGraphDto(Cmdemo1PlatformCatalog.PlatformName, Cmdemo1PlatformCatalog.SystemSlug, nodes, edges);
     }
 
-    public async Task<DashboardStateDto> GetDashboardStateAsync(CancellationToken ct)
+    public async Task<DashboardStateDto> GetDashboardStateAsync(DateTimeOffset? asOf, CancellationToken ct)
     {
-        var summary = await GetSummaryAsync(ct);
-        var events = await store.QueryEventsAsync(null, null, null, null, null, 100, ct);
-        var workItems = await store.GetWorkItemsAsync(ct);
-        var prs = (await store.GetSourceChangesAsync(ct)).Where(p => p.State == "open").OrderByDescending(p => p.UpdatedAt).Take(40).ToList();
-        var runs = await store.GetPipelineRunsAsync(60, ct);
-        var deliveries = await store.GetDeliveriesAsync(80, ct);
-        var runbooks = await store.GetRunbooksAsync(30, ct);
-        var freezes = await store.GetFreezesAsync(ct);
-        var drifts = await store.GetDriftFindingsAsync(includeResolved: false, ct);
-        var resources = await store.GetAzureResourcesAsync(ct);
-        var artifacts = await store.GetArtifactsAsync(ct);
+        var scope = await timeTravel.ResolveAsync(asOf, ct);
+        var model = scope.Model;
+        var summary = await GetSummaryAsync(scope, ct);
+        var events = await store.QueryEventsAsync(null, scope.AsOf, null, null, null, null, 100, ct);
+        var workItems = await model.GetWorkItemsAsync(ct);
+        var prs = (await model.GetSourceChangesAsync(ct)).Where(p => p.State == "open").OrderByDescending(p => p.UpdatedAt).Take(40).ToList();
+        var runs = await model.GetPipelineRunsAsync(60, ct);
+        var deliveries = await model.GetDeliveriesAsync(80, ct);
+        var runbooks = await model.GetRunbooksAsync(30, ct);
+        var freezes = await model.GetFreezesAsync(ct);
+        var drifts = await model.GetDriftFindingsAsync(includeResolved: false, ct);
+        var resources = await model.GetAzureResourcesAsync(ct);
+        var artifacts = await model.GetArtifactsAsync(ct);
 
         return new DashboardStateDto(
             summary,
@@ -200,31 +208,67 @@ public sealed class TwinQueryService(
             freezes,
             drifts,
             resources,
-            artifacts);
+            artifacts,
+            await timeTravel.GetHistoryStartAsync(ct));
+    }
+
+    public async Task<PointInTimeStateDto> GetStateAtAsync(DateTimeOffset asOf, CancellationToken ct)
+    {
+        var scope = await timeTravel.ResolveAsync(asOf, ct);
+        var summary = await GetSummaryAsync(scope, ct);
+        var resources = await scope.Model.GetAzureResourcesAsync(ct);
+        var workItems = await scope.Model.GetWorkItemsAsync(ct);
+        var drift = await scope.Model.GetDriftFindingsAsync(includeResolved: false, ct);
+        var historyStart = await timeTravel.GetHistoryStartAsync(ct);
+
+        var environments = summary.Stages
+            .Where(s => ActiveStageNames.Contains(s.Stage.Name, StringComparer.OrdinalIgnoreCase))
+            .Select(s => new StageAtDto(
+                s.Stage.Name,
+                summary.Pipelines
+                    .Where(p => p.Definition.DeployableName is not null)
+                    .ToDictionary(p => p.Definition.DeployableName!, p => p.StageVersions.GetValueOrDefault(s.Stage.Name), StringComparer.OrdinalIgnoreCase),
+                s.Workloads.Select(w => new WorkloadAtDto(w.DeployableName, w.RunningVersion, w.ActiveRevisionName, w.HealthState)).ToList(),
+                s.RecentDeliveries.OrderByDescending(d => d.QueuedAt)
+                    .Select(d => new DeliveryAtDto(d.ReleaseVersion, d.DeployableName, d.State, d.QueuedAt, d.FinishedAt))
+                    .FirstOrDefault()))
+            .ToList();
+
+        return new PointInTimeStateDto(
+            scope.Now,
+            historyStart,
+            historyStart is null || scope.Now < historyStart,
+            environments,
+            resources.Select(r => new AzureResourceAtDto(r.Name, r.Type, r.ResourceGroup)).ToList(),
+            workItems.GroupBy(w => w.Column, StringComparer.OrdinalIgnoreCase).OrderBy(g => g.Key, StringComparer.OrdinalIgnoreCase)
+                .ToDictionary(g => g.Key, g => g.Count(), StringComparer.OrdinalIgnoreCase),
+            workItems.Count(w => w.State == "open"),
+            drift.Select(d => $"{d.Severity}: {d.Summary}").ToList());
     }
 
     public Task<IReadOnlyList<ObservedEvent>> QueryEventsAsync(
         DateTimeOffset? since,
+        DateTimeOffset? until,
         EventSourceKind? source,
         string? pipelineId,
         string? stageName,
         string? eventType,
         int limit,
         CancellationToken ct)
-        => store.QueryEventsAsync(since, source, pipelineId, stageName, eventType, Math.Clamp(limit, 1, 500), ct);
+        => store.QueryEventsAsync(since, until, source, pipelineId, stageName, eventType, Math.Clamp(limit, 1, 500), ct);
 
-    public async Task<StageSummaryDto?> GetEnvironmentAsync(string stageName, CancellationToken ct)
+    public async Task<StageSummaryDto?> GetEnvironmentAsync(string stageName, DateTimeOffset? asOf, CancellationToken ct)
     {
-        var summary = await GetSummaryAsync(ct);
+        var summary = await GetSummaryAsync(asOf, ct);
         return summary.Stages.FirstOrDefault(s => s.Stage.Name.Equals(stageName, StringComparison.OrdinalIgnoreCase));
     }
 
-    public Task<IReadOnlyList<DriftFinding>> GetDriftAsync(bool includeResolved, CancellationToken ct)
-        => store.GetDriftFindingsAsync(includeResolved, ct);
+    public async Task<IReadOnlyList<DriftFinding>> GetDriftAsync(bool includeResolved, DateTimeOffset? asOf, CancellationToken ct)
+        => await (await timeTravel.ResolveAsync(asOf, ct)).Model.GetDriftFindingsAsync(includeResolved, ct);
 
-    public async Task<IReadOnlyList<WorkItemSnapshot>> GetWorkItemsAsync(string? column, string? worker, int limit, CancellationToken ct)
+    public async Task<IReadOnlyList<WorkItemSnapshot>> GetWorkItemsAsync(string? column, string? worker, int limit, DateTimeOffset? asOf, CancellationToken ct)
     {
-        var items = await store.GetWorkItemsAsync(ct);
+        var items = await (await timeTravel.ResolveAsync(asOf, ct)).Model.GetWorkItemsAsync(ct);
         return items
             .Where(i => string.IsNullOrWhiteSpace(column) || i.Column.Equals(column, StringComparison.OrdinalIgnoreCase))
             .Where(i => string.IsNullOrWhiteSpace(worker) || i.WorkerKind.Equals(worker, StringComparison.OrdinalIgnoreCase))
@@ -233,9 +277,9 @@ public sealed class TwinQueryService(
             .ToList();
     }
 
-    public async Task<IReadOnlyList<DeliveryExecutionSnapshot>> GetDeploymentsAsync(string? stage, string? deployable, int limit, CancellationToken ct)
+    public async Task<IReadOnlyList<DeliveryExecutionSnapshot>> GetDeploymentsAsync(string? stage, string? deployable, int limit, DateTimeOffset? asOf, CancellationToken ct)
     {
-        var all = await store.GetDeliveriesAsync(500, ct);
+        var all = await (await timeTravel.ResolveAsync(asOf, ct)).Model.GetDeliveriesAsync(500, ct);
         return all
             .Where(d => string.IsNullOrWhiteSpace(stage) || d.StageName.Equals(stage, StringComparison.OrdinalIgnoreCase))
             .Where(d => string.IsNullOrWhiteSpace(deployable) || string.Equals(d.DeployableName, deployable, StringComparison.OrdinalIgnoreCase))
@@ -244,24 +288,27 @@ public sealed class TwinQueryService(
             .ToList();
     }
 
-    public async Task<DoraMetricsSnapshot> GetMetricsAsync(int windowDays, string stage, CancellationToken ct)
+    public async Task<DoraMetricsSnapshot> GetMetricsAsync(int windowDays, string stage, DateTimeOffset? asOf, CancellationToken ct)
     {
-        var deliveries = await store.GetDeliveriesAsync(1000, ct);
-        var workItems = await store.GetWorkItemsAsync(ct);
+        var scope = await timeTravel.ResolveAsync(asOf, ct);
+        var deliveries = await scope.Model.GetDeliveriesAsync(1000, ct);
+        var workItems = await scope.Model.GetWorkItemsAsync(ct);
         var workSummary = ComputeWorkSummary(workItems);
-        return DoraMetricsCalculator.Calculate(deliveries, workSummary.ReworkRate, timeProvider.GetUtcNow(), Math.Clamp(windowDays, 1, 90), stage);
+        return DoraMetricsCalculator.Calculate(deliveries, workSummary.ReworkRate, scope.Now, Math.Clamp(windowDays, 1, 90), stage);
     }
 
-    public async Task<CausalExplanationDto> ExplainItemAsync(string query, CancellationToken ct)
+    public async Task<CausalExplanationDto> ExplainItemAsync(string query, DateTimeOffset? asOf, CancellationToken ct)
     {
         var normalized = query.Trim().TrimStart('#');
-        var workItems = await store.GetWorkItemsAsync(ct);
-        var prs = await store.GetSourceChangesAsync(ct);
-        var runs = await store.GetPipelineRunsAsync(300, ct);
-        var releases = await store.GetReleasesAsync(300, ct);
-        var deliveries = await store.GetDeliveriesAsync(500, ct);
-        var workloads = await store.GetWorkloadsAsync(ct);
-        var events = await store.QueryEventsAsync(null, null, null, null, null, 300, ct);
+        var scope = await timeTravel.ResolveAsync(asOf, ct);
+        var model = scope.Model;
+        var workItems = await model.GetWorkItemsAsync(ct);
+        var prs = await model.GetSourceChangesAsync(ct);
+        var runs = await model.GetPipelineRunsAsync(300, ct);
+        var releases = await model.GetReleasesAsync(300, ct);
+        var deliveries = await model.GetDeliveriesAsync(500, ct);
+        var workloads = await model.GetWorkloadsAsync(ct);
+        var events = await store.QueryEventsAsync(null, scope.AsOf, null, null, null, null, 300, ct);
 
         WorkItemSnapshot? matchedIssue = null;
         if (int.TryParse(normalized, out var num))

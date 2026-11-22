@@ -24,15 +24,15 @@ public static class TwinApiEndpoints
         app.MapGet("/_healthcheck", () => Results.Text("Healthy\n"));
 
         // Public dashboard hydration + SignalR/SSE stream + public summary/graph
-        app.MapGet("/api/dashboard/state", async (TwinQueryService queries, CancellationToken ct)
-            => Results.Ok(await queries.GetDashboardStateAsync(ct)));
+        app.MapGet("/api/dashboard/state", async (DateTimeOffset? asOf, TwinQueryService queries, CancellationToken ct)
+            => Results.Ok(await queries.GetDashboardStateAsync(asOf, ct)));
 
-        app.MapGet("/api/twin/summary", async (TwinQueryService queries, CancellationToken ct)
-            => Results.Ok(await queries.GetSummaryAsync(ct)))
+        app.MapGet("/api/twin/summary", async (DateTimeOffset? asOf, TwinQueryService queries, CancellationToken ct)
+            => Results.Ok(await queries.GetSummaryAsync(asOf, ct)))
             .AddEndpointFilter(TwinKeyAuth.ValidateOptionalTwinKey());
 
-        app.MapGet("/api/twin/graph", async (TwinQueryService queries, CancellationToken ct)
-            => Results.Ok(await queries.GetGraphAsync(ct)))
+        app.MapGet("/api/twin/graph", async (DateTimeOffset? asOf, TwinQueryService queries, CancellationToken ct)
+            => Results.Ok(await queries.GetGraphAsync(asOf, ct)))
             .AddEndpointFilter(TwinKeyAuth.ValidateOptionalTwinKey());
 
         app.MapGet("/api/intake/status", async (TwinQueryService queries, CancellationToken ct)
@@ -70,6 +70,8 @@ public static class TwinApiEndpoints
 
         protectedApi.MapGet("/events", async (
             DateTimeOffset? since,
+            DateTimeOffset? until,
+            DateTimeOffset? asOf,
             EventSourceKind? source,
             string? pipeline,
             string? stage,
@@ -77,41 +79,44 @@ public static class TwinApiEndpoints
             int? limit,
             TwinQueryService queries,
             CancellationToken ct)
-            => Results.Ok(await queries.QueryEventsAsync(since, source, pipeline, stage, eventType, limit ?? 100, ct)));
+            => Results.Ok(await queries.QueryEventsAsync(since, until ?? asOf, source, pipeline, stage, eventType, limit ?? 100, ct)));
 
-        protectedApi.MapGet("/pipelines", async (TwinQueryService queries, CancellationToken ct) =>
+        protectedApi.MapGet("/pipelines", async (DateTimeOffset? asOf, TwinQueryService queries, CancellationToken ct) =>
         {
-            var summary = await queries.GetSummaryAsync(ct);
+            var summary = await queries.GetSummaryAsync(asOf, ct);
             return Results.Ok(summary.Pipelines);
         });
 
-        protectedApi.MapGet("/pipelines/{id}", async (string id, TwinQueryService queries, CancellationToken ct) =>
+        protectedApi.MapGet("/pipelines/{id}", async (string id, DateTimeOffset? asOf, TwinQueryService queries, CancellationToken ct) =>
         {
-            var summary = await queries.GetSummaryAsync(ct);
+            var summary = await queries.GetSummaryAsync(asOf, ct);
             var pipeline = summary.Pipelines.FirstOrDefault(p => p.Definition.Id.Equals(id, StringComparison.OrdinalIgnoreCase));
             return pipeline is null ? Results.NotFound() : Results.Ok(pipeline);
         });
 
-        protectedApi.MapGet("/environments/{env}", async (string env, TwinQueryService queries, CancellationToken ct) =>
+        protectedApi.MapGet("/environments/{env}", async (string env, DateTimeOffset? asOf, TwinQueryService queries, CancellationToken ct) =>
         {
-            var stage = await queries.GetEnvironmentAsync(env, ct);
+            var stage = await queries.GetEnvironmentAsync(env, asOf, ct);
             return stage is null ? Results.NotFound() : Results.Ok(stage);
         });
 
-        protectedApi.MapGet("/drift", async (bool? includeResolved, TwinQueryService queries, CancellationToken ct)
-            => Results.Ok(await queries.GetDriftAsync(includeResolved ?? false, ct)));
+        protectedApi.MapGet("/drift", async (bool? includeResolved, DateTimeOffset? asOf, TwinQueryService queries, CancellationToken ct)
+            => Results.Ok(await queries.GetDriftAsync(includeResolved ?? false, asOf, ct)));
 
-        protectedApi.MapGet("/workitems", async (string? column, string? worker, int? limit, TwinQueryService queries, CancellationToken ct)
-            => Results.Ok(await queries.GetWorkItemsAsync(column, worker, limit ?? 100, ct)));
+        protectedApi.MapGet("/workitems", async (string? column, string? worker, int? limit, DateTimeOffset? asOf, TwinQueryService queries, CancellationToken ct)
+            => Results.Ok(await queries.GetWorkItemsAsync(column, worker, limit ?? 100, asOf, ct)));
 
-        protectedApi.MapGet("/deployments", async (string? stage, string? deployable, int? limit, TwinQueryService queries, CancellationToken ct)
-            => Results.Ok(await queries.GetDeploymentsAsync(stage, deployable, limit ?? 100, ct)));
+        protectedApi.MapGet("/deployments", async (string? stage, string? deployable, int? limit, DateTimeOffset? asOf, TwinQueryService queries, CancellationToken ct)
+            => Results.Ok(await queries.GetDeploymentsAsync(stage, deployable, limit ?? 100, asOf, ct)));
 
-        protectedApi.MapGet("/metrics", async (int? windowDays, string? stage, TwinQueryService queries, CancellationToken ct)
-            => Results.Ok(await queries.GetMetricsAsync(windowDays ?? 7, stage ?? "prod", ct)));
+        protectedApi.MapGet("/metrics", async (int? windowDays, string? stage, DateTimeOffset? asOf, TwinQueryService queries, CancellationToken ct)
+            => Results.Ok(await queries.GetMetricsAsync(windowDays ?? 7, stage ?? "prod", asOf, ct)));
 
-        protectedApi.MapGet("/explain", async (string q, TwinQueryService queries, CancellationToken ct)
-            => Results.Ok(await queries.ExplainItemAsync(q, ct)));
+        protectedApi.MapGet("/explain", async (string q, DateTimeOffset? asOf, TwinQueryService queries, CancellationToken ct)
+            => Results.Ok(await queries.ExplainItemAsync(q, asOf, ct)));
+
+        protectedApi.MapGet("/state-at", async (DateTimeOffset asOf, TwinQueryService queries, CancellationToken ct)
+            => Results.Ok(await queries.GetStateAtAsync(asOf, ct)));
 
         // Full rebuild of the journal and every read model from the raw intake store.
         protectedApi.MapPost("/admin/rebuild", async (bool? wait, IntakeRebuildService rebuild) =>
@@ -195,7 +200,7 @@ public static class TwinApiEndpoints
             ## REST Endpoints
             - GET {{baseUrl}}/api/twin/summary — System summary, pipelines, stages, DORA metrics, active drift, ingestion cursors
             - GET {{baseUrl}}/api/twin/graph — Typed entity & relationship graph (Platform -> System -> Pipelines -> Stages -> Workloads)
-            - GET {{baseUrl}}/api/events?since=&source=&pipeline=&stage=&limit= — Append-only normalized CloudEvents/CDEvents journal [X-Twin-Key]
+            - GET {{baseUrl}}/api/events?since=&until=&source=&pipeline=&stage=&limit= — Append-only normalized CloudEvents/CDEvents journal [X-Twin-Key]
             - GET {{baseUrl}}/api/pipelines — Pipeline definitions, stage versions, latest CI runs, open PRs [X-Twin-Key]
             - GET {{baseUrl}}/api/environments/{env} — Stage details (tdd|uat|prod|pool), workloads, revisions, probes, drift [X-Twin-Key]
             - GET {{baseUrl}}/api/drift?includeResolved=false — Desired vs observed drift findings [X-Twin-Key]
@@ -203,15 +208,20 @@ public static class TwinApiEndpoints
             - GET {{baseUrl}}/api/deployments?stage=&deployable=&limit= — Octopus releases, deployments, sign-offs, guided failures [X-Twin-Key]
             - GET {{baseUrl}}/api/metrics?windowDays=7&stage=prod — DORA 5-metric delivery scorecard [X-Twin-Key]
             - GET {{baseUrl}}/api/explain?q=<issue|pr|version|sha|task> — Causal trace across work -> PR -> build -> release -> deploy -> runtime [X-Twin-Key]
+            - GET {{baseUrl}}/api/state-at?asOf=<ISO-8601> — Time travel: versions per environment, Azure resources, board columns and drift at that instant [X-Twin-Key]
             - GET {{baseUrl}}/api/intake — Durable intake queue: depth, oldest pending age, dead letters, transport [X-Twin-Key]
             - GET {{baseUrl}}/api/admin/deadletters — Dead-lettered intake messages [X-Twin-Key]
             - POST {{baseUrl}}/api/admin/deadletters/replay — Replay dead letters (all, or ids in the JSON body) [X-Twin-Key]
             - POST {{baseUrl}}/api/admin/rebuild — Rebuild the journal and ALL read models from the raw intake table; reports before/after fingerprints [X-Twin-Key]
             - POST {{baseUrl}}/api/admin/backfill — Re-poll GitHub, Octopus, Azure and probes now [X-Twin-Key]
 
+            ## Time Travel
+            Every read endpoint above (summary, graph, dashboard state, pipelines, environments, drift, workitems, deployments, metrics, explain) accepts `asOf=<ISO-8601>`
+            and answers from the state reconstructed from the event journal at that instant. State history starts at the first state observation.
+
             ## MCP Server (Streamable HTTP)
             Endpoint: {{baseUrl}}/mcp (requires `X-Twin-Key` header)
-            Tools: get_summary, query_events, get_environment, get_drift, get_pipeline, explain_item, get_intake_queue
+            Tools: get_summary, get_state_at, query_events, get_environment, get_drift, get_pipeline, explain_item, get_intake_queue (read tools accept `asOf`)
             """);
     }
 }

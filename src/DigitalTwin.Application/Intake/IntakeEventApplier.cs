@@ -11,6 +11,8 @@ public interface IIntakeApplyInterceptor
     ValueTask BeforeApplyAsync(RawIntakeEvent rawEvent, CancellationToken ct);
 }
 
+internal sealed record IntakeReplayResult(int Replayed, int Appended, IReadOnlyList<string> Failures);
+
 /// <summary>
 /// Applies captured raw events to the twin model. Idempotent: events are deduplicated on their
 /// idempotency key, so redeliveries, replays and webhook/poll overlap never double-count.
@@ -24,6 +26,8 @@ public sealed class IntakeEventApplier(
     IEnumerable<IIntakeApplyInterceptor> interceptors,
     TimeProvider timeProvider) : IIntakeEventApplier
 {
+    private const int ReplayAppendChunk = 1000;
+
     private static readonly HashSet<string> GitHubRefreshEvents = new(StringComparer.OrdinalIgnoreCase)
     {
         "push", "pull_request", "workflow_run", "issues", "release", "deployment", "deployment_status"
@@ -39,14 +43,53 @@ public sealed class IntakeEventApplier(
             return new IntakeApplyResult(raw.Id, 0, 0, AlreadyProcessed: true);
         }
 
-        using var _ = await gate.EnterAsync(ct);
-        var (normalized, applied) = await ApplyRawAsync(raw, live: true, ct);
+        using var entered = await gate.TryEnterLiveAsync(ct)
+            ?? throw new IntakeApplyDeferredException($"Raw intake event {raw.Id} deferred: a projection rebuild is running.");
+        var (normalized, applied) = await ApplyRawAsync(raw, ct);
         return new IntakeApplyResult(raw.Id, normalized.Count, applied.Count, AlreadyProcessed: false);
     }
 
-    internal async Task<(IReadOnlyList<ObservedEvent> Normalized, IReadOnlyList<ObservedEvent> Applied)> ApplyRawAsync(
+    /// <summary>
+    /// Rebuild path: replays already-processed raw events without side effects. Appending (earliest observation wins)
+    /// and projecting (latest wins) do not depend on order, so a whole page is written at once.
+    /// </summary>
+    internal async Task<IntakeReplayResult> ReplayAsync(IReadOnlyList<RawIntakeEvent> rawEvents, CancellationToken ct)
+    {
+        var normalized = new List<ObservedEvent>();
+        var failures = new List<string>();
+        var replayed = 0;
+        foreach (var raw in rawEvents)
+        {
+            try
+            {
+                foreach (var interceptor in interceptors)
+                {
+                    await interceptor.BeforeApplyAsync(raw, ct);
+                }
+                normalized.AddRange(IntakeNormalizer.Normalize(raw));
+                replayed++;
+            }
+            catch (Exception ex) when (ex is not OperationCanceledException || !ct.IsCancellationRequested)
+            {
+                failures.Add($"{raw.Id}: {ex.GetType().Name}: {ex.GetBaseException().Message}");
+            }
+        }
+
+        var appended = 0;
+        foreach (var chunk in normalized.OrderBy(e => e.OccurredAt).Chunk(ReplayAppendChunk))
+        {
+            appended += (await store.AppendEventsReturnNewAsync(chunk, ct)).Count;
+        }
+        var stateEvents = normalized.Where(StateObservations.IsStateEvent).ToList();
+        if (stateEvents.Count > 0)
+        {
+            await store.ApplyStateObservationsAsync(stateEvents, ct);
+        }
+        return new IntakeReplayResult(replayed, appended, failures);
+    }
+
+    private async Task<(IReadOnlyList<ObservedEvent> Normalized, IReadOnlyList<ObservedEvent> Applied)> ApplyRawAsync(
         RawIntakeEvent raw,
-        bool live,
         CancellationToken ct)
     {
         foreach (var interceptor in interceptors)
@@ -62,18 +105,15 @@ public sealed class IntakeEventApplier(
         var projected = stateEvents.Count > 0 ? await store.ApplyStateObservationsAsync(stateEvents, ct) : 0;
         await rawStore.MarkProcessedAsync(raw.Id, applied.Count, timeProvider.GetUtcNow(), ct);
 
-        if (live)
+        foreach (var ev in applied.Where(e => !StateObservations.IsStateEvent(e)))
         {
-            foreach (var ev in applied.Where(e => !StateObservations.IsStateEvent(e)))
-            {
-                await realtime.PublishEventAsync(ev, ct);
-            }
-            if (projected > 0)
-            {
-                await BroadcastStateChangedAsync(ct);
-            }
-            RequestFollowUps(raw, normalized);
+            await realtime.PublishEventAsync(ev, ct);
         }
+        if (projected > 0)
+        {
+            await BroadcastStateChangedAsync(ct);
+        }
+        RequestFollowUps(raw, normalized);
 
         return (normalized, applied);
     }

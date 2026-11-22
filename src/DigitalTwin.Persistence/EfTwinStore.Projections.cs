@@ -31,79 +31,160 @@ public sealed partial class EfTwinStore
         return await db.ProjectionVersions.CountAsync(ct);
     }
 
+    /// <summary>
+    /// Applies a batch with the same result as applying each event in (time, key) order, but with a constant number of
+    /// round trips: upserts and replace-sets only need the newest applicable event per entity; drift needs every one
+    /// (it keeps detection history).
+    /// </summary>
     public async Task<int> ApplyStateObservationsAsync(IReadOnlyList<ObservedEvent> stateEvents, CancellationToken ct)
     {
-        var applied = 0;
         var limits = await GetObservedEventColumnLimitsAsync(ct);
         var ordered = stateEvents
-            .Where(StateObservations.IsStateEvent)
+            .Where(e => StateObservations.IsStateEvent(e) && StateKinds.Find(e.SubjectType) is not null)
             .Select(e => FitToColumns(e, limits))
             .OrderBy(e => e.OccurredAt.UtcTicks)
-            .ThenBy(e => e.IdempotencyKey, StringComparer.Ordinal);
+            .ThenBy(e => e.IdempotencyKey, StringComparer.Ordinal)
+            .ToList();
+        if (ordered.Count == 0)
+        {
+            return 0;
+        }
 
+        var versions = await LoadVersionsAsync(ordered, ct);
+        var newest = new Dictionary<VersionKey, ObservedEvent>();
+        var driftSequence = new List<ObservedEvent>();
+        var applied = 0;
         foreach (var ev in ordered)
         {
-            var kind = StateKinds.Find(ev.SubjectType);
-            if (kind is null)
+            var key = new VersionKey(ev.SubjectType, ev.SubjectId);
+            if (versions.TryGetValue(key, out var current) && !StateObservations.IsNewer(ev.OccurredAt, ev.IdempotencyKey, current.ObservedAt, current.EventKey))
             {
                 continue;
             }
-
-            await using (var db = await factory.CreateDbContextAsync(ct))
+            versions[key] = (ev.OccurredAt, ev.IdempotencyKey);
+            newest[key] = ev;
+            if (ev.SubjectType == StateKinds.Drift.Name)
             {
-                var current = await db.ProjectionVersions.AsNoTracking()
-                    .FirstOrDefaultAsync(v => v.Kind == kind.Name && v.Key == ev.SubjectId, ct);
-                if (current is not null && !StateObservations.IsNewer(ev.OccurredAt, ev.IdempotencyKey, current.ObservedAt, current.EventKey))
-                {
-                    continue;
-                }
-            }
-
-            await ProjectAsync(kind, ev, ct);
-
-            await using (var db = await factory.CreateDbContextAsync(ct))
-            {
-                var version = await db.ProjectionVersions.FirstOrDefaultAsync(v => v.Kind == kind.Name && v.Key == ev.SubjectId, ct);
-                if (version is null)
-                {
-                    version = new ProjectionVersion { Kind = kind.Name, Key = ev.SubjectId };
-                    db.ProjectionVersions.Add(version);
-                }
-                version.ObservedAt = ev.OccurredAt;
-                version.EventKey = ev.IdempotencyKey;
-                version.ContentHash = StateObservations.HashOf(ev);
-                await db.SaveChangesAsync(ct);
+                driftSequence.Add(ev);
             }
             applied++;
         }
+        if (applied == 0)
+        {
+            return 0;
+        }
+
+        foreach (var group in newest.Values.Where(e => e.SubjectType != StateKinds.Drift.Name).GroupBy(e => e.SubjectType, StringComparer.Ordinal))
+        {
+            await ProjectAsync(StateKinds.Find(group.Key)!, group.OrderBy(e => e.OccurredAt.UtcTicks).ThenBy(e => e.IdempotencyKey, StringComparer.Ordinal).ToList(), ct);
+        }
+        foreach (var ev in driftSequence)
+        {
+            await ProjectAsync(StateKinds.Drift, [ev], ct);
+        }
+
+        await SaveVersionsAsync(newest.Values, ct);
         return applied;
     }
 
-    private Task ProjectAsync(StateKind kind, ObservedEvent ev, CancellationToken ct)
+    private readonly record struct VersionKey(string Kind, string Key)
     {
-        T One<T>() => (T)StateObservations.DeserializeEntity(kind, ev.PayloadJson);
-        List<T> Set<T>() => StateObservations.DeserializeSet(kind, ev.PayloadJson).Cast<T>().ToList();
+        public bool Equals(VersionKey other)
+            => string.Equals(Kind, other.Kind, StringComparison.Ordinal) && string.Equals(Key, other.Key, StringComparison.OrdinalIgnoreCase);
 
-        return kind.Id switch
+        public override int GetHashCode() => HashCode.Combine(Kind, StringComparer.OrdinalIgnoreCase.GetHashCode(Key));
+    }
+
+    private async Task<Dictionary<VersionKey, (DateTimeOffset ObservedAt, string EventKey)>> LoadVersionsAsync(IReadOnlyList<ObservedEvent> events, CancellationToken ct)
+    {
+        var result = new Dictionary<VersionKey, (DateTimeOffset, string)>();
+        await using var db = await factory.CreateDbContextAsync(ct);
+        foreach (var byKind in events.GroupBy(e => e.SubjectType, StringComparer.Ordinal))
         {
-            StateKindId.Repository => UpsertRepositoriesAsync([One<RepositorySnapshot>()], ct),
-            StateKindId.SourceChange => UpsertSourceChangesAsync([One<SourceChangeSnapshot>()], ct),
-            StateKindId.PipelineRun => UpsertPipelineRunsAsync([One<PipelineRunSnapshot>()], ct),
-            StateKindId.Artifact => UpsertArtifactsAsync([One<ArtifactPackageSnapshot>()], ct),
-            StateKindId.WorkItem => UpsertWorkItemsAsync([One<WorkItemSnapshot>()], ct),
-            StateKindId.Release => UpsertReleasesAsync([One<ReleaseSnapshot>()], ct),
-            StateKindId.Delivery => UpsertDeliveriesAsync([One<DeliveryExecutionSnapshot>()], ct),
-            StateKindId.Runbook => UpsertRunbooksAsync([One<RunbookExecutionSnapshot>()], ct),
-            StateKindId.Freeze => ReplaceFreezesAsync(Set<DeploymentFreezeSnapshot>(), ct),
-            StateKindId.DesiredConfig => UpsertDesiredConfigAsync(One<DesiredSystemConfigSnapshot>(), ct),
-            StateKindId.Environment => UpsertEnvironmentInstancesAsync([One<EnvironmentInstanceSnapshot>()], ct),
-            StateKindId.Workload => ReplaceWorkloadsAsync(Set<WorkloadRevisionSnapshot>(), ct),
-            StateKindId.AzureResource => ReplaceAzureResourcesAsync(Set<AzureResourceSnapshot>(), ct),
-            StateKindId.HealthProbe => UpsertHealthProbesAsync([One<HealthProbeSnapshot>()], ct),
-            StateKindId.Drift => ReconcileDriftFindingsAsync(Set<DriftFinding>(), ev.OccurredAt, ct),
-            StateKindId.WebhookStatus => ReplaceWebhookStatusesAsync(ev.SubjectId, Set<WebhookRegistrationStatus>(), ct),
-            _ => throw new ArgumentOutOfRangeException(nameof(kind), kind.Id, "Unhandled state kind")
-        };
+            foreach (var chunk in byKind.Select(e => e.SubjectId).Distinct(StringComparer.OrdinalIgnoreCase).Chunk(500))
+            {
+                var rows = await db.ProjectionVersions.AsNoTracking()
+                    .Where(v => v.Kind == byKind.Key && chunk.Contains(v.Key))
+                    .ToListAsync(ct);
+                foreach (var row in rows)
+                {
+                    result[new VersionKey(row.Kind, row.Key)] = (row.ObservedAt, row.EventKey);
+                }
+            }
+        }
+        return result;
+    }
+
+    private async Task SaveVersionsAsync(IEnumerable<ObservedEvent> newestPerKey, CancellationToken ct)
+    {
+        var events = newestPerKey.ToList();
+        await using var db = await factory.CreateDbContextAsync(ct);
+        foreach (var byKind in events.GroupBy(e => e.SubjectType, StringComparer.Ordinal))
+        {
+            foreach (var chunk in byKind.Chunk(500))
+            {
+                var keys = chunk.Select(e => e.SubjectId).ToList();
+                var tracked = (await db.ProjectionVersions.Where(v => v.Kind == byKind.Key && keys.Contains(v.Key)).ToListAsync(ct))
+                    .ToDictionary(v => v.Key, StringComparer.OrdinalIgnoreCase);
+                foreach (var ev in chunk)
+                {
+                    if (!tracked.TryGetValue(ev.SubjectId, out var version))
+                    {
+                        version = new ProjectionVersion { Kind = byKind.Key, Key = ev.SubjectId };
+                        db.ProjectionVersions.Add(version);
+                        tracked[ev.SubjectId] = version;
+                    }
+                    version.ObservedAt = ev.OccurredAt;
+                    version.EventKey = ev.IdempotencyKey;
+                    version.ContentHash = StateObservations.HashOf(ev);
+                }
+            }
+        }
+        await db.SaveChangesAsync(ct);
+    }
+
+    /// <summary>Projects events of one kind, oldest first; for upsert kinds there is at most one event per entity.</summary>
+    private async Task ProjectAsync(StateKind kind, IReadOnlyList<ObservedEvent> events, CancellationToken ct)
+    {
+        List<T> Many<T>() => events.Select(e => (T)StateObservations.DeserializeEntity(kind, e.PayloadJson)).ToList();
+        List<T> Set<T>(ObservedEvent e) => StateObservations.DeserializeSet(kind, e.PayloadJson).Cast<T>().ToList();
+
+        switch (kind.Id)
+        {
+            case StateKindId.Repository: await UpsertRepositoriesAsync(Many<RepositorySnapshot>(), ct); break;
+            case StateKindId.SourceChange: await UpsertSourceChangesAsync(Many<SourceChangeSnapshot>(), ct); break;
+            case StateKindId.PipelineRun: await UpsertPipelineRunsAsync(Many<PipelineRunSnapshot>(), ct); break;
+            case StateKindId.Artifact: await UpsertArtifactsAsync(Many<ArtifactPackageSnapshot>(), ct); break;
+            case StateKindId.WorkItem: await UpsertWorkItemsAsync(Many<WorkItemSnapshot>(), ct); break;
+            case StateKindId.Release: await UpsertReleasesAsync(Many<ReleaseSnapshot>(), ct); break;
+            case StateKindId.Delivery: await UpsertDeliveriesAsync(Many<DeliveryExecutionSnapshot>(), ct); break;
+            case StateKindId.Runbook: await UpsertRunbooksAsync(Many<RunbookExecutionSnapshot>(), ct); break;
+            case StateKindId.Environment: await UpsertEnvironmentInstancesAsync(Many<EnvironmentInstanceSnapshot>(), ct); break;
+            case StateKindId.HealthProbe: await UpsertHealthProbesAsync(Many<HealthProbeSnapshot>(), ct); break;
+            case StateKindId.DesiredConfig:
+                foreach (var config in Many<DesiredSystemConfigSnapshot>())
+                {
+                    await UpsertDesiredConfigAsync(config, ct);
+                }
+                break;
+            case StateKindId.Freeze:
+                foreach (var e in events) { await ReplaceFreezesAsync(Set<DeploymentFreezeSnapshot>(e), ct); }
+                break;
+            case StateKindId.Workload:
+                foreach (var e in events) { await ReplaceWorkloadsAsync(Set<WorkloadRevisionSnapshot>(e), ct); }
+                break;
+            case StateKindId.AzureResource:
+                foreach (var e in events) { await ReplaceAzureResourcesAsync(Set<AzureResourceSnapshot>(e), ct); }
+                break;
+            case StateKindId.WebhookStatus:
+                foreach (var e in events) { await ReplaceWebhookStatusesAsync(e.SubjectId, Set<WebhookRegistrationStatus>(e), ct); }
+                break;
+            case StateKindId.Drift:
+                foreach (var e in events) { await ReconcileDriftFindingsAsync(Set<DriftFinding>(e), e.OccurredAt, ct); }
+                break;
+            default:
+                throw new ArgumentOutOfRangeException(nameof(kind), kind.Id, "Unhandled state kind");
+        }
     }
 
     public async Task ClearReadModelsAsync(CancellationToken ct)

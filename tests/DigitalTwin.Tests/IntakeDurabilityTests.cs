@@ -178,7 +178,7 @@ public sealed class IntakeDurabilityTests(SqlServerFixture sql)
         }));
 
         var store = app.Services.GetRequiredService<ITwinStore>();
-        var before = Fingerprint(await store.QueryEventsAsync(null, null, null, null, null, 10_000, CancellationToken.None));
+        var before = Fingerprint(await store.QueryEventsAsync(null, null, null, null, null, null, 10_000, CancellationToken.None));
         Assert.Equal(4, before.Count);
 
         var response = await client.PostAsync("/api/admin/rebuild", null);
@@ -188,8 +188,33 @@ public sealed class IntakeDurabilityTests(SqlServerFixture sql)
         Assert.Equal(5, report.RawEventsReplayed);
         Assert.Equal(0, report.RawEventsFailed);
 
-        var after = Fingerprint(await store.QueryEventsAsync(null, null, null, null, null, 10_000, CancellationToken.None));
+        var after = Fingerprint(await store.QueryEventsAsync(null, null, null, null, null, null, 10_000, CancellationToken.None));
         Assert.Equal(before, after);
+    }
+
+    [Fact]
+    public async Task EventsArrivingDuringARebuildAreDeferredNotDeadLettered()
+    {
+        await using var app = new TwinAppFactory(await sql.CreateDatabaseAsync());
+        using var client = app.CreateAuthedClient();
+        var gate = app.Services.GetRequiredService<ProjectionGate>();
+        gate.LiveWaitLimit = TimeSpan.FromMilliseconds(100);
+
+        var rebuild = await gate.EnterAsync(CancellationToken.None);
+        Assert.Equal(HttpStatusCode.OK, (await client.SendAsync(TwinAppFactory.GitHubWebhook("ping", "during-rebuild-1", PingPayload))).StatusCode);
+        Assert.Equal(HttpStatusCode.OK, (await client.SendAsync(TwinAppFactory.GitHubWebhook("ping", "during-rebuild-2", PingPayload))).StatusCode);
+
+        // Far longer than the 50/100/150 ms retry schedule that would dead-letter a failing event.
+        await Task.Delay(TimeSpan.FromSeconds(3));
+        Assert.Equal(0, (await client.GetFromJsonAsync<IntakeQueueStatus>("/api/intake", JsonWeb))!.DeadLetterCount);
+        Assert.Equal(2, await app.ScalarAsync("SELECT COUNT(*) FROM twin.raw_intake_events WHERE processed_at IS NULL"));
+
+        rebuild.Dispose();
+        await TwinAppFactory.WaitUntilAsync(
+            async () => await app.ScalarAsync("SELECT COUNT(*) FROM twin.raw_intake_events WHERE processed_at IS NULL") == 0,
+            ProcessingTimeout, "deferred events are applied after the rebuild");
+        Assert.Equal(2, await app.ScalarAsync("SELECT COUNT(*) FROM ObservedEvents WHERE IdempotencyKey LIKE 'github:during-rebuild-%'"));
+        Assert.Equal(0, (await client.GetFromJsonAsync<IntakeQueueStatus>("/api/intake", JsonWeb))!.DeadLetterCount);
     }
 
     [Fact]
