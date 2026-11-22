@@ -275,3 +275,7 @@ Following the domain research in the prompt's prior-art references:
   - The report is exposed by API, MCP and the dashboard.
 - **Tests**: integration tests are offline. The test host routes the `github`, `github-raw` and `octopus` HTTP clients to an unavailable stub and blanks GitHub tokens, so tests never reach external APIs even when the environment has credentials.
 
+## ADR-026: DORA Keys From Change Chains
+
+- **Decision**: DORA keys are computed from change chains (`ChainDora`), not from raw deployment rows. A chain is one change, from commit to prod. Lead time is commit to prod; a failure is any failed prod attempt or a prod failure signal. Time to restore runs to the next successful prod delivery of that deployable. Bands follow the DORA State of DevOps thresholds. The older delivery-based scorecard stays in the summary for continuity; the dashboard's strip shows the chain-based keys.
+

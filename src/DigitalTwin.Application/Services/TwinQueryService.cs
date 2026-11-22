@@ -204,6 +204,9 @@ public sealed class TwinQueryService(
         var drifts = await model.GetDriftFindingsAsync(includeResolved: false, ct);
         var resources = await model.GetAzureResourcesAsync(ct);
         var artifacts = await model.GetArtifactsAsync(ct);
+        var chains = await BuildChainsAsync(scope, ct);
+        // Only chains that reached prod in the last 28 days need their failure signals for DORA.
+        var doraChains = await WithSignalsAsync([.. chains.Where(c => c.Stages[^1].StartedAt >= scope.Now.AddDays(-28))], scope, ct);
 
         return new DashboardStateDto(
             summary,
@@ -218,7 +221,17 @@ public sealed class TwinQueryService(
             resources,
             artifacts,
             await timeTravel.GetHistoryStartAsync(ct),
-            await WithSignalsAsync(SelectDashboardChains(await BuildChainsAsync(scope, ct)), scope, ct));
+            await WithSignalsAsync(SelectDashboardChains(chains), scope, ct),
+            ChainDora.Calculate(doraChains, scope.Now, 7),
+            ChainDora.Calculate(doraChains, scope.Now, 28));
+    }
+
+    /// <summary>DORA keys from change chains (deploy frequency, lead time, change failure rate, time to restore).</summary>
+    public async Task<ChainDoraMetrics> GetChainDoraAsync(int windowDays, string? deployable, DateTimeOffset? asOf, CancellationToken ct)
+    {
+        var scope = await timeTravel.ResolveAsync(asOf, ct);
+        var chains = await WithSignalsAsync([.. await BuildChainsAsync(scope, ct)], scope, ct);
+        return ChainDora.Calculate(chains, scope.Now, Math.Clamp(windowDays, 1, 90), string.IsNullOrWhiteSpace(deployable) ? null : deployable);
     }
 
     public async Task<ChangeChainsDto> GetChangeChainsAsync(string? query, int limit, DateTimeOffset? asOf, CancellationToken ct)
