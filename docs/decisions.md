@@ -188,6 +188,17 @@ Following the domain research in the prompt's prior-art references:
 - **Not historical**: ingestion cursors (empty as of a past instant), the GitHub quota and the intake queue are live operational telemetry.
 - **Rebuild interplay**: live intake messages that cannot enter the projection gate within 20 seconds (a rebuild is running) throw `IntakeApplyDeferredException`, which Wolverine reschedules indefinitely instead of dead-lettering. A rebuild replays raw rows page by page: appending is earliest-wins and projecting is latest-wins, so batching gives the identical result with far fewer database round trips.
 
+## ADR-018: Change Chains Anchored on Release Candidates
+
+- **Context**: the dashboard showed each pipeline's current versions but not how one change moved through work, PR, build, release and the three stages, or where it failed.
+- **Decision**:
+  - `ChangeChainBuilder` (Core, pure) links read models into chains. The anchor is a release candidate: a pipeline's Octopus release or versioned build (`^\d+(\.\d+)+$`, so `-pr` environment builds are excluded).
+  - cmdemo1 builds release candidates from PR branches before merge, so PRs link by merge commit or head branch. Work items link by the PR's linked issue, the branch's issue number, or the RC version.
+  - Each stage keeps its latest attempt plus counts of attempts and failures, so a recovered failure stays visible.
+  - The chain's correlation ids are the journal's own chain ids. A new `IX_ObservedEvents_ChainId` index serves the timeline lookup.
+  - Chains are computed from whichever read model the request resolves to, so `asOf` applies unchanged.
+  - The twin's own pipeline is excluded. The dashboard shows at most six chains, favoring ones that reached a build.
+
 ## ADR-019: Bounded Journal Payloads and a Cheap Rebuild on the Basic Tier
 
 - **Context**: on the 5 DTU / 2 GB Basic database the journal grew to 668 MB within a day (71k events), almost all of it raw GitHub webhook bodies copied uncompressed into `PayloadJson`. A live rebuild then spent more than 20 minutes just streaming those payloads for its fingerprint, with live intake paused the whole time.
