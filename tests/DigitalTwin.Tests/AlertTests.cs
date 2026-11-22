@@ -47,6 +47,15 @@ public sealed class AlertRuleTests
     }
 
     [Fact]
+    public void AChangeSupersededByANewerVersionAtTheSameStageIsNotStalled()
+    {
+        var older = Assert.Single(Chains(F.Delivery("tdd", "succeeded", 44, 47)));
+        var newer = older with { ChainId = "ui@2.4.2665", Version = "2.4.2665", LastActivityAt = older.LastActivityAt.AddMinutes(30) };
+        var alert = Assert.Single(AlertRules.Evaluate([older, newer], Healthy, null, F.T0.AddHours(8), Options));
+        Assert.Equal("stalled:ui@2.4.2665:Tdd", alert.Key);
+    }
+
+    [Fact]
     public void DeadLettersAndDriftRaiseAlerts()
     {
         var intake = Healthy with { DeadLetterCount = 3 };

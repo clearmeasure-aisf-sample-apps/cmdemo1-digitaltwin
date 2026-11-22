@@ -355,6 +355,38 @@ public sealed class TwinQueryService(
             drift.Select(d => $"{d.Severity}: {d.Summary}").ToList());
     }
 
+    /// <summary>What changed between two instants: versions and revisions per environment, Azure resources, drift, board.</summary>
+    public async Task<EnvironmentComparisonDto> CompareAsync(DateTimeOffset from, DateTimeOffset? to, CancellationToken ct)
+    {
+        var a = await GetStateAtAsync(from, ct);
+        var b = await GetStateAtAsync(to ?? DateTimeOffset.MaxValue, ct);
+
+        static List<ValueChangeDto> Diff(IReadOnlyDictionary<string, string?> x, IReadOnlyDictionary<string, string?> y)
+            => x.Keys.Union(y.Keys, StringComparer.OrdinalIgnoreCase).Order(StringComparer.OrdinalIgnoreCase)
+                .Select(k => new ValueChangeDto(k, x.GetValueOrDefault(k), y.GetValueOrDefault(k), !string.Equals(x.GetValueOrDefault(k), y.GetValueOrDefault(k), StringComparison.Ordinal)))
+                .ToList();
+
+        var stages = a.Environments.Select(e => e.Stage).Union(b.Environments.Select(e => e.Stage)).Select(stage =>
+        {
+            var x = a.Environments.FirstOrDefault(e => e.Stage == stage);
+            var y = b.Environments.FirstOrDefault(e => e.Stage == stage);
+            var versions = Diff(x?.DeployedVersions ?? new Dictionary<string, string?>(), y?.DeployedVersions ?? new Dictionary<string, string?>());
+            var revisions = Diff(
+                (x?.Workloads ?? []).ToDictionary(w => w.Deployable, w => w.Revision, StringComparer.OrdinalIgnoreCase),
+                (y?.Workloads ?? []).ToDictionary(w => w.Deployable, w => w.Revision, StringComparer.OrdinalIgnoreCase));
+            return new StageComparisonDto(stage, versions, revisions, versions.Any(v => v.Changed) || revisions.Any(r => r.Changed));
+        }).ToList();
+
+        var resA = a.AzureResources.Select(r => $"{r.ResourceGroup}/{r.Name}").ToHashSet(StringComparer.OrdinalIgnoreCase);
+        var resB = b.AzureResources.Select(r => $"{r.ResourceGroup}/{r.Name}").ToHashSet(StringComparer.OrdinalIgnoreCase);
+        var board = Diff(a.BoardColumns.ToDictionary(kv => kv.Key, kv => (string?)kv.Value.ToString(CultureInfo.InvariantCulture), StringComparer.OrdinalIgnoreCase),
+            b.BoardColumns.ToDictionary(kv => kv.Key, kv => (string?)kv.Value.ToString(CultureInfo.InvariantCulture), StringComparer.OrdinalIgnoreCase));
+
+        return new EnvironmentComparisonDto(a.AsOf, b.AsOf, stages,
+            resB.Except(resA).Order(StringComparer.OrdinalIgnoreCase).ToList(), resA.Except(resB).Order(StringComparer.OrdinalIgnoreCase).ToList(),
+            resA.Count, resB.Count, a.ActiveDrift, b.ActiveDrift, board);
+    }
+
     public Task<IReadOnlyList<ObservedEvent>> QueryEventsAsync(
         DateTimeOffset? since,
         DateTimeOffset? until,

@@ -972,3 +972,46 @@ body.time-travel .live-status { opacity: 0.45; }
   .metrics-grid { grid-template-columns: repeat(4, minmax(120px, 1fr)); }
   .ops-grid { grid-template-columns: 1fr; }
 }
+
+/* Change chain player */
+.chain-player {
+  position: fixed;
+  left: 50%;
+  top: 12%;
+  transform: translateX(-50%);
+  width: min(920px, 94vw);
+  background: var(--bg-elev);
+  border: 1px solid var(--border-bright);
+  border-radius: 12px;
+  box-shadow: 0 24px 60px rgba(0, 0, 0, 0.55);
+  padding: 16px 20px 20px;
+  z-index: 60;
+}
+.chain-player.hidden { display: none; }
+.player-path { display: flex; align-items: center; margin: 22px 6px 34px; }
+.player-path .chain-node { width: 18px; height: 18px; opacity: 1; animation: none; transition: transform 0.25s ease, box-shadow 0.25s ease; }
+.player-path .chain-node.dim { opacity: 0.35; }
+.player-path .chain-node.current { transform: scale(1.45); box-shadow: 0 0 0 6px var(--cyan-bg); }
+.player-path .chain-link { height: 3px; }
+.player-path .chain-link .fill { display: block; height: 100%; width: 0; background: var(--emerald); transition: width 0.6s ease; }
+.player-path .chain-link.fail .fill { background: var(--rose); }
+.player-path .chain-link.reached .fill { width: 100%; }
+.player-controls { display: flex; gap: 8px; justify-content: center; margin-bottom: 12px; }
+.player-stage { font-size: 12px; color: var(--text-dim); min-height: 120px; }
+.player-stage h4 { margin: 0 0 6px; color: var(--text); font-size: 14px; }
+.player-stage .signal { font-family: var(--mono); font-size: 11px; padding: 3px 0; border-top: 1px dashed var(--border); }
+.player-stage .signal.bad { color: var(--rose); }
+.player-stage .signal.good { color: var(--emerald); }
+
+/* Before/after comparison */
+.compare-panel { background: var(--bg-elev); border: 1px solid var(--amber); border-radius: 10px; padding: 10px 14px; }
+.compare-panel.hidden { display: none; }
+.compare-body { display: grid; grid-template-columns: repeat(auto-fit, minmax(240px, 1fr)); gap: 12px; font-size: 12px; }
+.compare-card { background: var(--bg-card); border: 1px solid var(--border); border-radius: 8px; padding: 8px 10px; }
+.compare-card h5 { margin: 0 0 6px; font-size: 11px; letter-spacing: 0.08em; color: var(--text-dim); }
+.compare-row { display: grid; grid-template-columns: 1fr auto auto auto; gap: 6px; font-family: var(--mono); font-size: 11px; color: var(--text-muted); }
+.compare-row.changed { color: var(--amber); }
+.compare-row .arrow { color: var(--text-muted); }
+.compare-list { font-family: var(--mono); font-size: 11px; color: var(--text-dim); max-height: 120px; overflow: auto; }
+.compare-list .add { color: var(--emerald); }
+.compare-list .remove { color: var(--rose); }

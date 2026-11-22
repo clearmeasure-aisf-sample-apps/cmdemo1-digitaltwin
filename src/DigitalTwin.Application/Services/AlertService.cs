@@ -20,6 +20,13 @@ public static class AlertRules
     private static readonly ChainStageKind[] DeliveryStages = [ChainStageKind.Tdd, ChainStageKind.Uat, ChainStageKind.Prod];
     private static readonly ChainStageKind[] PastBuild = [ChainStageKind.ReleaseCandidate, ChainStageKind.OctopusRelease, ChainStageKind.Tdd, ChainStageKind.Uat, ChainStageKind.Prod];
 
+    /// <summary>A newer change of the same deployable that reached the same stage or further: this one was skipped, not stuck.</summary>
+    private static bool Superseded(ChangeChain chain, ChainStageKind current, IReadOnlyList<ChangeChain> chains)
+        => chains.Any(other => other.ChainId != chain.ChainId
+            && string.Equals(other.Deployable, chain.Deployable, StringComparison.OrdinalIgnoreCase)
+            && other.LastActivityAt > chain.LastActivityAt
+            && other.CurrentStage is { } stage && stage >= current);
+
     public static IReadOnlyList<TwinAlert> Evaluate(
         IReadOnlyList<ChangeChain> chains, IntakeQueueStatus intake, ReconciliationReport? reconciliation, DateTimeOffset now, AlertRuleOptions options)
     {
@@ -41,7 +48,7 @@ public static class AlertRules
 
             var idle = now - chain.LastActivityAt;
             if (chain.Outcome is ChainOutcome.InProgress or ChainOutcome.Waiting && chain.CurrentStage is { } current && PastBuild.Contains(current)
-                && idle >= TimeSpan.FromHours(options.StallHours) && idle <= TimeSpan.FromDays(7))
+                && idle >= TimeSpan.FromHours(options.StallHours) && idle <= TimeSpan.FromDays(7) && !Superseded(chain, current, chains))
             {
                 alerts.Add(new TwinAlert(AlertKind.StalledChange, "warning", $"stalled:{chain.ChainId}:{current}",
                     $"Change stalled at {current}: {chain.Deployable ?? chain.PipelineId} {chain.Version}",

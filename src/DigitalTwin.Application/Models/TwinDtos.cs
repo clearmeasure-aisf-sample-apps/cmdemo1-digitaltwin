@@ -129,3 +129,21 @@ public sealed record ChangeChainsDto(
 
 /// <summary>An Octopus configuration change: deployment process, variables, project settings, triggers or runbooks.</summary>
 public sealed record ConfigChangeDto(DateTimeOffset At, string Kind, string? Deployable, string? PipelineId, string Summary, string? Actor, string? Url);
+
+/// <summary>Before/after comparison of two instants (from the event journal): what changed per environment and platform.</summary>
+public sealed record EnvironmentComparisonDto(
+    DateTimeOffset From,
+    DateTimeOffset To,
+    IReadOnlyList<StageComparisonDto> Stages,
+    IReadOnlyList<string> ResourcesAdded,
+    IReadOnlyList<string> ResourcesRemoved,
+    int ResourcesFrom,
+    int ResourcesTo,
+    IReadOnlyList<string> DriftFrom,
+    IReadOnlyList<string> DriftTo,
+    IReadOnlyList<ValueChangeDto> BoardColumns);
+
+public sealed record StageComparisonDto(string Stage, IReadOnlyList<ValueChangeDto> Versions, IReadOnlyList<ValueChangeDto> Revisions, bool Changed);
+
+public sealed record ValueChangeDto(string Name, string? From, string? To, bool Changed);
+
