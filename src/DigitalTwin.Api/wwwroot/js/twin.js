@@ -6,7 +6,10 @@
     windowDays: 7,
     sourceFilter: 'ALL',
     seenEventIds: new Set(),
-    particles: []
+    particles: [],
+    asOf: null,
+    historyStart: null,
+    replayTimer: null
   };
 
   const stageColumns = [
@@ -37,8 +40,17 @@
     drawerTitle: document.getElementById('drawer-title'),
     drawerBody: document.getElementById('drawer-body'),
     drawerClose: document.getElementById('drawer-close'),
-    traceInput: document.getElementById('trace-input')
+    traceInput: document.getElementById('trace-input'),
+    ttSlider: document.getElementById('tt-slider'),
+    ttLabel: document.getElementById('tt-label'),
+    ttLive: document.getElementById('tt-live'),
+    ttPlay: document.getElementById('tt-play')
   };
+
+  // "Now" for relative times: the selected instant while time travelling.
+  function refNow() {
+    return state.asOf ? new Date(state.asOf).getTime() : Date.now();
+  }
 
   function updateClock() {
     const now = new Date();
@@ -58,7 +70,7 @@
 
   function relTime(iso) {
     if (!iso) return '--';
-    const sec = Math.max(0, Math.floor((Date.now() - new Date(iso).getTime()) / 1000));
+    const sec = Math.max(0, Math.floor((refNow() - new Date(iso).getTime()) / 1000));
     if (sec < 60) return `${sec}s`;
     if (sec < 3600) return `${Math.floor(sec / 60)}m`;
     if (sec < 86400) return `${Math.floor(sec / 3600)}h`;
@@ -82,9 +94,12 @@
   }
 
   async function fetchState() {
-    const res = await fetch('/api/dashboard/state', { cache: 'no-store' });
+    const url = state.asOf ? `/api/dashboard/state?asOf=${encodeURIComponent(state.asOf)}` : '/api/dashboard/state';
+    const res = await fetch(url, { cache: 'no-store' });
     if (!res.ok) throw new Error(`HTTP ${res.status}`);
     state.data = await res.json();
+    state.historyStart = state.data.historyStartsAt || state.historyStart;
+    updateTimeStrip();
     for (const ev of state.data.recentEvents || []) {
       state.seenEventIds.add(ev.idempotencyKey || ev.eventId);
     }
@@ -627,7 +642,7 @@
   }
 
   function handleIncomingEvent(ev) {
-    if (!state.data) return;
+    if (!state.data || state.asOf) return;
     const key = ev.idempotencyKey || ev.eventId;
     if (state.seenEventIds.has(key)) return;
     state.seenEventIds.add(key);
@@ -647,7 +662,7 @@
         .build();
 
       connection.on('twinEvent', handleIncomingEvent);
-      connection.on('stateRefreshed', () => fetchState().catch(() => {}));
+      connection.on('stateRefreshed', () => { if (!state.asOf) fetchState().catch(() => {}); });
 
       connection.onreconnecting(() => {
         dom.liveStatus.classList.remove('connected');
@@ -679,7 +694,7 @@
     es.addEventListener('twinEvent', e => {
       try { handleIncomingEvent(JSON.parse(e.data)); } catch {}
     });
-    es.addEventListener('stateRefreshed', () => fetchState().catch(() => {}));
+    es.addEventListener('stateRefreshed', () => { if (!state.asOf) fetchState().catch(() => {}); });
   }
 
   // Event listeners
@@ -735,7 +750,7 @@
 
   // Periodic ambient particle pulse on active/recent lanes & fallback poll refresh
   setInterval(() => {
-    if (!state.data || !state.data.recentEvents?.length) return;
+    if (!state.data || state.asOf || !state.data.recentEvents?.length) return;
     const sample = state.data.recentEvents[Math.floor(Math.random() * Math.min(6, state.data.recentEvents.length))];
     if (sample) {
       const targetStage = sample.stageName || (sample.eventType?.includes('pipelineRun') ? 'build' : 'release');
@@ -743,7 +758,81 @@
     }
   }, 4500);
 
-  setInterval(() => fetchState().catch(() => {}), 30000);
+  // Time travel: the slider spans the journal's state history (at most the last 7 days).
+  function timeRange() {
+    const max = Date.now();
+    const start = state.historyStart ? new Date(state.historyStart).getTime() : max - 86400000;
+    return { min: Math.max(start, max - 7 * 86400000), max };
+  }
+
+  function sliderToTime(value) {
+    const { min, max } = timeRange();
+    return min + (max - min) * (Number(value) / 1000);
+  }
+
+  function fmtUtc(ms) {
+    return new Date(ms).toISOString().replace('T', ' ').substring(0, 19) + 'Z';
+  }
+
+  function updateTimeStrip() {
+    const { min, max } = timeRange();
+    if (!state.asOf) {
+      dom.ttSlider.value = 1000;
+      dom.ttLabel.textContent = `LIVE · history from ${fmtUtc(min)}`;
+    } else {
+      const t = new Date(state.asOf).getTime();
+      dom.ttSlider.value = Math.round(((t - min) / Math.max(1, max - min)) * 1000);
+      dom.ttLabel.textContent = `AS OF ${fmtUtc(t)}`;
+    }
+    dom.ttLive.classList.toggle('active', !state.asOf);
+    document.body.classList.toggle('time-travel', !!state.asOf);
+  }
+
+  function setAsOf(ms) {
+    if (ms >= Date.now() - 5000) { goLive(); return Promise.resolve(); }
+    state.asOf = new Date(ms).toISOString();
+    updateTimeStrip();
+    return fetchState().catch(() => {});
+  }
+
+  function stopReplay() {
+    if (state.replayTimer) clearInterval(state.replayTimer);
+    state.replayTimer = null;
+    dom.ttPlay.innerHTML = '&#9654;';
+  }
+
+  function goLive() {
+    stopReplay();
+    state.asOf = null;
+    updateTimeStrip();
+    fetchState().catch(() => {});
+  }
+
+  let sliderDebounce = null;
+  dom.ttSlider.addEventListener('input', () => {
+    stopReplay();
+    dom.ttLabel.textContent = `AS OF ${fmtUtc(sliderToTime(dom.ttSlider.value))}`;
+    clearTimeout(sliderDebounce);
+    sliderDebounce = setTimeout(() => setAsOf(sliderToTime(dom.ttSlider.value)), 250);
+  });
+  dom.ttLive.addEventListener('click', goLive);
+  dom.ttPlay.addEventListener('click', () => {
+    if (state.replayTimer) { stopReplay(); return; }
+    const { min } = timeRange();
+    let t = state.asOf ? new Date(state.asOf).getTime() : min;
+    const step = Math.max(60000, (Date.now() - t) / 40);
+    dom.ttPlay.innerHTML = '&#10074;&#10074;';
+    let busy = false;
+    state.replayTimer = setInterval(() => {
+      if (busy) return;
+      busy = true;
+      t += step;
+      setAsOf(t).finally(() => { busy = false; });
+      if (t >= Date.now()) stopReplay();
+    }, 900);
+  });
+
+  setInterval(() => { if (!state.asOf) fetchState().catch(() => {}); }, 30000);
   setInterval(() => fetchIntake().catch(() => {}), 5000);
 
   fetchState()

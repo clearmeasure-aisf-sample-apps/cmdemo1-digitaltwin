@@ -91,25 +91,20 @@ public sealed class IntakeRebuildService(
                 break;
             }
 
-            foreach (var raw in page)
+            after = page[^1].Sequence;
+            // Rows still queued behind the gate are not in the "before" state; live processing applies them next.
+            var processed = page.Where(r => r.ProcessedAt is not null).ToList();
+            try
             {
-                after = raw.Sequence;
-                // Rows still queued behind the gate are not in the "before" state; live processing applies them next.
-                if (raw.ProcessedAt is null)
-                {
-                    continue;
-                }
-                try
-                {
-                    var (_, applied) = await applier.ApplyRawAsync(raw, live: false, ct);
-                    rebuilt += applied.Count;
-                    replayed++;
-                    Interlocked.Increment(ref _progress);
-                }
-                catch (Exception ex) when (ex is not OperationCanceledException || !ct.IsCancellationRequested)
-                {
-                    failures.Add($"{raw.Id}: {ex.GetType().Name}: {ex.GetBaseException().Message}");
-                }
+                var result = await applier.ReplayAsync(processed, ct);
+                replayed += result.Replayed;
+                rebuilt += result.Appended;
+                failures.AddRange(result.Failures);
+                Interlocked.Add(ref _progress, result.Replayed);
+            }
+            catch (Exception ex) when (ex is not OperationCanceledException || !ct.IsCancellationRequested)
+            {
+                failures.Add($"page after sequence {processed.FirstOrDefault()?.Sequence}: {ex.GetType().Name}: {ex.GetBaseException().Message}");
             }
         }
 

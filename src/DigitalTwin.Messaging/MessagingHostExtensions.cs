@@ -1,5 +1,6 @@
 using Azure.Core;
 using Azure.Identity;
+using DigitalTwin.Core.Intake;
 using DigitalTwin.Core.Ports;
 using Microsoft.Data.SqlClient;
 using Microsoft.Extensions.Configuration;
@@ -38,6 +39,8 @@ public static class MessagingHostExtensions
             ConfigureTransport(opts, messaging);
 
             opts.Durability.Mode = Enum.Parse<DurabilityMode>(messaging.DurabilityMode, ignoreCase: true);
+            // Evaluated first: deferral (rebuild in progress) is not a failure and never dead-letters.
+            opts.Policies.OnException<IntakeApplyDeferredException>().ScheduleRetryIndefinitely(TimeSpan.FromSeconds(5), TimeSpan.FromSeconds(15), TimeSpan.FromSeconds(30));
             opts.Policies.OnAnyException().RetryWithCooldown([.. messaging.RetryDelaySchedule]).Then.MoveToErrorQueue();
 
         });

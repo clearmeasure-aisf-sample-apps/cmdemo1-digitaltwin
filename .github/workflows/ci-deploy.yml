@@ -204,13 +204,18 @@ jobs:
           curl -fsS -m 120 -X POST -H "X-Twin-Key: ${TWIN_API_KEY}" "${TWIN_URL}/api/admin/backfill" | jq '{gitHubOk, octopusOk, azureOk, probesOk, activeDriftCount, notes}'
           # Full rebuild of journal + every read model from raw events; must reproduce identical read models.
           curl -fsS -X POST -H "X-Twin-Key: ${TWIN_API_KEY}" "${TWIN_URL}/api/admin/rebuild?wait=false" | jq '{running, startedAt}'
-          for i in $(seq 1 120); do
+          for i in $(seq 1 240); do
             STATUS=$(curl -fsS -H "X-Twin-Key: ${TWIN_API_KEY}" "${TWIN_URL}/api/admin/rebuild/status")
             if [ "$(echo "$STATUS" | jq -r .running)" = "false" ] && [ "$(echo "$STATUS" | jq -r '.lastReport != null or .lastError != null')" = "true" ]; then break; fi
+            if [ $((i % 12)) -eq 0 ]; then echo "$STATUS" | jq -c '{running, startedAt, rawEventsReplayedSoFar}'; fi
             sleep 5
           done
           echo "$STATUS" | jq '{running, lastError, report: (.lastReport | {identical, startedAt, finishedAt, rawEventsReplayed, rawEventsFailed, journalEventsRebuilt, differences, fingerprintAfter})}'
           echo "$STATUS" | jq -e '.lastReport.identical == true' >/dev/null
+          # Time travel: state reconstructed from the journal ten minutes ago.
+          AS_OF=$(date -u -d '10 minutes ago' +%Y-%m-%dT%H:%M:%SZ)
+          curl -fsS -H "X-Twin-Key: ${TWIN_API_KEY}" "${TWIN_URL}/api/state-at?asOf=${AS_OF}" \
+            | jq '{asOf, historyStartsAt, beforeHistory, environments: [.environments[] | {stage, deployedVersions, lastDeployment}], azureResources: (.azureResources | length), boardColumns, activeDrift}'
           curl -fsS -H "X-Twin-Key: ${TWIN_API_KEY}" "${TWIN_URL}/api/twin/summary" | jq '{systemSlug, activeDriftCount, criticalDriftCount, pipelinesCount: (.pipelines | length), stagesCount: (.stages | length), webhooksCount: (.webhooks | length), webhooks: [.webhooks[] | {id, source, target, isActive, lastDeliveryStatusCode, detail}], costMonthToDateUsd, gitHubQuota}'
           curl -fsS -H "X-Twin-Key: ${TWIN_API_KEY}" "${TWIN_URL}/api/drift" | jq 'length'
           curl -fsS -H "X-Twin-Key: ${TWIN_API_KEY}" "${TWIN_URL}/api/metrics?windowDays=7&stage=prod" | jq '{totalDeployments, deploymentsPerDay, medianLeadTimeHours, changeFailRatePercent}'

@@ -126,7 +126,8 @@ flowchart LR
 
 ### Protected Query API (`X-Twin-Key: <TWIN_API_KEY>`)
 
-- `GET /api/events?since=&source=&pipeline=&stage=&eventType=&limit=`
+- `GET /api/events?since=&until=&source=&pipeline=&stage=&eventType=&limit=`
+- `GET /api/state-at?asOf=<ISO-8601>`: time travel (see below)
 - `GET /api/pipelines` and `GET /api/pipelines/{id}`
 - `GET /api/environments/{env}` (`tdd`, `uat`, `prod`, `pool`)
 - `GET /api/drift?includeResolved=false`
@@ -144,12 +145,19 @@ flowchart LR
 Pass header `X-Twin-Key: <TWIN_API_KEY>`:
 
 - `get_summary`
+- `get_state_at` (time travel)
 - `query_events`
 - `get_environment`
 - `get_drift`
 - `get_pipeline`
 - `explain_item`
 - `get_intake_queue`
+
+Read tools accept an optional `asOf`.
+
+### Time Travel (`asOf`)
+
+Every read endpoint (summary, graph, dashboard state, pipelines, environments, drift, work items, deployments, metrics, explain) and every MCP read tool accepts `asOf=<ISO-8601>`. The twin folds the journal's `twin.state.observed` events up to that instant into an in-memory read model, using the same latest-wins and replace-set rules as the live projection. `asOf` just before now is therefore identical to the live tables, and a test enforces that. `GET /api/state-at?asOf=` and the MCP tool `get_state_at` give the compact answer: the version deployed to each environment, the Azure resources that existed, the board columns and active drift at that instant. On the dashboard, the **time travel** strip has a slider covering the state history, a replay button and a LIVE button; realtime updates pause while you view the past. State history starts at the first state observation, which is the event-sourcing baseline on first start.
 
 ---
 

@@ -231,6 +231,50 @@ html, body {
   color: var(--text-dim);
 }
 
+.time-strip {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  background: var(--bg-elev);
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  padding: 6px 14px;
+}
+
+.time-strip input[type="range"] {
+  flex: 1;
+  accent-color: var(--cyan);
+  cursor: pointer;
+}
+
+.tt-label {
+  font-family: var(--mono);
+  font-size: 11px;
+  color: var(--text-dim);
+  min-width: 190px;
+  text-align: right;
+}
+
+.tt-btn {
+  background: var(--bg-card);
+  color: var(--text-dim);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  font-size: 10px;
+  font-weight: 700;
+  letter-spacing: 0.08em;
+  padding: 3px 9px;
+  cursor: pointer;
+}
+
+.tt-btn:hover { border-color: var(--border-bright); color: var(--text); }
+.tt-btn.active { color: var(--emerald); border-color: var(--emerald); background: var(--emerald-bg); }
+
+body.time-travel .time-strip { border-color: var(--amber); }
+body.time-travel .time-strip input[type="range"] { accent-color: var(--amber); }
+body.time-travel .tt-label { color: var(--amber); }
+body.time-travel .live-status { opacity: 0.45; }
+
 .window-toggle {
   display: inline-flex;
   background: var(--bg);

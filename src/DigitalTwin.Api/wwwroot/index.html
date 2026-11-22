@@ -97,6 +97,15 @@
       </div>
     </section>
 
+    <!-- Time travel: replay state reconstructed from the event journal -->
+    <section class="time-strip" id="time-strip" aria-label="Time travel">
+      <span class="section-tag">TIME TRAVEL</span>
+      <button type="button" class="tt-btn" id="tt-play" title="Replay from the selected time to now" aria-label="Replay">&#9654;</button>
+      <input type="range" id="tt-slider" min="0" max="1000" value="1000" aria-label="Point in time" />
+      <span class="tt-label" id="tt-label">LIVE</span>
+      <button type="button" class="tt-btn tt-live active" id="tt-live">LIVE</button>
+    </section>
+
     <!-- Multi-Pipeline Animated Value Stream Canvas -->
     <section class="flow-board" aria-label="Multi-pipeline delivery flow">
       <div class="observer-tier" id="observer-tier">
