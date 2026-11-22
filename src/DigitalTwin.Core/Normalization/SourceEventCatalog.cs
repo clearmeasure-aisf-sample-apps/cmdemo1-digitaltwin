@@ -38,7 +38,7 @@ public static class SourceEventCatalog
 
     /// <summary>Unmapped GitHub events are still journaled (hooks subscribe to every event) under this generic type.</summary>
     public const string GitHubFallback = "twin.github.{event}.{action}";
-    public const string OctopusFallback = "twin.octopus.audit.{category}";
+    public const string OctopusFallback = "twin.octopus.{area}.{verb}";
 
     private static readonly string[] PullRequestUpdateActions =
     [
@@ -53,7 +53,7 @@ public static class SourceEventCatalog
         "pinned", "reopened", "status_changed", "transferred", "typed", "unassigned", "unlabeled", "unlocked", "unpinned", "untyped"
     ];
 
-    public static IReadOnlyList<SourceEventMapping> Mappings { get; } =
+    public static IReadOnlyList<SourceEventMapping> Mappings { get; } = WithGenerated(
     [
         .. GitHub("ping", null, "twin.github.webhook.ping", "WebhookVerified", Observation),
         .. GitHub("push", null, "dev.cdevents.repository.modified", "CodePushed", SourceAndChange),
@@ -154,7 +154,28 @@ public static class SourceEventCatalog
 
         new(SourceSystem.Twin, "drift evaluation", null, null, "twin.drift.detected", "DriftDetected", ReliabilityAndDrift),
         new(SourceSystem.Twin, "poller observation", null, null, "twin.state.observed", "StateObserved", Observation)
-    ];
+    ]);
+
+    /// <summary>
+    /// Every documented GitHub event and action, and every Octopus category, without a hand-written row gets a generated
+    /// one (deterministic type and domain name from <see cref="SourceEventTypes"/>): nothing a source can send is untyped.
+    /// </summary>
+    private static List<SourceEventMapping> WithGenerated(List<SourceEventMapping> explicitRows)
+    {
+        var rows = new List<SourceEventMapping>(explicitRows);
+        var githubMapped = explicitRows.Where(r => r.Source == SourceSystem.GitHub).Select(r => r.SourceEvent).ToHashSet(StringComparer.Ordinal);
+        foreach (var (eventName, actions) in SourceEventNames.GitHubWebhooks.Where(e => !githubMapped.Contains(e.Key)))
+        {
+            var context = SourceEventTypes.GitHubContext(eventName);
+            rows.AddRange(actions.Length == 0
+                ? [new SourceEventMapping(SourceSystem.GitHub, eventName, null, null, SourceEventTypes.GitHubType(eventName, null), SourceEventTypes.GitHubDomainEvent(eventName, null), context)]
+                : actions.Select(a => new SourceEventMapping(SourceSystem.GitHub, eventName, a, null, SourceEventTypes.GitHubType(eventName, a), SourceEventTypes.GitHubDomainEvent(eventName, a), context)));
+        }
+        var octopusMapped = explicitRows.Where(r => r.Source == SourceSystem.Octopus && r.Condition is null).Select(r => r.SourceEvent).ToHashSet(StringComparer.Ordinal);
+        rows.AddRange(SourceEventNames.OctopusCategories.Where(c => !octopusMapped.Contains(c))
+            .Select(c => new SourceEventMapping(SourceSystem.Octopus, c, null, null, SourceEventTypes.OctopusType(c), c, SourceEventTypes.OctopusContext(c))));
+        return rows;
+    }
 
     private static IEnumerable<SourceEventMapping> GitHub(string sourceEvent, string[]? actions, string twinType, string domainEvent, string context, string? condition = null)
         => actions is null

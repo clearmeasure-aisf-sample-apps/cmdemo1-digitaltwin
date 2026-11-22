@@ -82,6 +82,22 @@ public sealed class EventMappingTests
     }
 
     [Fact]
+    public void EveryDocumentedSourceEventHasAMapping()
+    {
+        Assert.Equal(GitHubDocs().Keys.Order(), SourceEventNames.GitHubWebhooks.Keys.Order());
+        foreach (var (eventName, actions) in GitHubDocs())
+        {
+            Assert.Equal(actions.Order(), SourceEventNames.GitHubWebhooks[eventName].Order());
+            var rows = SourceEventCatalog.Mappings.Where(r => r.Source == SourceSystem.GitHub && r.SourceEvent == eventName).ToList();
+            Assert.True(rows.Count > 0, $"GitHub {eventName} has no mapping");
+            Assert.All(actions, a => Assert.Contains(rows, r => r.Action == a));
+        }
+        Assert.Equal(OctopusCategories().Order(), SourceEventNames.OctopusCategories.Order());
+        Assert.All(OctopusCategories(), c => Assert.Contains(SourceEventCatalog.Mappings, r => r.Source == SourceSystem.Octopus && r.SourceEvent == c));
+        Assert.DoesNotContain(SourceEventCatalog.Mappings, r => r.TwinEventType.StartsWith("twin.octopus.audit.", StringComparison.Ordinal));
+    }
+
+    [Fact]
     public void MappingDocumentIsGeneratedFromTheCatalog()
     {
         var path = Path.Combine(RepoRoot(), "docs", "event-mapping.md");
@@ -105,28 +121,59 @@ public sealed class EventMappingTests
         void Line(string text = "") => sb.Append(text).Append('\n');
         string Code(string s) => $"`{s}`";
 
+        bool GeneratedGitHub(SourceEventMapping r) => r.TwinEventType == SourceEventTypes.GitHubType(r.SourceEvent, r.Action) && r.DomainEvent == SourceEventTypes.GitHubDomainEvent(r.SourceEvent, r.Action);
+        bool GeneratedOctopus(SourceEventMapping r) => r.Condition is null && r.TwinEventType == SourceEventTypes.OctopusType(r.SourceEvent) && r.DomainEvent == r.SourceEvent;
+
         Line("### GitHub webhooks (`X-GitHub-Event` + `action`)");
         Line();
         Line("| Source event | Actions / condition | Twin event type | Domain event | Bounded context |");
         Line("|---|---|---|---|---|");
-        foreach (var g in rows.Where(r => r.Source == SourceSystem.GitHub).GroupBy(r => (r.SourceEvent, r.Condition, r.TwinEventType, r.DomainEvent, r.BoundedContext)))
+        foreach (var g in rows.Where(r => r.Source == SourceSystem.GitHub && !GeneratedGitHub(r)).GroupBy(r => (r.SourceEvent, r.Condition, r.TwinEventType, r.DomainEvent, r.BoundedContext)))
         {
             var actions = g.Any(r => r.Action is not null) ? string.Join(", ", g.Select(r => Code(r.Action!))) : "(no action)";
             var qualifier = g.Key.Condition is null ? actions : $"{actions} when {Code(g.Key.Condition)}";
             Line($"| {Code(g.Key.SourceEvent)} | {qualifier} | {Code(g.Key.TwinEventType)} | {g.Key.DomainEvent} | {g.Key.BoundedContext} |");
         }
         Line();
+        Line("#### Other GitHub events (typed by event and action)");
+        Line();
+        Line($"Typed as {Code(SourceEventCatalog.GitHubFallback)} with domain event `<Event><Action>` (for example `CodeScanningAlertFixed`). The hooks subscribe to every event.");
+        Line();
+        Line("| Source event | Actions | Bounded context |");
+        Line("|---|---|---|");
+        foreach (var g in rows.Where(r => r.Source == SourceSystem.GitHub && GeneratedGitHub(r)).GroupBy(r => (r.SourceEvent, r.BoundedContext)))
+        {
+            var actions = g.Any(r => r.Action is not null) ? string.Join(", ", g.Select(r => Code(r.Action!))) : "(no action)";
+            Line($"| {Code(g.Key.SourceEvent)} | {actions} | {g.Key.BoundedContext} |");
+        }
+        Line();
 
         var groups = OctopusGroups();
+        string MemberOf(string category)
+        {
+            var memberOf = groups.Where(kv => kv.Value.Contains(category)).Select(kv => kv.Key).Order(StringComparer.Ordinal).ToList();
+            return memberOf.Count == 0 ? "-" : string.Join(", ", memberOf);
+        }
         Line("### Octopus audit events (category; event groups from `/api/events/groups`)");
         Line();
         Line("| Category | Event groups | Twin event type | Domain event | Bounded context |");
         Line("|---|---|---|---|---|");
-        foreach (var r in rows.Where(r => r.Source == SourceSystem.Octopus))
+        foreach (var r in rows.Where(r => r.Source == SourceSystem.Octopus && !GeneratedOctopus(r)))
         {
-            var memberOf = groups.Where(kv => kv.Value.Contains(r.SourceEvent)).Select(kv => kv.Key).Order(StringComparer.Ordinal).ToList();
             var category = r.Condition is null ? Code(r.SourceEvent) : $"{Code(r.SourceEvent)} when {Code(r.Condition)}";
-            Line($"| {category} | {(memberOf.Count == 0 ? "-" : string.Join(", ", memberOf))} | {Code(r.TwinEventType)} | {r.DomainEvent} | {r.BoundedContext} |");
+            Line($"| {category} | {MemberOf(r.SourceEvent)} | {Code(r.TwinEventType)} | {r.DomainEvent} | {r.BoundedContext} |");
+        }
+        Line();
+        Line("#### Other Octopus categories (typed by area and verb)");
+        Line();
+        Line($"Typed as {Code(SourceEventCatalog.OctopusFallback)} with the category as the domain event. Instance-level categories are not requested by the space subscription (see below), but are typed if they arrive.");
+        Line();
+        Line("| Category | Event groups | Twin event type | Bounded context | Subscribed |");
+        Line("|---|---|---|---|---|");
+        foreach (var r in rows.Where(r => r.Source == SourceSystem.Octopus && GeneratedOctopus(r)))
+        {
+            var subscribed = OctopusEventNormalizer.IsExcludedFromSubscription(r.SourceEvent) ? "no (instance-level)" : "yes";
+            Line($"| {Code(r.SourceEvent)} | {MemberOf(r.SourceEvent)} | {Code(r.TwinEventType)} | {r.BoundedContext} | {subscribed} |");
         }
         Line();
 
@@ -141,26 +188,13 @@ public sealed class EventMappingTests
         }
         Line();
 
-        Line("### Source events without a domain mapping");
+        Line("### Coverage and what is dropped");
         Line();
-        var mappedGitHub = rows.Where(r => r.Source == SourceSystem.GitHub).Select(r => r.SourceEvent).ToHashSet();
-        var unmappedGitHub = GitHubDocs().Keys.Where(e => !mappedGitHub.Contains(e)).Order(StringComparer.Ordinal).ToList();
-        Line($"**GitHub, {unmappedGitHub.Count} of {GitHubDocs().Count} documented events.** The hooks subscribe to every event, so these are received and journaled under the generic type {Code(SourceEventCatalog.GitHubFallback)}, but no read model or domain rule uses them:");
-        Line();
-        Line(string.Join(", ", unmappedGitHub.Select(Code)) + ".");
-        Line();
-
         var categories = OctopusCategories();
         var excluded = categories.Where(OctopusEventNormalizer.IsExcludedFromSubscription).ToList();
-        var mappedOctopus = rows.Where(r => r.Source == SourceSystem.Octopus).Select(r => r.SourceEvent).ToHashSet();
-        var generic = categories.Where(c => !OctopusEventNormalizer.IsExcludedFromSubscription(c) && !mappedOctopus.Contains(c)).ToList();
-        Line($"**Octopus, dropped: {excluded.Count} of {categories.Count} categories are never requested.** The subscription excludes instance-level prefixes ({string.Join(", ", OctopusEventNormalizer.SubscriptionExcludedPrefixes.Select(Code))}):");
+        Line($"**GitHub:** all {GitHubDocs().Count} documented events and every documented action have a mapping. Nothing is dropped.");
         Line();
-        Line(string.Join(", ", excluded.Select(Code)) + ".");
-        Line();
-        Line($"**Octopus, generic: {generic.Count} subscribed categories have no domain mapping.** They are journaled as {Code(SourceEventCatalog.OctopusFallback)}:");
-        Line();
-        Line(string.Join(", ", generic.Select(Code)) + ".");
+        Line($"**Octopus:** all {categories.Count} categories have a mapping. {excluded.Count} instance-level categories are not requested by the space subscription ({string.Join(", ", OctopusEventNormalizer.SubscriptionExcludedPrefixes.Select(Code))}): they are about the Octopus instance rather than delivery, and carry user names and IP addresses.");
         Line();
         Line("**Octopus, dropped by message filter:** audit events whose message contains `Ran task Process subscriptions` or `ServerTaskProcessExecution`, and `OIDC token exchanged` events that do not mention cmdemo1 (the twin's own subscription and token traffic).");
         Line();
