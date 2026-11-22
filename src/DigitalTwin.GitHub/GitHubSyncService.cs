@@ -942,6 +942,8 @@ public sealed partial class GitHubSyncService(
             }
         }
 
+        await AddRepositoryIssuesAsync(itemsById, now, ct);
+
         if (!queryBoardGraphQl || gh.IsGraphQlPaused(out _))
         {
             // The board owns column, state and timing: keep its last observation instead of overwriting it with
@@ -1082,6 +1084,88 @@ public sealed partial class GitHubSyncService(
         {
             await state.PublishAsync(StateKinds.WorkItem, WithTimings(itemsById.Values), EventSourceKind.GitHub, ct);
         }
+    }
+
+    private static readonly TimeSpan IssueSweepInterval = TimeSpan.FromMinutes(10);
+    private static readonly TimeSpan IssueSweepInitialWindow = TimeSpan.FromDays(30);
+    private readonly ConcurrentDictionary<string, DateTimeOffset> _issuesSince = new(StringComparer.OrdinalIgnoreCase);
+    private DateTimeOffset _lastIssueSweep = DateTimeOffset.MinValue;
+
+    /// <summary>
+    /// Issues from each observed repository, so work that is not on Project 679 and not in workitems.json (e.g.
+    /// cmdemo1-dashboard#1011) still reaches the twin. Items the board or workitems.json already produced keep their
+    /// richer data. Swept every 10 minutes with an "updated since" cursor; unchanged pages are ETag 304s.
+    /// </summary>
+    private async Task AddRepositoryIssuesAsync(Dictionary<string, WorkItemSnapshot> itemsById, DateTimeOffset now, CancellationToken ct)
+    {
+        if (now - _lastIssueSweep < IssueSweepInterval)
+        {
+            return;
+        }
+        _lastIssueSweep = now;
+        foreach (var repo in ActiveIncrementalRepos)
+        {
+            var since = _issuesSince.GetValueOrDefault(repo, now - IssueSweepInitialWindow);
+            for (var page = 1; page <= 3; page++)
+            {
+                var res = await gh.GetApiAsync(
+                    $"repos/{Cmdemo1PlatformCatalog.GitHubOrg}/{repo}/issues?state=all&sort=updated&direction=asc&per_page=100&page={page}&since={since.UtcDateTime:yyyy-MM-ddTHH:mm:ssZ}",
+                    bypassPause: false, ct);
+                if (!res.Success || string.IsNullOrWhiteSpace(res.Body))
+                {
+                    break;
+                }
+                using var doc = JsonDocument.Parse(res.Body);
+                var count = 0;
+                foreach (var issue in doc.RootElement.EnumerateArray())
+                {
+                    count++;
+                    if (issue.TryGetProperty("pull_request", out _))
+                    {
+                        continue;
+                    }
+                    var item = FromIssue(repo, issue, now);
+                    if (item.UpdatedAt > since)
+                    {
+                        _issuesSince[repo] = item.UpdatedAt;
+                    }
+                    itemsById.TryAdd(item.Id, item);
+                }
+                if (count < 100)
+                {
+                    break;
+                }
+            }
+        }
+    }
+
+    private static WorkItemSnapshot FromIssue(string repo, JsonElement issue, DateTimeOffset now)
+    {
+        static DateTimeOffset? Date(JsonElement e, string name)
+            => e.TryGetProperty(name, out var v) && v.ValueKind == JsonValueKind.String && DateTimeOffset.TryParse(v.GetString(), out var d) ? d.ToUniversalTime() : null;
+        var number = issue.GetProperty("number").GetInt32();
+        var state = issue.TryGetProperty("state", out var st) ? st.GetString() ?? "open" : "open";
+        var author = issue.TryGetProperty("user", out var u) && u.TryGetProperty("login", out var l) ? l.GetString() : null;
+        var assignee = issue.TryGetProperty("assignee", out var a) && a.ValueKind == JsonValueKind.Object && a.TryGetProperty("login", out var al) ? al.GetString() : null;
+        var isBot = (author ?? "").Contains("bot", StringComparison.OrdinalIgnoreCase) || (assignee ?? "").Contains("bot", StringComparison.OrdinalIgnoreCase);
+        var createdAt = Date(issue, "created_at") ?? now;
+        return new WorkItemSnapshot
+        {
+            Id = $"{repo}#{number}",
+            Repository = repo,
+            Number = number,
+            Title = issue.TryGetProperty("title", out var t) ? t.GetString() ?? "" : "",
+            Url = issue.TryGetProperty("html_url", out var h) ? h.GetString() ?? "" : "",
+            State = state,
+            Column = state == "closed" ? "Done" : assignee is null ? "Todo" : "In Progress",
+            ColumnSource = "derived",
+            WorkerKind = isBot ? "bot" : "team",
+            Agent = isBot ? author : null,
+            Assignee = assignee,
+            CreatedAt = createdAt,
+            ClosedAt = Date(issue, "closed_at"),
+            UpdatedAt = Date(issue, "updated_at") ?? createdAt
+        };
     }
 
     /// <summary>Lead and cycle times, computed the same way whichever path observed the item.</summary>

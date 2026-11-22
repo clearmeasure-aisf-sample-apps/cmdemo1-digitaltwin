@@ -35,6 +35,10 @@ public static class TwinApiEndpoints
             => Results.Ok(await queries.GetGraphAsync(asOf, ct)))
             .AddEndpointFilter(TwinKeyAuth.ValidateOptionalTwinKey());
 
+        app.MapGet("/api/reconciliation/status", (ReconciliationService reconciliation) => Results.Ok(reconciliation.LastReport is { } r
+            ? new { r.FinishedAt, r.DriftCount, r.ErrorCount, checks = r.Checks.Count, drifted = r.Checks.Where(c => c.Error is null && !c.InSync).Select(c => $"{c.Source} {c.Name} ({c.Scope})").ToList() }
+            : null));
+
         app.MapGet("/api/intake/status", async (TwinQueryService queries, CancellationToken ct)
             => Results.Ok(await queries.GetIntakeQueueAsync(ct)));
 
@@ -117,6 +121,12 @@ public static class TwinApiEndpoints
 
         protectedApi.MapGet("/change-chains", async (string? q, int? limit, DateTimeOffset? asOf, TwinQueryService queries, CancellationToken ct)
             => Results.Ok(await queries.GetChangeChainsAsync(q, limit ?? 20, asOf, ct)));
+
+        protectedApi.MapGet("/reconciliation", (ReconciliationService reconciliation)
+            => Results.Ok(reconciliation.LastReport is { } report ? report : new { message = "No reconciliation has run yet; POST /api/admin/reconciliation/run." }));
+
+        protectedApi.MapPost("/admin/reconciliation/run", async (ReconciliationService reconciliation, CancellationToken ct)
+            => Results.Ok(await reconciliation.RunAsync(ct)));
 
         protectedApi.MapGet("/config-changes", async (DateTimeOffset? since, int? limit, DateTimeOffset? asOf, TwinQueryService queries, CancellationToken ct)
             => Results.Ok(await queries.GetConfigChangesAsync(since, limit ?? 50, asOf, ct)));
@@ -241,6 +251,8 @@ public static class TwinApiEndpoints
             - GET {{baseUrl}}/api/metrics?windowDays=7&stage=prod — DORA 5-metric delivery scorecard [X-Twin-Key]
             - GET {{baseUrl}}/api/explain?q=<issue|pr|version|sha|task> — Causal trace across work -> PR -> build -> release -> deploy -> runtime [X-Twin-Key]
             - GET {{baseUrl}}/api/change-chains?q=<issue|pr|sha|version|release>&limit=&asOf= — Change chains: work item -> PR -> build -> RC -> Octopus release -> tdd -> uat -> prod with stage timings and failures [X-Twin-Key]
+            - GET {{baseUrl}}/api/reconciliation — Latest daily comparison of the twin against GitHub and Octopus: drifted checks with what the twin is missing [X-Twin-Key]
+            - POST {{baseUrl}}/api/admin/reconciliation/run — Reconcile now (drifted repositories and Octopus are refreshed) [X-Twin-Key]
             - GET {{baseUrl}}/api/config-changes?since=&limit=&asOf= — Octopus deployment process, variable, project, trigger and runbook changes [X-Twin-Key]
             - GET {{baseUrl}}/api/state-at?asOf=<ISO-8601> — Time travel: versions per environment, Azure resources, board columns and drift at that instant [X-Twin-Key]
             - GET {{baseUrl}}/api/intake — Durable intake queue: depth, oldest pending age, dead letters, transport [X-Twin-Key]
@@ -259,7 +271,7 @@ public static class TwinApiEndpoints
 
             ## MCP Server (Streamable HTTP)
             Endpoint: {{baseUrl}}/mcp (requires `X-Twin-Key` header)
-            Tools: get_summary, get_change_chain, get_config_changes, get_state_at, query_events, get_environment, get_drift, get_pipeline, explain_item, get_intake_queue (read tools accept `asOf`)
+            Tools: get_summary, get_change_chain, get_config_changes, get_reconciliation, get_state_at, query_events, get_environment, get_drift, get_pipeline, explain_item, get_intake_queue (read tools accept `asOf`)
             """);
     }
 }

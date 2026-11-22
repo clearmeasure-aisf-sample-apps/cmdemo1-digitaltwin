@@ -266,3 +266,12 @@ Following the domain research in the prompt's prior-art references:
 - **Decision**: Octopus document events map by their related document type (deployment process, variable sets, interruptions, releases, runbooks, triggers, project settings). Journal events that explain a change attach to its chain stages as `ChainSignal`s at query time, matched by the journal's chain ids, so read models and rebuilds are unaffected. Octopus configuration changes are listed by `GET /api/config-changes` and MCP `get_config_changes`.
 - **Shadow swap (phase 2 follow-up)**: the live and shadow fingerprints under the gate now run in parallel. The verified live run held the gate for 130 s (live 84 s, shadow 43 s).
 
+## ADR-025: Repository Issue Sweep and Daily Reconciliation
+
+- **Finding**: cmdemo1-dashboard#1011 (closed 2026-11-22 00:42 UTC, PR #1018) was missing from work items. It is on no GitHub Project (`projectItems` is empty), and work items came only from Project #679 and `workitems.json`, which covers cmdemo1-workorders and its first 150 items.
+- **Decision**:
+  - The GitHub poller also sweeps each observed repository's issues every 10 minutes (updated-since cursor, ETag-cached).
+  - `ISourceReconciler`s in the GitHub and Octopus adapters compare the twin with each source daily and trigger a targeted refresh where it drifted.
+  - The report is exposed by API, MCP and the dashboard.
+- **Tests**: integration tests are offline. The test host routes the `github`, `github-raw` and `octopus` HTTP clients to an unavailable stub and blanks GitHub tokens, so tests never reach external APIs even when the environment has credentials.
+

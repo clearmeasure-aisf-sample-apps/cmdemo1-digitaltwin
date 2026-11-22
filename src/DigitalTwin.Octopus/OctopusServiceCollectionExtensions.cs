@@ -16,6 +16,7 @@ public static class OctopusServiceCollectionExtensions
             opts.WebhookSecret = FirstNonEmpty(configuration["WEBHOOK_SECRET"], configuration["Twin:WebhookSecret"]);
         });
         services.AddSingleton<IOctopusSyncService, OctopusSyncService>();
+        services.AddSingleton<ISourceReconciler, OctopusReconciler>();
         return services;
     }
 
