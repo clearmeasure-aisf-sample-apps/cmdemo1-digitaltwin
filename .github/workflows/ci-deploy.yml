@@ -220,7 +220,7 @@ jobs:
               if [ $((i % 12)) -eq 0 ]; then echo "$STATUS" | jq -c '{running, startedAt, rawEventsReplayedSoFar}' >&2; fi
               sleep 5
             done
-            echo "$STATUS" | jq '{running, lastError, report: (.lastReport | {identical, readModelsIdentical, startedAt, finishedAt, rawEventsReplayed, rawEventsFailed, journalEventsRebuilt, differences, fingerprintAfter})}' >&2
+            echo "$STATUS" | jq '{running, lastError, report: (.lastReport | {aborted, identical, readModelsIdentical, startedAt, finishedAt, rawEventsReplayed, rawEventsFailed, journalEventsRebuilt, differences, fingerprintAfter})}' >&2
             echo "$STATUS"
           }
           if [ "${VERIFY_REBUILD}" = "true" ]; then

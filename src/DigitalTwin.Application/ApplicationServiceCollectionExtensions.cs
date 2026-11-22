@@ -26,6 +26,7 @@ public static class ApplicationServiceCollectionExtensions
 
         services.AddSingleton<IntakeEventApplier>();
         services.AddSingleton<IIntakeEventApplier>(sp => sp.GetRequiredService<IntakeEventApplier>());
+        services.AddSingleton<RebuildPreflight>();
         services.AddSingleton<IntakeRebuildService>();
         services.AddSingleton<FollowUpRefreshScheduler>();
         services.AddHostedService(sp => sp.GetRequiredService<FollowUpRefreshScheduler>());

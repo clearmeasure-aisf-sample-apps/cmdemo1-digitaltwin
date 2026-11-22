@@ -14,7 +14,9 @@ public sealed record IntakeRebuildReport(
     IReadOnlyDictionary<string, string> FingerprintBefore,
     IReadOnlyDictionary<string, string> FingerprintAfter,
     IReadOnlyList<string> Differences,
-    IReadOnlyList<string> Failures);
+    IReadOnlyList<string> Failures,
+    bool Aborted = false,
+    RebuildPreflightReport? Preflight = null);
 
 /// <summary>
 /// Rebuilds ALL twin state (event journal and every read model) purely from the raw intake table.
@@ -27,6 +29,7 @@ public sealed class IntakeRebuildService(
     ITwinStore store,
     IntakeEventApplier applier,
     ProjectionGate gate,
+    RebuildPreflight preflight,
     IRealtimeEventPublisher realtime,
     TimeProvider timeProvider)
 {
@@ -41,7 +44,7 @@ public sealed class IntakeRebuildService(
     private string? _lastError;
 
     /// <summary>Starts a rebuild (or joins the running one). Detached from callers: an HTTP timeout never aborts it.</summary>
-    public Task<IntakeRebuildReport> StartOrJoin()
+    public Task<IntakeRebuildReport> StartOrJoin(bool force = false)
     {
         lock (_lock)
         {
@@ -53,7 +56,7 @@ public sealed class IntakeRebuildService(
             {
                 try
                 {
-                    var report = await RebuildFromRawAsync(CancellationToken.None);
+                    var report = await RebuildFromRawAsync(force, CancellationToken.None);
                     _lastReport = report;
                     _lastError = null;
                     return report;
@@ -71,13 +74,23 @@ public sealed class IntakeRebuildService(
     public IntakeRebuildStatus GetStatus()
         => new(_current is { IsCompleted: false }, _startedAt, Volatile.Read(ref _progress), _lastReport, _lastError);
 
-    public async Task<IntakeRebuildReport> RebuildFromRawAsync(CancellationToken ct)
+    /// <param name="force">Rebuild even when the raw store cannot reproduce every live read-model row (those rows are lost).</param>
+    public async Task<IntakeRebuildReport> RebuildFromRawAsync(bool force, CancellationToken ct)
     {
         using var _ = await gate.EnterAsync(ct);
         var startedAt = timeProvider.GetUtcNow();
         _startedAt = startedAt;
         Volatile.Write(ref _progress, 0);
         var before = await store.GetReadModelFingerprintAsync(ct);
+
+        var check = await preflight.RunAsync(ct);
+        if (!check.CanRebuild && !force)
+        {
+            var missing = check.Kinds.Where(k => k.Value.MissingFromRaw > 0)
+                .Select(k => $"{k.Key}: {k.Value.MissingFromRaw} live row(s) not reproducible from raw events, e.g. {string.Join(", ", k.Value.MissingSample)}")
+                .ToList();
+            return new IntakeRebuildReport(startedAt, timeProvider.GetUtcNow(), 0, 0, 0, 0, false, false, before, before, missing, [], Aborted: true, Preflight: check);
+        }
 
         var cleared = await store.ClearEventJournalAsync(ct);
         await store.ClearReadModelsAsync(ct);
@@ -122,6 +135,6 @@ public sealed class IntakeRebuildService(
         return new IntakeRebuildReport(
             startedAt, finishedAt, cleared, replayed, failures.Count, rebuilt,
             differences.Count == 0, differences.All(d => d.StartsWith(JournalFingerprintKey + ":", StringComparison.Ordinal)),
-            before, afterFingerprint, differences, failures.Take(20).ToList());
+            before, afterFingerprint, differences, failures.Take(20).ToList(), Preflight: check);
     }
 }

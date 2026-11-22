@@ -8,13 +8,17 @@ namespace DigitalTwin.Application.Intake;
 /// <summary>
 /// One-time migration to event-sourced read models: rows written before projections existed are captured as
 /// state observations, so the raw store holds everything a rebuild needs (e.g. deployments older than the
-/// Octopus poll window).
+/// Octopus poll window). Completion is recorded by an explicit marker, not inferred from projection versions:
+/// webhook-driven refreshes can project state before the seeder runs. Publishing compares content hashes with the
+/// projection, so only rows whose state the raw store lacks are captured.
 /// </summary>
-public sealed class ProjectionBaselineSeeder(ITwinStore store, StateObservationPublisher state)
+public sealed class ProjectionBaselineSeeder(ITwinStore store, StateObservationPublisher state, TimeProvider timeProvider)
 {
+    public const string MarkerKey = "projection-baseline";
+
     public async Task<bool> SeedIfNeededAsync(CancellationToken ct)
     {
-        if (await store.CountProjectionVersionsAsync(ct) > 0)
+        if ((await store.GetCursorsAsync(ct)).Any(c => c.SourceKey == MarkerKey && c.Status == "seeded"))
         {
             return false;
         }
@@ -43,6 +47,9 @@ public sealed class ProjectionBaselineSeeder(ITwinStore store, StateObservationP
         {
             await PublishSetIfAnyAsync(StateKinds.WebhookStatus, group.Key, group.ToList(), ct);
         }
+
+        var now = timeProvider.GetUtcNow();
+        await store.UpsertCursorAsync(new IngestionCursor { SourceKey = MarkerKey, Status = "seeded", LastAttemptAt = now, LastSuccessAt = now }, ct);
         return true;
     }
 
