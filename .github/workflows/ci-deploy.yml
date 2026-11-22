@@ -45,10 +45,27 @@ jobs:
           az bicep build --file infra/eventgrid.bicep
           az bicep build --file infra/servicebus.bicep
 
-  deploy:
+      - name: Validate deploy scripts
+        run: for f in deploy/scripts/*.sh scripts/*.sh deploy/octopus/terraform/steps/*.sh; do bash -n "$f"; done
+
+      - uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_wrapper: false
+
+      - name: Validate Octopus definitions (Terraform, not applied)
+        working-directory: deploy/octopus/terraform
+        run: |
+          terraform fmt -check -recursive
+          terraform init -backend=false -input=false
+          terraform validate
+
+  release-candidate:
     needs: build-and-test
     if: github.event_name != 'pull_request'
     runs-on: ubuntu-24.04
+    outputs:
+      version: ${{ steps.rc.outputs.version }}
+      image: ${{ steps.rc.outputs.image }}
     steps:
       - uses: actions/checkout@v6.0.1
 
@@ -58,13 +75,10 @@ jobs:
           ARM_CLIENT_SECRET: ${{ secrets.AZURE_CLIENT_SECRET }}
           ARM_TENANT_ID: ${{ secrets.AZURE_TENANT_ID }}
           ARM_SUBSCRIPTION_ID: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
-        run: |
-          set -euo pipefail
-          az login --service-principal -u "$ARM_CLIENT_ID" -p "$ARM_CLIENT_SECRET" --tenant "$ARM_TENANT_ID" --output none
-          az account set --subscription "$ARM_SUBSCRIPTION_ID"
+        run: bash deploy/scripts/azure-login.sh
 
-      - name: Build and push container image to ACR
-        id: acr
+      - name: Build and push the release candidate image to ACR
+        id: rc
         run: |
           set -euo pipefail
           ACR_NAME="acrcmdemo1chu4gq"
@@ -80,29 +94,79 @@ jobs:
           docker build --build-arg "VERSION=${VERSION}" --tag "$IMAGE" .
           docker push "$IMAGE"
 
+          echo "version=${VERSION}" >> "$GITHUB_OUTPUT"
           echo "image=${IMAGE}" >> "$GITHUB_OUTPUT"
-          echo "acr_user=${ACR_USER}" >> "$GITHUB_OUTPUT"
-          echo "acr_pass=${ACR_PASS}" >> "$GITHUB_OUTPUT"
 
-      - name: Defer the deploy while a twin rebuild is running
+      - name: Package the release candidate for Octopus
         env:
-          TWIN_API_KEY: ${{ secrets.TWIN_API_KEY }}
+          VERSION: ${{ steps.rc.outputs.version }}
+          IMAGE: ${{ steps.rc.outputs.image }}
+          COMMIT_SHA: ${{ github.sha }}
         run: |
-          # Restarting mid-rebuild would discard its shadow tables (live state is safe, but the work is lost).
-          FQDN=$(az containerapp show -n ca-cmdemo1-twin -g rg-cmdemo1-nonprod --query properties.configuration.ingress.fqdn -o tsv 2>/dev/null || true)
-          if [ -z "$FQDN" ]; then echo "Twin not deployed yet."; exit 0; fi
-          for i in $(seq 1 120); do
-            RUNNING=$(curl -fsS -m 20 -H "X-Twin-Key: ${TWIN_API_KEY}" "https://${FQDN}/api/admin/rebuild/status" | jq -r '.running' 2>/dev/null || echo unknown)
-            if [ "$RUNNING" != "true" ]; then echo "No rebuild running (${RUNNING}); deploying."; exit 0; fi
-            [ $((i % 4)) -eq 1 ] && curl -fsS -m 20 -H "X-Twin-Key: ${TWIN_API_KEY}" "https://${FQDN}/api/admin/rebuild/status" | jq -c '{running, phase, rawEventsReplayedSoFar}'
-            sleep 30
-          done
-          echo "A rebuild has been running for an hour; deploy blocked. Cancel it with POST /api/admin/rebuild/cancel or wait." >&2
-          exit 1
+          set -euo pipefail
+          ZIP=$(bash deploy/scripts/package-twin.sh)
+          unzip -l "$ZIP"
+          echo "## Release candidate ${VERSION}" >> "$GITHUB_STEP_SUMMARY"
+          echo "- Image: \`${IMAGE}\`" >> "$GITHUB_STEP_SUMMARY"
+          echo "- Octopus package: \`$(basename "$ZIP")\` (workflow artifact)" >> "$GITHUB_STEP_SUMMARY"
 
-      - name: Deploy Bicep infrastructure to rg-cmdemo1-nonprod
+      - uses: actions/upload-artifact@v4
+        with:
+          name: cmdemo1-digitaltwin.${{ steps.rc.outputs.version }}
+          path: out/cmdemo1-digitaltwin.${{ steps.rc.outputs.version }}.zip
+          retention-days: 30
+          if-no-files-found: error
+
+  # Off unless the Octopus owner applies deploy/octopus/terraform and sets the repository variable TWIN_OCTOPUS_RELEASES=true.
+  # Pushes the package to the space's built-in feed and creates a release; it never deploys or promotes.
+  octopus-release:
+    needs: release-candidate
+    if: github.event_name != 'pull_request' && vars.TWIN_OCTOPUS_RELEASES == 'true'
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: cmdemo1-digitaltwin.${{ needs.release-candidate.outputs.version }}
+
+      - name: Push the package and create the Octopus release
+        env:
+          OCTOPUS_URL: ${{ secrets.OCTOPUS_URL }}
+          OCTOPUS_API_KEY: ${{ secrets.OCTOPUS_API_KEY }}
+          VERSION: ${{ needs.release-candidate.outputs.version }}
+          SPACE: ${{ vars.TWIN_OCTOPUS_SPACE || 'Spaces-355' }}
+          PROJECT: ${{ vars.TWIN_OCTOPUS_PROJECT || 'cmdemo1-digitaltwin' }}
+        run: |
+          set -euo pipefail
+          BASE="${OCTOPUS_URL%/}"
+          curl -fsS -X POST -H "X-Octopus-ApiKey: ${OCTOPUS_API_KEY}" -F "file=@cmdemo1-digitaltwin.${VERSION}.zip" \
+            "${BASE}/api/${SPACE}/packages/raw?overwriteMode=IgnoreIfExists" | jq -c '{PackageId, Version}'
+          jq -n --arg space "$SPACE" --arg project "$PROJECT" --arg v "$VERSION" \
+            '{spaceIdOrName: $space, projectName: $project, releaseVersion: $v, packageVersion: $v}' \
+            | curl -fsS -X POST -H "X-Octopus-ApiKey: ${OCTOPUS_API_KEY}" -H "Content-Type: application/json" -d @- \
+                "${BASE}/api/${SPACE}/releases/create/v1" | jq -c '{ReleaseId, ReleaseVersion}'
+
+  # Direct deploy of each release candidate. Once the Octopus project is applied and deploying, set the repository
+  # variable TWIN_DEPLOY_VIA_OCTOPUS=true to hand deploys to Octopus (the same scripts run there).
+  deploy:
+    needs: release-candidate
+    if: github.event_name != 'pull_request' && vars.TWIN_DEPLOY_VIA_OCTOPUS != 'true'
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v6.0.1
+
+      - name: Azure login
+        env:
+          ARM_CLIENT_ID: ${{ secrets.AZURE_CLIENT_ID }}
+          ARM_CLIENT_SECRET: ${{ secrets.AZURE_CLIENT_SECRET }}
+          ARM_TENANT_ID: ${{ secrets.AZURE_TENANT_ID }}
+          ARM_SUBSCRIPTION_ID: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
+        run: bash deploy/scripts/azure-login.sh
+
+      - name: Deploy the release candidate (rebuild deferral, Bicep, revision ready)
         id: bicep
         env:
+          IMAGE: ${{ needs.release-candidate.outputs.image }}
+          VERSION: ${{ needs.release-candidate.outputs.version }}
           ARM_CLIENT_ID: ${{ secrets.AZURE_CLIENT_ID }}
           ARM_CLIENT_SECRET: ${{ secrets.AZURE_CLIENT_SECRET }}
           ARM_TENANT_ID: ${{ secrets.AZURE_TENANT_ID }}
@@ -112,97 +176,7 @@ jobs:
           GH_PAT: ${{ secrets.GH_PAT }}
           WEBHOOK_SECRET: ${{ secrets.WEBHOOK_SECRET }}
           TWIN_API_KEY: ${{ secrets.TWIN_API_KEY }}
-          ACR_PASS: ${{ steps.acr.outputs.acr_pass }}
-        run: |
-          set -euo pipefail
-          RG="rg-cmdemo1-nonprod"
-          DEPLOYER_OID=$(az ad sp show --id "$ARM_CLIENT_ID" --query id -o tsv)
-          KV_EXISTING=$(az keyvault list -g "$RG" --query "[?tags.purpose=='digital-twin'].name | [0]" -o tsv 2>/dev/null || echo "")
-
-          SQL_PASS=""
-          if [ -n "$KV_EXISTING" ]; then
-            SQL_PASS=$(az keyvault secret show --vault-name "$KV_EXISTING" --name sql-admin-password --query value -o tsv 2>/dev/null || echo "")
-          fi
-          if [ -z "$SQL_PASS" ]; then
-            SQL_PASS=$(python3 -c 'import secrets,string; chars=string.ascii_letters+string.digits+"-_.~"; print("Tw1!"+"".join(secrets.choice(chars) for _ in range(28)))')
-          fi
-          echo "::add-mask::$SQL_PASS"
-
-          PARAMS_FILE=$(mktemp)
-          chmod 600 "$PARAMS_FILE"
-          trap 'rm -f "$PARAMS_FILE"' EXIT
-
-          jq -n \
-            --arg img "${{ steps.acr.outputs.image }}" \
-            --arg acrUser "${{ steps.acr.outputs.acr_user }}" \
-            --arg acrPass "$ACR_PASS" \
-            --arg oid "$DEPLOYER_OID" \
-            --arg sqlPass "$SQL_PASS" \
-            --arg azCid "$ARM_CLIENT_ID" \
-            --arg azSec "$ARM_CLIENT_SECRET" \
-            --arg azTid "$ARM_TENANT_ID" \
-            --arg azSub "$ARM_SUBSCRIPTION_ID" \
-            --arg octoUrl "$OCTOPUS_URL" \
-            --arg octoKey "$OCTOPUS_API_KEY" \
-            --arg ghPat "$GH_PAT" \
-            --arg whSec "$WEBHOOK_SECRET" \
-            --arg apiKey "$TWIN_API_KEY" \
-            '{
-              "$schema": "https://schema.management.azure.com/schemas/2019-04-01/deploymentParameters.json#",
-              "contentVersion": "1.0.0.0",
-              "parameters": {
-                "containerImage": { "value": $img },
-                "acrUsername": { "value": $acrUser },
-                "acrPassword": { "value": $acrPass },
-                "deployerObjectId": { "value": $oid },
-                "sqlAdminPassword": { "value": $sqlPass },
-                "azureClientId": { "value": $azCid },
-                "azureClientSecret": { "value": $azSec },
-                "azureTenantId": { "value": $azTid },
-                "azureSubscriptionId": { "value": $azSub },
-                "octopusUrl": { "value": $octoUrl },
-                "octopusApiKey": { "value": $octoKey },
-                "gitHubPat": { "value": $ghPat },
-                "webhookSecret": { "value": $whSec },
-                "twinApiKey": { "value": $apiKey }
-              }
-            }' > "$PARAMS_FILE"
-
-          TWIN_URL=$(az deployment group create \
-            --resource-group "$RG" \
-            --name "deploy-cmdemo1-twin" \
-            --template-file infra/main.bicep \
-            --parameters "@${PARAMS_FILE}" \
-            --query properties.outputs.twinUrl.value \
-            -o tsv)
-
-          echo "twin_url=${TWIN_URL}" >> "$GITHUB_OUTPUT"
-          echo "Deployed Digital Twin at ${TWIN_URL}"
-
-      - name: Wait for the new revision to be ready and serving this build
-        env:
-          TWIN_URL: ${{ steps.bicep.outputs.twin_url }}
-          EXPECTED_VERSION: 1.0.${{ github.run_number }}
-        run: |
-          set -uo pipefail
-          RG=rg-cmdemo1-nonprod; APP=ca-cmdemo1-twin
-          az extension add --name containerapp --upgrade --only-show-errors --output none
-          for i in $(seq 1 60); do
-            LATEST=$(az containerapp show -g "$RG" -n "$APP" --query properties.latestRevisionName -o tsv)
-            READY=$(az containerapp show -g "$RG" -n "$APP" --query properties.latestReadyRevisionName -o tsv)
-            SERVED=$(curl -fsS "${TWIN_URL}/health" 2>/dev/null | jq -r '.version // "unknown"')
-            echo "$(date -u +%T) latest=${LATEST} ready=${READY} served=${SERVED} expected=${EXPECTED_VERSION}"
-            if [ "$LATEST" = "$READY" ] && [ "$SERVED" = "$EXPECTED_VERSION" ]; then
-              echo "Revision ${LATEST} is ready and serving ${EXPECTED_VERSION}"
-              exit 0
-            fi
-            sleep 10
-          done
-          echo "::error::Revision ${LATEST} did not become ready serving ${EXPECTED_VERSION}"
-          az containerapp revision list -g "$RG" -n "$APP" --query "[?properties.active].{name:name, health:properties.healthState, running:properties.runningState, image:properties.template.containers[0].image}" -o table
-          az containerapp logs show -g "$RG" -n "$APP" --revision "$LATEST" --type console --tail 80 --format text 2>&1 \
-            | grep -viE "password|secret|pwd=|key=" | grep -E "fail:|crit:|Exception|Unhandled|Timeout" | head -40 || true
-          exit 1
+        run: bash deploy/scripts/deploy-twin.sh
 
       - name: Register GitHub webhooks, Octopus subscription, and Azure Event Grid
         env:
@@ -215,6 +189,13 @@ jobs:
         run: |
           chmod +x scripts/register-hooks.sh
           ./scripts/register-hooks.sh
+
+      - name: Health gate (version, dead letters, storage, MCP)
+        env:
+          TWIN_URL: ${{ steps.bicep.outputs.twin_url }}
+          TWIN_API_KEY: ${{ secrets.TWIN_API_KEY }}
+          EXPECTED_VERSION: ${{ needs.release-candidate.outputs.version }}
+        run: bash deploy/scripts/verify-twin.sh
 
       - name: Verify API, MCP, and Backfill
         env:

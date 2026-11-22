@@ -1,0 +1,150 @@
+variable "octopus_url" {
+  description = "Octopus Server URL."
+  type        = string
+  default     = "https://clearmeasure.octopus.app"
+}
+
+variable "octopus_api_key" {
+  description = "API key of the person applying this configuration (supplied by the Octopus owner at apply time; never committed)."
+  type        = string
+  sensitive   = true
+}
+
+variable "space_id" {
+  description = "Space that holds the twin's project."
+  type        = string
+  default     = "Spaces-355"
+}
+
+variable "project_name" {
+  description = "Octopus project for the twin."
+  type        = string
+  default     = "cmdemo1-digitaltwin"
+}
+
+variable "project_group_id" {
+  description = "Existing project group for the twin; leave empty to create one named project_group_name."
+  type        = string
+  default     = ""
+}
+
+variable "project_group_name" {
+  description = "Project group created when project_group_id is empty."
+  type        = string
+  default     = "Platform"
+}
+
+variable "environment_name" {
+  description = "Octopus environment the twin deploys to. The twin is one platform-level instance, above the system's tdd/uat/prod."
+  type        = string
+  default     = "Platform Twin"
+}
+
+variable "auto_deploy" {
+  description = "Deploy each new release to the twin environment automatically. Off by default: releases wait for someone to deploy them."
+  type        = bool
+  default     = false
+}
+
+variable "package_id" {
+  description = "Package the GitHub Actions release-candidate job builds (cmdemo1-digitaltwin.<version>.zip)."
+  type        = string
+  default     = "cmdemo1-digitaltwin"
+}
+
+variable "worker_pool_id" {
+  description = "Worker pool for the steps; empty looks up worker_pool_name."
+  type        = string
+  default     = ""
+}
+
+variable "worker_pool_name" {
+  description = "Linux worker pool looked up when worker_pool_id is empty (the steps are Bash). Falls back to the space's default pool if none matches."
+  type        = string
+  default     = "Hosted Ubuntu"
+}
+
+variable "worker_container_feed_id" {
+  description = "Docker feed used to pull worker_container_image; empty runs the steps directly on the worker (it then needs az, jq, curl, python3, unzip)."
+  type        = string
+  default     = ""
+}
+
+variable "worker_container_image" {
+  description = "Execution container with the Azure CLI, jq, curl and python3."
+  type        = string
+  default     = "octopusdeploy/worker-tools:6-ubuntu.22.04"
+}
+
+variable "resource_group" {
+  description = "Azure resource group that hosts the twin."
+  type        = string
+  default     = "rg-cmdemo1-nonprod"
+}
+
+variable "container_app_name" {
+  description = "The twin's Container App."
+  type        = string
+  default     = "ca-cmdemo1-twin"
+}
+
+variable "acr_name" {
+  description = "Container registry the release-candidate job pushes the twin image to."
+  type        = string
+  default     = "acrcmdemo1chu4gq"
+}
+
+variable "image_repository" {
+  description = "Repository of the twin image in the registry."
+  type        = string
+  default     = "cmdemo1/digitaltwin"
+}
+
+variable "enable_event_grid" {
+  description = "Let the hook registration step manage the Azure Event Grid subscriptions."
+  type        = bool
+  default     = true
+}
+
+# Sensitive project variables: the same values the GitHub repository secrets hold today.
+# Supply them as TF_VAR_* from the owner's secret store; they end up in Terraform state, so keep state encrypted and private.
+variable "azure_client_id" {
+  type      = string
+  sensitive = true
+}
+
+variable "azure_client_secret" {
+  type      = string
+  sensitive = true
+}
+
+variable "azure_tenant_id" {
+  type      = string
+  sensitive = true
+}
+
+variable "azure_subscription_id" {
+  type      = string
+  sensitive = true
+}
+
+variable "twin_octopus_api_key" {
+  description = "Read-mostly API key the twin itself uses for Octopus (the OCTOPUS_API_KEY repository secret)."
+  type        = string
+  sensitive   = true
+}
+
+variable "github_pat" {
+  type      = string
+  sensitive = true
+}
+
+variable "webhook_secret" {
+  type      = string
+  sensitive = true
+}
+
+variable "twin_api_key" {
+  type      = string
+  sensitive = true
+}
