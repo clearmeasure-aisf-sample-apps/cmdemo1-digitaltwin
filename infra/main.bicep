@@ -49,6 +49,13 @@ param intakeTransport string = 'SqlServer'
 @description('Deploy sb-cmdemo1-twin and switch the intake to Azure Service Bus with managed identity. Requires Microsoft.ServiceBus to be registered and roleAssignments/write; disabled until a subscription Owner enables it.')
 param deployServiceBus bool = false
 
+@description('How the twin authenticates to Service Bus when deployServiceBus is true: ManagedIdentity (needs roleAssignments/write) or SharedAccessKey (Contributor-compatible).')
+@allowed([
+  'ManagedIdentity'
+  'SharedAccessKey'
+])
+param serviceBusAuth string = 'ManagedIdentity'
+
 @description('Archive raw intake events older than the retention window as compressed daily files in a private Blob container.')
 param deployArchive bool = true
 
@@ -238,10 +245,27 @@ module serviceBus 'servicebus.bicep' = if (deployServiceBus) {
     location: location
     identityName: twinIdentityName
     tags: tags
+    auth: serviceBusAuth
   }
 }
 
-var intakeEnv = deployServiceBus
+var serviceBusUsesKey = deployServiceBus && serviceBusAuth == 'SharedAccessKey'
+
+resource serviceBusAppRule 'Microsoft.ServiceBus/namespaces/authorizationRules@2024-01-01' existing = if (serviceBusUsesKey) {
+  name: 'sb-cmdemo1-twin/twin-intake-app'
+  dependsOn: [
+    serviceBus
+  ]
+}
+
+var serviceBusSecrets = serviceBusUsesKey ? [{ name: 'servicebus-connection', value: serviceBusAppRule!.listKeys().primaryConnectionString }] : []
+
+var intakeEnv = serviceBusUsesKey
+  ? [
+      { name: 'Twin__Messaging__Transport', value: 'AzureServiceBus' }
+      { name: 'Twin__Messaging__ServiceBusConnectionString', secretRef: 'servicebus-connection' }
+    ]
+  : deployServiceBus
   ? [
       { name: 'Twin__Messaging__Transport', value: 'AzureServiceBus' }
       { name: 'Twin__Messaging__ServiceBusNamespace', value: serviceBus!.outputs.namespaceFqdn }
@@ -262,7 +286,7 @@ resource twinApp 'Microsoft.App/containerApps@2025-01-01' = {
     allowAzureServices
     archiveContainer
   ]
-  identity: deployServiceBus
+  identity: deployServiceBus && !serviceBusUsesKey
     ? {
         type: 'UserAssigned'
         userAssignedIdentities: {
@@ -299,7 +323,7 @@ resource twinApp 'Microsoft.App/containerApps@2025-01-01' = {
         { name: 'gh-pat', value: gitHubPat }
         { name: 'webhook-secret', value: webhookSecret }
         { name: 'twin-api-key', value: twinApiKey }
-      ], archiveSecrets)
+      ], archiveSecrets, serviceBusSecrets)
     }
     template: {
       containers: [

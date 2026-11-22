@@ -85,7 +85,7 @@ public static class MessagingHostExtensions
                 }
                 else
                 {
-                    // The emulator has no management API; its queue is declared in docker/servicebus-emulator/config.json.
+                    // Shared access key (Bicep creates the queue) or emulator (queue in docker/servicebus-emulator/config.json): no provisioning.
                     opts.UseAzureServiceBus(messaging.ServiceBusConnectionString);
                 }
                 opts.PublishMessage<TwinIntakeCaptured>().ToAzureServiceBusQueue(messaging.QueueName).UseDurableOutbox();
@@ -139,7 +139,7 @@ public static class MessagingHostExtensions
             string.IsNullOrWhiteSpace(messaging.ServiceBusConnectionString))
         {
             throw new InvalidOperationException(
-                "Twin:Messaging:ServiceBusNamespace (managed identity) or ServiceBusConnectionString (emulator) is required for the AzureServiceBus transport.");
+                "Twin:Messaging:ServiceBusNamespace (managed identity) or ServiceBusConnectionString (shared access key or emulator) is required for the AzureServiceBus transport.");
         }
         return messaging;
     }
