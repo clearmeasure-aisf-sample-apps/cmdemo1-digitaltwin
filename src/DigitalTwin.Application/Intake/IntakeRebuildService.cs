@@ -20,7 +20,8 @@ public sealed record IntakeRebuildReport(
     RebuildPreflightReport? Preflight = null,
     bool Swapped = false,
     int CatchUpEventsReplayed = 0,
-    double LivePausedMilliseconds = 0);
+    double LivePausedMilliseconds = 0,
+    IReadOnlyDictionary<string, double>? StepSeconds = null);
 
 public sealed record IntakeRebuildStatus(
     bool Running,
@@ -131,11 +132,19 @@ public sealed class IntakeRebuildService(
         _startedAt = startedAt;
         Volatile.Write(ref _progress, 0);
         var swapped = false;
+        var steps = new Dictionary<string, double>(StringComparer.Ordinal);
+        var stepStarted = timeProvider.GetTimestamp();
+        void Step(string name)
+        {
+            steps[name] = Math.Round(timeProvider.GetElapsedTime(stepStarted).TotalSeconds, 1);
+            stepStarted = timeProvider.GetTimestamp();
+        }
         try
         {
             _phase = "preparing shadow tables";
             var shadow = await target.CreateAsync(ct);
             var run = new ReplayRun(shadow);
+            Step("prepare");
 
             _phase = "replaying history";
             await foreach (var page in history.ReadPagesAsync(PageSize, ct))
@@ -143,6 +152,7 @@ public sealed class IntakeRebuildService(
                 await ReplayAsync(run, page, ct);
             }
 
+            Step("replay");
             _phase = "catching up";
             var catchUp = 0;
             for (var round = 0; round < MaxCatchUpRounds; round++)
@@ -155,6 +165,7 @@ public sealed class IntakeRebuildService(
                 }
             }
 
+            Step("catchUp");
             _phase = "final catch-up and swap";
             IReadOnlyDictionary<string, string> live;
             IReadOnlyDictionary<string, string> rebuilt;
@@ -165,9 +176,13 @@ public sealed class IntakeRebuildService(
             using (await gate.EnterAsync(ct))
             {
                 var pauseStarted = timeProvider.GetTimestamp();
+                stepStarted = pauseStarted;
                 catchUp += await CatchUpAsync(run, ct);
+                Step("finalCatchUp");
                 live = await store.GetReadModelFingerprintAsync(ct);
+                Step("liveFingerprint");
                 rebuilt = await shadow.GetReadModelFingerprintAsync(ct);
+                Step("shadowFingerprint");
                 differences = live.Keys.Union(rebuilt.Keys)
                     .Where(k => !string.Equals(live.GetValueOrDefault(k), rebuilt.GetValueOrDefault(k), StringComparison.Ordinal))
                     .Select(k => $"{k}: {live.GetValueOrDefault(k) ?? "-"} -> {rebuilt.GetValueOrDefault(k) ?? "-"}")
@@ -178,6 +193,7 @@ public sealed class IntakeRebuildService(
                 {
                     await target.SwapAsync(ct);
                     swapped = true;
+                    Step("swap");
                 }
                 pausedMs = timeProvider.GetElapsedTime(pauseStarted).TotalMilliseconds;
             }
@@ -190,7 +206,7 @@ public sealed class IntakeRebuildService(
             return new IntakeRebuildReport(
                 startedAt, finishedAt, journalReplaced, run.Replayed, run.Failures.Count, run.Appended,
                 differences.Count == 0, readModelsIdentical, live, rebuilt, differences, run.Failures.Take(20).ToList(),
-                Aborted: !swapped, Swapped: swapped, CatchUpEventsReplayed: catchUp, LivePausedMilliseconds: Math.Round(pausedMs));
+                Aborted: !swapped, Swapped: swapped, CatchUpEventsReplayed: catchUp, LivePausedMilliseconds: Math.Round(pausedMs), StepSeconds: steps);
         }
         finally
         {

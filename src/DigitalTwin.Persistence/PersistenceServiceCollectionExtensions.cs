@@ -25,7 +25,15 @@ public static partial class PersistenceServiceCollectionExtensions
             }
         }
         services.AddDbContextFactory<TwinDbContext>(Configure);
-        services.AddDbContextFactory<ShadowTwinDbContext>(Configure);
+        // Rebuild batches write thousands of rows per statement on a 5 DTU tier: allow minutes, not 30 s.
+        services.AddDbContextFactory<ShadowTwinDbContext>(dbOpts =>
+        {
+            Configure(dbOpts);
+            if (useSqlServer)
+            {
+                dbOpts.UseSqlServer(connectionString, sql => sql.EnableRetryOnFailure(5, TimeSpan.FromSeconds(10), null).CommandTimeout(300));
+            }
+        });
         services.AddSingleton<ITwinStore, EfTwinStore>();
         services.AddSingleton<IRebuildTarget, ShadowRebuildTarget>();
         return services;
