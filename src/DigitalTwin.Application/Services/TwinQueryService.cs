@@ -206,7 +206,7 @@ public sealed class TwinQueryService(
         var artifacts = await model.GetArtifactsAsync(ct);
         var chains = await BuildChainsAsync(scope, ct);
         // Only chains that reached prod in the last 28 days need their failure signals for DORA.
-        var doraChains = await WithSignalsAsync([.. chains.Where(c => c.Stages[^1].StartedAt >= scope.Now.AddDays(-28))], scope, ct);
+        var doraChains = await WithFailureSignalsAsync([.. chains.Where(c => c.Stages[^1].StartedAt >= scope.Now.AddDays(-28))], scope, ct);
 
         return new DashboardStateDto(
             summary,
@@ -230,7 +230,7 @@ public sealed class TwinQueryService(
     public async Task<ChainDoraMetrics> GetChainDoraAsync(int windowDays, string? deployable, DateTimeOffset? asOf, CancellationToken ct)
     {
         var scope = await timeTravel.ResolveAsync(asOf, ct);
-        var chains = await WithSignalsAsync([.. await BuildChainsAsync(scope, ct)], scope, ct);
+        var chains = await WithFailureSignalsAsync([.. await BuildChainsAsync(scope, ct)], scope, ct);
         return ChainDora.Calculate(chains, scope.Now, Math.Clamp(windowDays, 1, 90), string.IsNullOrWhiteSpace(deployable) ? null : deployable);
     }
 
@@ -255,6 +255,20 @@ public sealed class TwinQueryService(
         }
         var ids = chains.SelectMany(c => c.CorrelationIds).Distinct(StringComparer.OrdinalIgnoreCase).ToList();
         var events = await store.GetEventsByChainAsync(ids, scope.AsOf, 2000, ChangeChainSignals.EventTypes, ct);
+        return ChangeChainSignals.Attach(chains, events);
+    }
+
+    private static readonly string[] ProdFailureEventTypes = ["twin.octopus.interruption.guidedFailure", "twin.octopus.deployment.failed"];
+
+    /// <summary>DORA only needs prod failure signals, which Octopus correlates by release id: a small query for many chains.</summary>
+    private async Task<IReadOnlyList<ChangeChain>> WithFailureSignalsAsync(List<ChangeChain> chains, TwinReadScope scope, CancellationToken ct)
+    {
+        var releaseIds = chains.Where(c => c.ReleaseId is not null).Select(c => c.ReleaseId!).Distinct(StringComparer.OrdinalIgnoreCase).ToList();
+        if (releaseIds.Count == 0)
+        {
+            return chains;
+        }
+        var events = await store.GetEventsByChainAsync(releaseIds, scope.AsOf, 2000, ProdFailureEventTypes, ct);
         return ChangeChainSignals.Attach(chains, events);
     }
 

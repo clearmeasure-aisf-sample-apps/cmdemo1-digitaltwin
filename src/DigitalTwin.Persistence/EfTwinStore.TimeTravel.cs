@@ -58,6 +58,7 @@ public sealed partial class EfTwinStore
             return [];
         }
         await using var db = await factory.CreateDbContextAsync(ct);
+        db.Database.SetCommandTimeout(TimeSpan.FromMinutes(2));
         var ids = chainIds.ToList();
         var query = db.ObservedEvents.AsNoTracking().Where(e => e.ChainId != null && ids.Contains(e.ChainId) && e.EventType != StateKinds.EventType);
         if (eventTypes is { Count: > 0 })
