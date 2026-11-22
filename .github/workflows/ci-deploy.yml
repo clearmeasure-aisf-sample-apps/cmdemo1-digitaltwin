@@ -236,7 +236,7 @@ jobs:
               if [ $((i % 12)) -eq 0 ]; then echo "$STATUS" | jq -c '{running, startedAt, rawEventsReplayedSoFar}' >&2; fi
               sleep 5
             done
-            echo "$STATUS" | jq '{running, lastError, report: (.lastReport | {swapped, livePausedMilliseconds, catchUpEventsReplayed, aborted, identical, readModelsIdentical, startedAt, finishedAt, rawEventsReplayed, rawEventsFailed, journalEventsRebuilt, differences, fingerprintAfter})}' >&2
+            echo "$STATUS" | jq '{running, lastError, report: (.lastReport | {swapped, livePausedMilliseconds, stepSeconds, failures: (.failures // [])[:5], catchUpEventsReplayed, aborted, identical, readModelsIdentical, startedAt, finishedAt, rawEventsReplayed, rawEventsFailed, journalEventsRebuilt, differences, fingerprintAfter})}' >&2
             echo "$STATUS"
           }
           # Storage: database usage stays well under the Basic tier's 2 GB; old raw events live in the Blob archive.
@@ -253,7 +253,7 @@ jobs:
           fi
           # Time travel: state reconstructed from the journal ten minutes ago.
           AS_OF=$(date -u -d '10 minutes ago' +%Y-%m-%dT%H:%M:%SZ)
-          curl -fsS -H "X-Twin-Key: ${TWIN_API_KEY}" "${TWIN_URL}/api/state-at?asOf=${AS_OF}" \
+          curl -fsS --retry 3 --retry-all-errors --retry-delay 20 -m 150 -H "X-Twin-Key: ${TWIN_API_KEY}" "${TWIN_URL}/api/state-at?asOf=${AS_OF}" \
             | jq '{asOf, historyStartsAt, beforeHistory, environments: [.environments[] | {stage, deployedVersions, lastDeployment}], azureResources: (.azureResources | length), boardColumns, activeDrift}'
           # Change chains: the most recent delivered change end to end, and the number of chains observed.
           curl -fsS -H "X-Twin-Key: ${TWIN_API_KEY}" "${TWIN_URL}/api/change-chains?limit=100" \

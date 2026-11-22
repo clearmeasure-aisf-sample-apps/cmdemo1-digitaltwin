@@ -11,6 +11,8 @@ public sealed partial class EfTwinStore
     public async Task<IReadOnlyList<ObservedEvent>> GetLatestStateEventsAsync(DateTimeOffset asOf, CancellationToken ct)
     {
         await using var db = await factory.CreateDbContextAsync(ct);
+        // Folding every subject's newest observation takes seconds on the Basic tier, longer under load.
+        db.Database.SetCommandTimeout(TimeSpan.FromMinutes(2));
         if (db.Database.IsSqlite())
         {
             // SQLite (unit tests) cannot compare DateTimeOffset server-side; the point-in-time fold picks the newest.
@@ -41,6 +43,7 @@ public sealed partial class EfTwinStore
     public async Task<IReadOnlyList<ObservedEvent>> GetStateEventHistoryAsync(string kind, DateTimeOffset asOf, CancellationToken ct)
     {
         await using var db = await factory.CreateDbContextAsync(ct);
+        db.Database.SetCommandTimeout(TimeSpan.FromMinutes(2));
         var query = db.ObservedEvents.AsNoTracking().Where(e => e.EventType == StateKinds.EventType && e.SubjectType == kind);
         var rows = db.Database.IsSqlite()
             ? (await query.ToListAsync(ct)).Where(e => e.OccurredAt <= asOf)
