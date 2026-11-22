@@ -1,5 +1,6 @@
 using Azure.Core;
 using Azure.Identity;
+using DigitalTwin.Core.Hierarchy;
 using DigitalTwin.Core.Intake;
 using DigitalTwin.Core.Ports;
 using Microsoft.Data.SqlClient;
@@ -7,10 +8,10 @@ using Microsoft.Extensions.Configuration;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Hosting;
 using Microsoft.Extensions.Options;
-using Wolverine;
 using Wolverine.AzureServiceBus;
 using Wolverine.ErrorHandling;
 using Wolverine.SqlServer;
+using Wolverine;
 
 namespace DigitalTwin.Messaging;
 
@@ -34,7 +35,7 @@ public static class MessagingHostExtensions
 
         builder.UseWolverine(opts =>
         {
-            opts.ServiceName = "cmdemo1-digitaltwin";
+            opts.ServiceName = PlatformCatalog.TwinServiceName;
             opts.Discovery.IncludeAssembly(typeof(TwinIntakeCapturedHandler).Assembly);
             ConfigureTransport(opts, messaging);
 

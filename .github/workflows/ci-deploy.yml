@@ -15,6 +15,15 @@ on:
 permissions:
   contents: read
 
+# The observed platform: repository variables override cmdemo1's defaults (docs/setup/README.md).
+env:
+  TWIN_SYSTEM_SLUG: ${{ vars.TWIN_SYSTEM_SLUG || 'cmdemo1' }}
+  TWIN_RESOURCE_GROUP: ${{ vars.TWIN_RESOURCE_GROUP || 'rg-cmdemo1-nonprod' }}
+  ACR_NAME: ${{ vars.TWIN_ACR_NAME || 'acrcmdemo1chu4gq' }}
+  TWIN_PLATFORM_FILE: ${{ vars.TWIN_PLATFORM_FILE || '' }}
+  TWIN_GITHUB_ORG: ${{ vars.TWIN_GITHUB_ORG || 'clearmeasure-aisf-sample-apps' }}
+  TWIN_OCTOPUS_SPACE: ${{ vars.TWIN_OCTOPUS_SPACE || 'Spaces-355' }}
+
 concurrency:
   group: ci-deploy-${{ github.ref }}
   cancel-in-progress: false
@@ -81,15 +90,14 @@ jobs:
         id: rc
         run: |
           set -euo pipefail
-          ACR_NAME="acrcmdemo1chu4gq"
-          ACR_RG="rg-cmdemo1-nonprod"
+          ACR_RG="${TWIN_RESOURCE_GROUP}"
           az acr update --name "$ACR_NAME" --resource-group "$ACR_RG" --admin-enabled true --output none
           ACR_USER=$(az acr credential show --name "$ACR_NAME" --resource-group "$ACR_RG" --query username -o tsv)
           ACR_PASS=$(az acr credential show --name "$ACR_NAME" --resource-group "$ACR_RG" --query 'passwords[0].value' -o tsv)
           echo "::add-mask::$ACR_PASS"
 
           VERSION="1.0.${{ github.run_number }}"
-          IMAGE="${ACR_NAME}.azurecr.io/cmdemo1/digitaltwin:${VERSION}"
+          IMAGE="${ACR_NAME}.azurecr.io/${TWIN_SYSTEM_SLUG}/digitaltwin:${VERSION}"
           echo "$ACR_PASS" | docker login "${ACR_NAME}.azurecr.io" -u "$ACR_USER" --password-stdin
           docker build --build-arg "VERSION=${VERSION}" --tag "$IMAGE" .
           docker push "$IMAGE"
@@ -336,23 +344,23 @@ jobs:
           TWIN_API_KEY: ${{ secrets.TWIN_API_KEY }}
         run: |
           set -euo pipefail
-          RG=rg-cmdemo1-nonprod
-          # Harmless tag change on a twin-owned resource (never a cmdemo1 resource).
-          WS_ID=$(az monitor log-analytics workspace show -g "$RG" -n log-cmdemo1-twin --query id -o tsv)
+          RG="${TWIN_RESOURCE_GROUP}"; WS="log-${TWIN_SYSTEM_SLUG}-twin"
+          # Harmless tag change on a twin-owned resource (never a resource of the observed system).
+          WS_ID=$(az monitor log-analytics workspace show -g "$RG" -n "$WS" --query id -o tsv)
           PROBE="${{ github.run_id }}-${{ github.run_attempt }}"
           SINCE=$(date -u +%Y-%m-%dT%H:%M:%SZ)
           az tag update --resource-id "$WS_ID" --operation Merge --tags "twinIntakeProbe=${PROBE}" --output none
-          echo "Tagged log-cmdemo1-twin (twinIntakeProbe=${PROBE}) at ${SINCE}"
+          echo "Tagged ${WS} (twinIntakeProbe=${PROBE}) at ${SINCE}"
           FOUND=""
           for i in $(seq 1 36); do
             FOUND=$(curl -fsS -H "X-Twin-Key: ${TWIN_API_KEY}" "${TWIN_URL}/api/events?source=Azure&since=${SINCE}&limit=200" \
-              | jq -c '[.[] | select(.channel == "Webhook" and (.payloadJson | contains("log-cmdemo1-twin")))] | first // empty')
+              | jq -c --arg ws "$WS" '[.[] | select(.channel == "Webhook" and (.payloadJson | contains($ws)))] | first // empty')
             if [ -n "$FOUND" ]; then break; fi
             sleep 5
           done
           az tag update --resource-id "$WS_ID" --operation Delete --tags "twinIntakeProbe=${PROBE}" --output none
           if [ -z "$FOUND" ]; then
-            echo "::error::Azure change on log-cmdemo1-twin did not reach the event journal within 3 minutes"
+            echo "::error::Azure change on ${WS} did not reach the event journal within 3 minutes"
             exit 1
           fi
           echo "$FOUND" | jq '{idempotencyKey, eventType, predicate, channel, subjectId, occurredAt, capturedAt: .ingestedAt}'

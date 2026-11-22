@@ -4,6 +4,9 @@ targetScope = 'resourceGroup'
 @secure()
 param webhookEndpointUrl string
 
+@description('Short name of the observed system (resource tag).')
+param systemSlug string = 'cmdemo1'
+
 var rgName = resourceGroup().name
 var topicName = 'eg-twin-${rgName}'
 
@@ -11,7 +14,7 @@ resource systemTopic 'Microsoft.EventGrid/systemTopics@2022-06-15' = {
   name: topicName
   location: 'global'
   tags: {
-    system: 'cmdemo1'
+    system: systemSlug
     purpose: 'digital-twin'
   }
   properties: {

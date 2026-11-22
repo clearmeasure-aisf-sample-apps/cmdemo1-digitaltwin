@@ -4,7 +4,7 @@ set -euo pipefail
 # Idempotently register:
 # 1. Octopus Deploy Subscription in Spaces-355 (no GitHub quota cost)
 # 2. Azure Event Grid system topics (managed in code; idempotent, refuses to recreate); disable with ENABLE_EVENT_GRID_DEPLOY=false
-# 3. GitHub repo webhooks across all active (non-archived) cmdemo1-* repos (quota-guarded!)
+# 3. GitHub repo webhooks across all active (non-archived) observed repos (quota-guarded!)
 
 : "${TWIN_URL:?TWIN_URL is required (e.g. https://ca-cmdemo1-twin....azurecontainerapps.io)}"
 : "${GH_PAT:?GH_PAT is required}"
@@ -13,10 +13,14 @@ set -euo pipefail
 : "${WEBHOOK_SECRET:?WEBHOOK_SECRET is required}"
 
 TWIN_URL="${TWIN_URL%/}"
-GITHUB_ORG="clearmeasure-aisf-sample-apps"
+ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+# Another platform overrides these (docs/setup/README.md); the defaults are cmdemo1's.
+SLUG="${TWIN_SYSTEM_SLUG:-cmdemo1}"
+GITHUB_ORG="${TWIN_GITHUB_ORG:-clearmeasure-aisf-sample-apps}"
 OCTO_BASE="${OCTOPUS_URL%/}"
-OCTO_SPACE="Spaces-355"
-SUB_NAME="cmdemo1-digitaltwin"
+OCTO_SPACE="${TWIN_OCTOPUS_SPACE:-Spaces-355}"
+SUB_NAME="${TWIN_NAME:-${SLUG}-digitaltwin}"
+RESOURCE_GROUPS="${TWIN_RESOURCE_GROUPS:-rg-${SLUG}-nonprod rg-${SLUG}-prod}"
 
 echo "=== 1. Registering Octopus Subscription '${SUB_NAME}' in ${OCTO_SPACE} -> ${TWIN_URL}/hooks/octopus ==="
 CATEGORIES_JSON=$(curl -fsSL -H "X-Octopus-ApiKey: ${OCTOPUS_API_KEY}" "${OCTO_BASE}/api/events/categories")
@@ -81,7 +85,7 @@ fi
 echo "=== 2. Azure Event Grid system topics (ENABLE_EVENT_GRID_DEPLOY=${ENABLE_EVENT_GRID_DEPLOY:-false}) ==="
 EG_STATE=$(az provider show --namespace Microsoft.EventGrid --query registrationState -o tsv 2>/dev/null || echo "Unknown")
 echo "  Microsoft.EventGrid provider: ${EG_STATE}"
-for rg in rg-cmdemo1-nonprod rg-cmdemo1-prod; do
+for rg in $RESOURCE_GROUPS; do
   TOPICS=$(az eventgrid system-topic list -g "$rg" --query "[].name" -o tsv 2>/dev/null | tr '\n' ' ' || true)
   echo "  ${rg}: system topics [${TOPICS:-none}]"
 done
@@ -89,7 +93,7 @@ done
 if [ "${ENABLE_EVENT_GRID_DEPLOY:-false}" = "true" ] && [ "$EG_STATE" = "Registered" ]; then
   ENCODED_TOKEN=$(python3 -c 'import os,urllib.parse; print(urllib.parse.quote(os.environ["WEBHOOK_SECRET"], safe=""))')
   EG_URL="${TWIN_URL}/hooks/azure?token=${ENCODED_TOKEN}"
-  for rg in rg-cmdemo1-nonprod rg-cmdemo1-prod; do
+  for rg in $RESOURCE_GROUPS; do
     TOPIC="eg-twin-${rg}"
     TOPIC_ID=$(az eventgrid system-topic show -g "$rg" -n "$TOPIC" --query id -o tsv 2>/dev/null || echo "")
     # metricResourceId is assigned when the topic is created, so it changes if the topic is ever recreated.
@@ -100,7 +104,7 @@ if [ "${ENABLE_EVENT_GRID_DEPLOY:-false}" = "true" ] && [ "$EG_STATE" = "Registe
     echo "  ${TOPIC}: before deploy metricResourceId=${BEFORE:-<absent>}"
 
     CHANGES=$(az deployment group what-if -g "$rg" --name "deploy-twin-eventgrid" \
-      --template-file infra/eventgrid.bicep --parameters webhookEndpointUrl="$EG_URL" \
+      --template-file "$ROOT/infra/eventgrid.bicep" --parameters webhookEndpointUrl="$EG_URL" systemSlug="$SLUG" \
       --no-pretty-print --query "changes[].[changeType, resourceId]" -o tsv)
     echo "$CHANGES" | sed -E 's#/subscriptions/[^/]+#/subscriptions/<sub>#; s/^/    what-if: /'
     if [ -n "$TOPIC_ID" ] && echo "$CHANGES" | grep -qE '^(Create|Delete)'; then
@@ -109,7 +113,7 @@ if [ "${ENABLE_EVENT_GRID_DEPLOY:-false}" = "true" ] && [ "$EG_STATE" = "Registe
     fi
 
     az deployment group create -g "$rg" --name "deploy-twin-eventgrid" \
-      --template-file infra/eventgrid.bicep --parameters webhookEndpointUrl="$EG_URL" --output none
+      --template-file "$ROOT/infra/eventgrid.bicep" --parameters webhookEndpointUrl="$EG_URL" systemSlug="$SLUG" --output none
 
     AFTER_ID=$(az eventgrid system-topic show -g "$rg" -n "$TOPIC" --query id -o tsv)
     AFTER=$(az eventgrid system-topic show -g "$rg" -n "$TOPIC" --query metricResourceId -o tsv)
@@ -140,9 +144,9 @@ if [ "${CORE_REM}" -lt 200 ]; then
   exit 0
 fi
 
-echo "=== 4. Registering GitHub webhooks on all active cmdemo1-* repos -> ${TWIN_URL}/hooks/github ==="
-SEED_REPOS="cmdemo1-system cmdemo1-workorders cmdemo1-dashboard cmdemo1-aisf cmdemo1-fworker cmdemo1-app2-ui cmdemo1-scorecard cmdemo1-scorecard-site cmdemo1-video cmdemo1-digitaltwin"
-ARCHIVED_SKIP="cmdemo1-app2-ui"
+echo "=== 4. Registering GitHub webhooks on all active ${SLUG} repos -> ${TWIN_URL}/hooks/github ==="
+SEED_REPOS="${TWIN_REPOSITORIES:-cmdemo1-system cmdemo1-workorders cmdemo1-dashboard cmdemo1-aisf cmdemo1-fworker cmdemo1-app2-ui cmdemo1-scorecard cmdemo1-scorecard-site cmdemo1-video cmdemo1-digitaltwin}"
+ARCHIVED_SKIP="${TWIN_SKIP_REPOSITORIES:-cmdemo1-app2-ui}"
 
 for repo in $SEED_REPOS; do
   if echo " $ARCHIVED_SKIP " | grep -q " $repo "; then
@@ -155,8 +159,8 @@ for repo in $SEED_REPOS; do
     -H "Accept: application/vnd.github+json" \
     "https://api.github.com/repos/${GITHUB_ORG}/${repo}/hooks")
 
-  EXISTING_ID=$(echo "$HOOKS_JSON" | jq -r --arg target "${TWIN_URL}/hooks/github" '
-    [.[] | select((.config.url // "") == $target or ((.config.url // "") | test("ca-cmdemo1-twin.*/hooks/github$")))][0].id // empty
+  EXISTING_ID=$(echo "$HOOKS_JSON" | jq -r --arg target "${TWIN_URL}/hooks/github" --arg slug "$SLUG" '
+    [.[] | select((.config.url // "") == $target or ((.config.url // "") | test("ca-" + $slug + "-twin.*/hooks/github$")))][0].id // empty
   ')
   ALREADY_OK=$(echo "$HOOKS_JSON" | jq -r --arg target "${TWIN_URL}/hooks/github" '
     [.[] | select((.config.url // "") == $target and .active == true)][0].id // empty

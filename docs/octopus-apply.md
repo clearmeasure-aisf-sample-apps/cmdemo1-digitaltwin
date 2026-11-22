@@ -16,6 +16,7 @@ The package contains:
 - The Bicep sources.
 - `deploy/scripts/` (`azure-login.sh`, `deploy-twin.sh`, `verify-twin.sh`, `package-twin.sh`).
 - `scripts/register-hooks.sh`.
+- `docs/platforms/*.platform.json`: platform definitions.
 - `release.json`: package id, version, image, commit and build time.
 
 GitHub Actions and the Octopus steps run the same scripts, so a deploy behaves the same from either side.
@@ -36,6 +37,7 @@ These are the defaults in `deploy/octopus/terraform/variables.tf`; override any 
 | `worker_pool_id` / `worker_pool_name` | empty / `Hosted Ubuntu` | The steps are Bash and need a Linux worker |
 | `worker_container_feed_id` / `worker_container_image` | empty / `octopusdeploy/worker-tools:6-ubuntu.22.04` | Optional execution container; needs a Docker Hub feed in the space. Without it, the worker itself needs `az`, `jq`, `curl` and `python3` |
 | `resource_group`, `container_app_name`, `acr_name`, `image_repository` | `rg-cmdemo1-nonprod`, `ca-cmdemo1-twin`, `acrcmdemo1chu4gq`, `cmdemo1/digitaltwin` | Where the twin runs |
+| `system_slug`, `github_org`, `platform_file` | `cmdemo1`, `clearmeasure-aisf-sample-apps`, empty | The observed platform (docs/setup/README.md) |
 
 ### 2. Apply the Terraform
 
@@ -62,7 +64,7 @@ terraform apply
 - A lifecycle `cmdemo1-digitaltwin lifecycle`, with one phase for that environment: optional, or automatic when `auto_deploy` is true.
 - A project `cmdemo1-digitaltwin`, untenanted, allowing deployments with no targets.
 - Project variables:
-  - **6 string variables**: `Twin.ResourceGroup`, `Twin.AppName`, `Twin.AcrName`, `Twin.OctopusUrl`, `Twin.EnableEventGrid`, and `Twin.Image`, which is `<acr>.azurecr.io/cmdemo1/digitaltwin:#{Octopus.Release.Number}`.
+  - **10 string variables**: `Twin.ResourceGroup`, `Twin.AppName`, `Twin.AcrName`, `Twin.OctopusUrl`, `Twin.EnableEventGrid`, `Twin.SystemSlug`, `Twin.GitHubOrg`, `Twin.OctopusSpace`, `Twin.PlatformFile` (a platform definition inside the package; empty for cmdemo1), and `Twin.Image`, which is `<acr>.azurecr.io/cmdemo1/digitaltwin:#{Octopus.Release.Number}`.
   - **8 sensitive variables**: `Azure.ClientId`, `Azure.ClientSecret`, `Azure.TenantId`, `Azure.SubscriptionId`, `Twin.OctopusApiKey`, `Twin.GitHubPat`, `Twin.WebhookSecret`, `Twin.ApiKey`.
 - A deployment process of three Bash script steps, pinned in this order. Each step references the package `cmdemo1-digitaltwin` from the built-in feed, extracted on the worker.
   1. **Deploy twin** (`steps/deploy.sh`): logs in to Azure, then runs `deploy/scripts/deploy-twin.sh`. That script waits out a running rebuild, deploys `infra/main.json` with the release's image, and waits until the revision serves `#{Octopus.Release.Number}`. It sets the output variable `TwinUrl`.

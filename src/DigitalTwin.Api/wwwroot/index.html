@@ -149,9 +149,9 @@
           <div class="stage-col-head">CI Build</div>
           <div class="stage-col-head">RC / Pkg</div>
           <div class="stage-col-head">Octopus</div>
-          <div class="stage-col-head stage-tdd">TDD</div>
-          <div class="stage-col-head stage-uat">UAT</div>
-          <div class="stage-col-head stage-prod">PROD</div>
+          <div class="stage-col-head stage-tdd" data-delivery="tdd">TDD</div>
+          <div class="stage-col-head stage-uat" data-delivery="uat">UAT</div>
+          <div class="stage-col-head stage-prod" data-delivery="prod">PROD</div>
         </div>
         <div class="swim-lanes" id="swim-lanes"></div>
       </div>
@@ -161,7 +161,7 @@
     <section class="chain-board" aria-label="Change chains">
       <header class="chain-head">
         <span class="section-tag">CHANGE CHAINS</span>
-        <span class="panel-meta">work → PR → build → RC → release → tdd → uat → prod</span>
+        <span class="panel-meta" id="chain-path">work → PR → build → RC → release → tdd → uat → prod</span>
       </header>
       <div class="chain-list" id="chain-list"></div>
     </section>
@@ -178,10 +178,10 @@
         <div class="drift-list" id="drift-list"></div>
       </article>
 
-      <!-- Pane 2: Project 679 Work Board -->
+      <!-- Pane 2: Work Board -->
       <article class="ops-panel">
         <header class="panel-header">
-          <h2>Work Board <span class="muted">Project #679</span></h2>
+          <h2>Work Board <span class="muted" id="board-project">Project #679</span></h2>
           <span class="panel-meta" id="work-meta">bot vs team flow</span>
         </header>
         <div class="kanban-strip" id="kanban-strip"></div>

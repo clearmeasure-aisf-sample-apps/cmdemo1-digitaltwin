@@ -43,7 +43,7 @@ public static class AzureEventNormalizer
 
             var rg = ExtractResourceGroup(resourceUri);
             var resourceName = ExtractResourceName(resourceUri);
-            var stage = Cmdemo1PlatformCatalog.InferStageFromAzureResourceName(resourceName, rg);
+            var stage = PlatformCatalog.InferStageFromAzureResourceName(resourceName, rg);
             var outcome = eventType switch
             {
                 var t when t.EndsWith("Success", StringComparison.OrdinalIgnoreCase) => EventOutcome.Success,
@@ -99,7 +99,7 @@ public static class AzureEventNormalizer
     {
         var rg = ExtractResourceGroup(targetResourceId);
         var resourceName = ExtractResourceName(targetResourceId);
-        var stage = Cmdemo1PlatformCatalog.InferStageFromAzureResourceName(resourceName, rg);
+        var stage = PlatformCatalog.InferStageFromAzureResourceName(resourceName, rg);
         var deployable = resourceName.Contains("-ui", StringComparison.OrdinalIgnoreCase) ? "ui"
             : resourceName.Contains("-dashboard", StringComparison.OrdinalIgnoreCase) ? "dashboard"
             : null;

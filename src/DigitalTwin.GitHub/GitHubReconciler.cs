@@ -23,12 +23,12 @@ public sealed class GitHubReconciler(GitHubApiClient gh, IGitHubSyncService sync
         var since = timeProvider.GetUtcNow() - IssueWindow;
         foreach (var repo in Repositories)
         {
-            var openPrs = await ListAsync($"repos/{Cmdemo1PlatformCatalog.GitHubOrg}/{repo}/pulls?state=open&per_page=100", _ => true, ct);
+            var openPrs = await ListAsync($"repos/{PlatformCatalog.GitHubOrg}/{repo}/pulls?state=open&per_page=100", _ => true, ct);
             checks.Add(Compare("open pull requests", repo, openPrs,
                 prs.Where(p => p.Repository == repo && p.State == "open").Select(p => p.Number)));
 
             var issues = await ListAsync(
-                $"repos/{Cmdemo1PlatformCatalog.GitHubOrg}/{repo}/issues?state=all&per_page=100&since={since.UtcDateTime:yyyy-MM-ddTHH:mm:ssZ}",
+                $"repos/{PlatformCatalog.GitHubOrg}/{repo}/issues?state=all&per_page=100&since={since.UtcDateTime:yyyy-MM-ddTHH:mm:ssZ}",
                 e => !e.TryGetProperty("pull_request", out _), ct);
             var twinIssues = items.Where(w => w.Repository == repo).Select(w => w.Number).ToHashSet();
             // Only the presence of recently active issues: the twin keeps history beyond the window on purpose.

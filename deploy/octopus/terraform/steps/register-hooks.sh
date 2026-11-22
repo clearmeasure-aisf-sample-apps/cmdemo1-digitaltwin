@@ -10,5 +10,8 @@ export OCTOPUS_API_KEY=$(get_octopusvariable "Twin.OctopusApiKey")
 export GH_PAT=$(get_octopusvariable "Twin.GitHubPat")
 export WEBHOOK_SECRET=$(get_octopusvariable "Twin.WebhookSecret")
 export ENABLE_EVENT_GRID_DEPLOY=$(get_octopusvariable "Twin.EnableEventGrid")
+export TWIN_SYSTEM_SLUG=$(get_octopusvariable "Twin.SystemSlug")
+export TWIN_GITHUB_ORG=$(get_octopusvariable "Twin.GitHubOrg")
+export TWIN_OCTOPUS_SPACE=$(get_octopusvariable "Twin.OctopusSpace")
 bash "$PKG/deploy/scripts/azure-login.sh"
 bash "$PKG/scripts/register-hooks.sh"

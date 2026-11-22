@@ -77,20 +77,30 @@ param retentionDays int = 30
 @description('Size budget for the raw intake table in SQL (MB): above it, the oldest complete days are archived early.')
 param retentionMaxRawMb int = 500
 
-var suffix = take(uniqueString(subscription().id, resourceGroup().id, 'cmdemo1-twin'), 5)
+@description('Short name of the observed system; names every twin resource (log-<slug>-twin, ca-<slug>-twin, ...). Changing it on an existing deployment creates new resources.')
+param systemSlug string = 'cmdemo1'
+
+@description('Platform tag on every twin resource.')
+param platformTag string = 'clear-measure'
+
+@description('Platform definition JSON for a platform other than cmdemo1 (see docs/setup/README.md). Empty observes cmdemo1.')
+param platformJson string = ''
+
+var compactSlug = replace(toLower(systemSlug), '-', '')
+var suffix = take(uniqueString(subscription().id, resourceGroup().id, '${systemSlug}-twin'), 5)
 var tags = {
-  system: 'cmdemo1'
-  platform: 'clear-measure'
+  system: systemSlug
+  platform: platformTag
   purpose: 'digital-twin'
   layer: 'platform-observer'
 }
 
-var logName = 'log-cmdemo1-twin'
-var caeName = 'cae-cmdemo1-twin'
-var appName = 'ca-cmdemo1-twin'
-var kvName = take('kvcmdemo1twin${suffix}', 24)
-var sqlServerName = 'sql-cmdemo1-twin-${suffix}'
-var sqlDbName = 'sqldb-cmdemo1-twin'
+var logName = 'log-${systemSlug}-twin'
+var caeName = 'cae-${systemSlug}-twin'
+var appName = 'ca-${systemSlug}-twin'
+var kvName = take('kv${compactSlug}twin${suffix}', 24)
+var sqlServerName = 'sql-${systemSlug}-twin-${suffix}'
+var sqlDbName = 'sqldb-${systemSlug}-twin'
 var sqlAdminLogin = 'twinadmin'
 var sqlConnectionString = 'Server=tcp:${sqlServerName}${az.environment().suffixes.sqlServerHostname},1433;Database=${sqlDbName};User ID=${sqlAdminLogin};Password=${sqlAdminPassword};Encrypt=True;TrustServerCertificate=False;Connection Timeout=30;'
 
@@ -198,7 +208,7 @@ resource sqlDatabase 'Microsoft.Sql/servers/databases@2023-08-01' = {
   }
 }
 
-var archiveAccountName = take('stcmdemo1twin${suffix}', 24)
+var archiveAccountName = take('st${compactSlug}twin${suffix}', 24)
 var archiveContainerName = 'raw-intake-archive'
 
 resource archiveAccount 'Microsoft.Storage/storageAccounts@2023-05-01' = if (deployArchive) {
@@ -252,12 +262,15 @@ var archiveEnv = deployArchive
 var alertSecrets = empty(alertWebhookUrl) ? [] : [{ name: 'alert-webhook-url', value: alertWebhookUrl }]
 var alertEnv = concat([{ name: 'Twin__Alerts__Format', value: alertFormat }], empty(alertWebhookUrl) ? [] : [{ name: 'Twin__Alerts__WebhookUrl', secretRef: 'alert-webhook-url' }])
 
-var twinIdentityName = 'id-cmdemo1-twin'
+var twinIdentityName = 'id-${systemSlug}-twin'
+var serviceBusNamespaceName = 'sb-${systemSlug}-twin'
+var platformEnv = empty(platformJson) ? [] : [{ name: 'Twin__Platform__Json', value: platformJson }]
 
 module serviceBus 'servicebus.bicep' = if (deployServiceBus) {
-  name: 'deploy-cmdemo1-twin-servicebus'
+  name: 'deploy-${systemSlug}-twin-servicebus'
   params: {
     location: location
+    namespaceName: serviceBusNamespaceName
     identityName: twinIdentityName
     tags: tags
     auth: serviceBusAuth
@@ -267,7 +280,7 @@ module serviceBus 'servicebus.bicep' = if (deployServiceBus) {
 var serviceBusUsesKey = deployServiceBus && serviceBusAuth == 'SharedAccessKey'
 
 resource serviceBusAppRule 'Microsoft.ServiceBus/namespaces/authorizationRules@2024-01-01' existing = if (serviceBusUsesKey) {
-  name: 'sb-cmdemo1-twin/twin-intake-app'
+  name: '${serviceBusNamespaceName}/twin-intake-app'
   dependsOn: [
     serviceBus
   ]
@@ -362,7 +375,7 @@ resource twinApp 'Microsoft.App/containerApps@2025-01-01' = {
             { name: 'GH_PAT', secretRef: 'gh-pat' }
             { name: 'WEBHOOK_SECRET', secretRef: 'webhook-secret' }
             { name: 'TWIN_API_KEY', secretRef: 'twin-api-key' }
-          ], intakeEnv, archiveEnv, alertEnv)
+          ], intakeEnv, archiveEnv, alertEnv, platformEnv)
           probes: [
             {
               type: 'Startup'

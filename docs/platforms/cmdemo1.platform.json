@@ -1,0 +1,305 @@
+{
+  "platformName": "Clear Measure Demo Platform",
+  "systemSlug": "cmdemo1",
+  "systemName": "Clear Measure work orders demo 1",
+  "gitHub": {
+    "org": "clearmeasure-aisf-sample-apps",
+    "systemRepository": "cmdemo1-system",
+    "twinRepository": "cmdemo1-digitaltwin",
+    "observedRepositories": [
+      "cmdemo1-system",
+      "cmdemo1-workorders",
+      "cmdemo1-dashboard",
+      "cmdemo1-aisf",
+      "cmdemo1-fworker",
+      "cmdemo1-app2-ui",
+      "cmdemo1-scorecard",
+      "cmdemo1-scorecard-site",
+      "cmdemo1-video",
+      "cmdemo1-digitaltwin"
+    ],
+    "incrementalRepositories": [
+      "cmdemo1-workorders",
+      "cmdemo1-dashboard",
+      "cmdemo1-system",
+      "cmdemo1-scorecard-site",
+      "cmdemo1-digitaltwin"
+    ],
+    "retiredRepositories": [
+      "cmdemo1-aisf",
+      "cmdemo1-fworker",
+      "cmdemo1-app2-ui",
+      "cmdemo1-scorecard"
+    ],
+    "workItemsProjectNumber": 679,
+    "workItemsProjectNodeId": "PVT_kwDOD_ESUc4BliGL",
+    "defaultWorkItemRepository": "cmdemo1-workorders",
+    "twinHookUrlMarker": "cmdemo1-twin",
+    "statusFeeds": {
+      "desiredStateBranch": "main",
+      "systemJson": "system.json",
+      "stageVersions": "environments/{stage}/versions.json",
+      "statusBranch": "status",
+      "cost": "cost.json",
+      "containers": "containers.json",
+      "workItems": "workitems.json"
+    }
+  },
+  "octopus": {
+    "url": "https://clearmeasure.octopus.app",
+    "spaceId": "Spaces-355",
+    "spaceSlug": "cmdemo1-demo",
+    "automationUsers": [
+      "cmdemo1-github"
+    ]
+  },
+  "azure": {
+    "subscriptionId": "4a4dfa6d-d434-4b9e-8a88-63bbf61cfb69",
+    "tenantId": "40645332-2e20-4bca-882c-b2706f93ce44",
+    "nonprodResourceGroup": "rg-cmdemo1-nonprod",
+    "prodResourceGroup": "rg-cmdemo1-prod",
+    "additionalResourceGroups": [],
+    "acrName": "acrcmdemo1chu4gq",
+    "acrLoginServer": "acrcmdemo1chu4gq.azurecr.io"
+  },
+  "defaultPipelineId": "system-gitops",
+  "pipelines": [
+    {
+      "id": "app-ui",
+      "name": "Work Orders UI",
+      "kind": "BusinessApp",
+      "repository": "cmdemo1-workorders",
+      "deployableName": "ui",
+      "octopusProjectSlug": "cmdemo1-ui",
+      "isRetired": false,
+      "isTwinObserver": false,
+      "description": "Primary .NET work-orders application deployed as Azure Container Apps with Azure SQL and Playwright acceptance tests."
+    },
+    {
+      "id": "app-dashboard",
+      "name": "Health Dashboard",
+      "kind": "BusinessApp",
+      "repository": "cmdemo1-dashboard",
+      "deployableName": "dashboard",
+      "octopusProjectSlug": "cmdemo1-dashboard",
+      "isRetired": false,
+      "isTwinObserver": false,
+      "description": "Blazor WebAssembly system health dashboard deployed to Azure Static Web Apps."
+    },
+    {
+      "id": "system-gitops",
+      "name": "System GitOps \u0026 Infra",
+      "kind": "GitOpsInfra",
+      "repository": "cmdemo1-system",
+      "deployableName": "system",
+      "octopusProjectSlug": "cmdemo1-system",
+      "isRetired": false,
+      "isTwinObserver": false,
+      "description": "Desired state declarations (system.json, Bicep stacks, Octopus Terraform, status feeds, and operational runbooks)."
+    },
+    {
+      "id": "measurement-scorecard",
+      "name": "Scorecard \u0026 Measurement",
+      "kind": "Measurement",
+      "repository": "cmdemo1-scorecard-site",
+      "deployableName": "scorecard",
+      "octopusProjectSlug": "cmdemo1-scorecard-space",
+      "isRetired": false,
+      "isTwinObserver": false,
+      "description": "Nightly Clear Measure Intelligence Scorecard publication to GitHub Pages and prod blob site (runtime scorecard app retired)."
+    },
+    {
+      "id": "factory-agentic",
+      "name": "Software Factory \u0026 Agents",
+      "kind": "SoftwareFactory",
+      "repository": "cmdemo1-fworker",
+      "deployableName": "fworker",
+      "octopusProjectSlug": "cmdemo1-fworker",
+      "isRetired": true,
+      "isTwinObserver": false,
+      "description": "Autonomous bot/agent delivery pipeline across Project 679 and PRs (legacy aisf/fworker/app2-ui runtimes retired)."
+    },
+    {
+      "id": "twin-observer",
+      "name": "Digital Twin Observer",
+      "kind": "PlatformObserver",
+      "repository": "cmdemo1-digitaltwin",
+      "isRetired": false,
+      "isTwinObserver": true,
+      "description": "Platform-level digital twin sitting one level above cmdemo1 to observe and reconcile without becoming a cmdemo1 deployable."
+    }
+  ],
+  "stages": [
+    {
+      "name": "tdd",
+      "tier": "nonprod",
+      "hostingBoundary": "cae-cmdemo1-tdd",
+      "resourceGroup": "rg-cmdemo1-nonprod",
+      "order": 1,
+      "autoDeploy": true,
+      "hasAcceptanceTests": true,
+      "requiresRestorePoint": false,
+      "isDeclaredOnly": false
+    },
+    {
+      "name": "uat",
+      "tier": "nonprod",
+      "hostingBoundary": "cae-cmdemo1-tdd",
+      "resourceGroup": "rg-cmdemo1-nonprod",
+      "order": 2,
+      "autoDeploy": false,
+      "hasAcceptanceTests": false,
+      "requiresRestorePoint": false,
+      "isDeclaredOnly": false
+    },
+    {
+      "name": "prod",
+      "tier": "prod",
+      "hostingBoundary": "cae-cmdemo1-prod-ekdi",
+      "resourceGroup": "rg-cmdemo1-prod",
+      "order": 3,
+      "autoDeploy": false,
+      "hasAcceptanceTests": false,
+      "requiresRestorePoint": true,
+      "isDeclaredOnly": false
+    },
+    {
+      "name": "pool",
+      "tier": "nonprod",
+      "hostingBoundary": "cae-cmdemo1-pool",
+      "resourceGroup": "rg-cmdemo1-nonprod",
+      "order": 4,
+      "autoDeploy": false,
+      "hasAcceptanceTests": true,
+      "requiresRestorePoint": false,
+      "isDeclaredOnly": true
+    }
+  ],
+  "hostingBoundaries": [
+    {
+      "name": "cae-cmdemo1-tdd",
+      "kind": "ContainerAppsEnvironment",
+      "resourceGroup": "rg-cmdemo1-nonprod",
+      "location": "southcentralus",
+      "hostedStages": [
+        "tdd",
+        "uat"
+      ]
+    },
+    {
+      "name": "cae-cmdemo1-prod-ekdi",
+      "kind": "ContainerAppsEnvironment",
+      "resourceGroup": "rg-cmdemo1-prod",
+      "location": "southcentralus",
+      "hostedStages": [
+        "prod"
+      ]
+    },
+    {
+      "name": "swa-centralus",
+      "kind": "StaticWebAppsEdge",
+      "resourceGroup": "rg-cmdemo1-nonprod,rg-cmdemo1-prod",
+      "location": "centralus",
+      "hostedStages": [
+        "tdd",
+        "uat",
+        "prod"
+      ]
+    },
+    {
+      "name": "cae-cmdemo1-twin",
+      "kind": "ContainerAppsEnvironment (Platform Twin)",
+      "resourceGroup": "rg-cmdemo1-nonprod",
+      "location": "southcentralus",
+      "hostedStages": [
+        "platform-twin"
+      ]
+    }
+  ],
+  "repositoryPipelines": {
+    "cmdemo1-workorders": "app-ui",
+    "cmdemo1-dashboard": "app-dashboard",
+    "cmdemo1-system": "system-gitops",
+    "cmdemo1-scorecard": "measurement-scorecard",
+    "cmdemo1-scorecard-site": "measurement-scorecard",
+    "cmdemo1-fworker": "factory-agentic",
+    "cmdemo1-aisf": "factory-agentic",
+    "cmdemo1-app2-ui": "factory-agentic",
+    "cmdemo1-video": "factory-agentic",
+    "cmdemo1-digitaltwin": "twin-observer"
+  },
+  "repositoryDeployables": {
+    "cmdemo1-workorders": "ui",
+    "cmdemo1-dashboard": "dashboard",
+    "cmdemo1-system": "system",
+    "cmdemo1-scorecard": "scorecard",
+    "cmdemo1-scorecard-site": "scorecard",
+    "cmdemo1-aisf": "aisf",
+    "cmdemo1-fworker": "fworker"
+  },
+  "octopusProjectPipelines": {
+    "cmdemo1-ui": "app-ui",
+    "cmdemo1-dashboard": "app-dashboard",
+    "cmdemo1-system": "system-gitops",
+    "cmdemo1-scorecard": "measurement-scorecard",
+    "cmdemo1-scorecard-space": "measurement-scorecard",
+    "cmdemo1-aisf": "factory-agentic",
+    "cmdemo1-fworker": "factory-agentic",
+    "cmdemo1-fworker-runtime": "factory-agentic",
+    "cmdemo1-digitaltwin": "twin-observer"
+  },
+  "octopusProjectDeployables": {
+    "cmdemo1-ui": "ui",
+    "cmdemo1-dashboard": "dashboard",
+    "cmdemo1-system": "system",
+    "cmdemo1-scorecard": "scorecard",
+    "cmdemo1-scorecard-space": "scorecard",
+    "cmdemo1-aisf": "aisf",
+    "cmdemo1-fworker": "fworker",
+    "cmdemo1-fworker-runtime": "fworker"
+  },
+  "azureStageRules": [
+    {
+      "stage": "twin",
+      "nameContains": [
+        "twin"
+      ],
+      "resourceGroups": []
+    },
+    {
+      "stage": "tdd",
+      "nameContains": [
+        "-tdd",
+        "cmdemo1tdd"
+      ],
+      "resourceGroups": []
+    },
+    {
+      "stage": "uat",
+      "nameContains": [
+        "-uat",
+        "cmdemo1uat"
+      ],
+      "resourceGroups": []
+    },
+    {
+      "stage": "prod",
+      "nameContains": [
+        "-prod",
+        "cmdemo1prod"
+      ],
+      "resourceGroups": [
+        "rg-cmdemo1-prod"
+      ]
+    },
+    {
+      "stage": "pool",
+      "nameContains": [
+        "-pool",
+        "cmdemo1pool"
+      ],
+      "resourceGroups": []
+    }
+  ],
+  "defaultAzureStage": "shared"
+}

@@ -47,13 +47,7 @@ public static class ChangeChainSignals
     {
         ChainSignal Signal(ChainStageKind stage, string kind) => new(stage, kind, e.Summary, e.OccurredAt, e.Outcome.ToString(), e.Actor, e.SourceUrl);
 
-        var deliveryStage = e.StageName?.ToLowerInvariant() switch
-        {
-            "tdd" => ChainStageKind.Tdd,
-            "uat" => ChainStageKind.Uat,
-            "prod" => ChainStageKind.Prod,
-            _ => ChainStageKind.OctopusRelease
-        };
+        var deliveryStage = DeliveryStageSlots.KindOf(e.StageName) ?? ChainStageKind.OctopusRelease;
         return e.EventType switch
         {
             "dev.cdevents.change.reviewed" => Signal(ChainStageKind.PullRequest, "review"),

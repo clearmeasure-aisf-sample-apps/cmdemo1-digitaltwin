@@ -305,3 +305,15 @@ Following the domain research in the prompt's prior-art references:
 - **Not applied here**: Octopus space `Spaces-355` belongs to cmdemo1's owner, so the definitions are documented (docs/octopus-apply.md) rather than applied. Pushing packages and creating releases (`TWIN_OCTOPUS_RELEASES`) and handing deploys to Octopus (`TWIN_DEPLOY_VIA_OCTOPUS`) are repository variables, unset by default. Neither path promotes.
 - **Self-observation**: the twin's own Octopus project maps to the `twin-observer` pipeline, so its deployments never count as cmdemo1 changes.
 
+## ADR-032: One Platform Definition, Selected at Startup
+
+- **Decision**: everything specific to cmdemo1 moved into a `PlatformDefinition`:
+  - organization and repositories, the Octopus space, the subscription and resource groups;
+  - pipelines and their repository and Octopus project maps;
+  - stages, hosting boundaries, Azure stage rules, GitOps status feeds and automation users.
+
+  It is loaded from JSON (`Twin:Platform:Json` or `Twin:Platform:File`) and validated, and the twin refuses to start on an invalid definition. Without one, the twin observes cmdemo1; `docs/platforms/cmdemo1.platform.json` is that default, and a test keeps them identical.
+- **Static, chosen once**: normalizers, the chain builder and drift rules are static, pure functions. They read the definition through `PlatformCatalog`, which the composition root sets before the host starts, rather than through DI. Tests that switch platforms run in a non-parallel collection and restore the default afterwards.
+- **Stages**: a change chain keeps three delivery slots (first, optional middle, production), mapped from the platform's two or three active stages in order. The API keeps the slot names `Tdd`, `Uat` and `Prod` as stable identifiers; the dashboard shows the platform's own stage names. Production is the last stage, which is where DORA metrics are measured.
+- **Infrastructure**: Bicep names every twin resource from `systemSlug`. The default `cmdemo1` gives exactly today's names and unique suffix, so the live twin is unchanged. The workflow, deploy scripts, hook registration and Octopus Terraform take the same settings from repository variables or Octopus project variables.
+

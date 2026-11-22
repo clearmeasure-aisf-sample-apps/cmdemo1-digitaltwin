@@ -1,12 +1,13 @@
 using System.Collections.Concurrent;
 using System.Globalization;
 using System.Text.Json;
-using DigitalTwin.Core.Ports;
-using DigitalTwin.Core.Projections;
 using DigitalTwin.Core.BuildAndArtifact;
+using DigitalTwin.Core.ChangeChains;
 using DigitalTwin.Core.Hierarchy;
 using DigitalTwin.Core.Intake;
 using DigitalTwin.Core.Observation;
+using DigitalTwin.Core.Ports;
+using DigitalTwin.Core.Projections;
 using DigitalTwin.Core.RuntimeAndPlatform;
 using DigitalTwin.Core.SourceAndChange;
 using DigitalTwin.Core.Work;
@@ -24,16 +25,8 @@ public sealed partial class GitHubSyncService(
     TimeProvider timeProvider,
     ILogger<GitHubSyncService> logger) : IGitHubSyncService
 {
-    private static readonly string[] ActiveStages = ["tdd", "uat", "prod"];
+    private static IReadOnlyList<string> ActiveStages => PlatformCatalog.DeliveryStages;
     private static readonly string[] AllWebhookEvents = ["*"];
-    private static readonly string[] ActiveIncrementalRepos =
-    [
-        "cmdemo1-workorders",
-        "cmdemo1-dashboard",
-        "cmdemo1-system",
-        "cmdemo1-scorecard-site",
-        "cmdemo1-digitaltwin"
-    ];
 
     private readonly ConcurrentDictionary<string, DateTimeOffset> _lastRepoRefresh = new(StringComparer.OrdinalIgnoreCase);
     private readonly ConcurrentDictionary<string, bool> _archivedRepos = new(StringComparer.OrdinalIgnoreCase);
@@ -72,7 +65,7 @@ public sealed partial class GitHubSyncService(
             }
 
             // 2. Single batched GraphQL call for repo metadata, default commits, recent PRs, and releases across all cmdemo1-* repos
-            var targetRepos = fullBackfill ? Cmdemo1PlatformCatalog.ObservedRepositories : ActiveIncrementalRepos;
+            var targetRepos = fullBackfill ? PlatformCatalog.ObservedRepositories : PlatformCatalog.Current.GitHub.PolledRepositories;
             var repoSnapshots = new List<RepositorySnapshot>();
             var prSnapshots = new List<SourceChangeSnapshot>();
             var artifactSnapshots = new List<ArtifactPackageSnapshot>();
@@ -195,7 +188,7 @@ public sealed partial class GitHubSyncService(
         }
         _lastRepoRefresh[repositoryName] = now;
 
-        if (repositoryName.Equals(Cmdemo1PlatformCatalog.SystemRepository, StringComparison.OrdinalIgnoreCase))
+        if (repositoryName.Equals(PlatformCatalog.SystemRepository, StringComparison.OrdinalIgnoreCase))
         {
             await SyncGitOpsDesiredStateAsync(now, ct);
         }
@@ -241,12 +234,12 @@ public sealed partial class GitHubSyncService(
         }
 
         var now = timeProvider.GetUtcNow();
-        foreach (var repo in Cmdemo1PlatformCatalog.ObservedRepositories)
+        foreach (var repo in PlatformCatalog.ObservedRepositories)
         {
             ct.ThrowIfCancellationRequested();
             try
             {
-                var meta = await gh.GetApiAsync($"repos/{Cmdemo1PlatformCatalog.GitHubOrg}/{repo}", bypassPause: false, ct);
+                var meta = await gh.GetApiAsync($"repos/{PlatformCatalog.GitHubOrg}/{repo}", bypassPause: false, ct);
                 if (meta.RateLimited) break;
                 if (meta.Success && !string.IsNullOrWhiteSpace(meta.Body))
                 {
@@ -257,7 +250,7 @@ public sealed partial class GitHubSyncService(
                     }
                 }
 
-                var hooksRes = await gh.GetApiAsync($"repos/{Cmdemo1PlatformCatalog.GitHubOrg}/{repo}/hooks", bypassPause: false, ct);
+                var hooksRes = await gh.GetApiAsync($"repos/{PlatformCatalog.GitHubOrg}/{repo}/hooks", bypassPause: false, ct);
                 if (hooksRes.RateLimited) break;
 
                 long? existingId = null;
@@ -271,7 +264,7 @@ public sealed partial class GitHubSyncService(
                         var active = hook.TryGetProperty("active", out var act) && act.ValueKind == JsonValueKind.True;
                         if (!string.IsNullOrWhiteSpace(url) &&
                             (url.Equals(targetUrl, StringComparison.OrdinalIgnoreCase) ||
-                             (url.EndsWith("/hooks/github", StringComparison.OrdinalIgnoreCase) && url.Contains("cmdemo1-twin", StringComparison.OrdinalIgnoreCase))))
+                             (url.EndsWith("/hooks/github", StringComparison.OrdinalIgnoreCase) && url.Contains(PlatformCatalog.Current.GitHub.TwinHookUrlMarker, StringComparison.OrdinalIgnoreCase))))
                         {
                             existingId = hook.GetProperty("id").GetInt64();
                             alreadyActiveAndMatching = active && url.Equals(targetUrl, StringComparison.OrdinalIgnoreCase);
@@ -311,8 +304,8 @@ public sealed partial class GitHubSyncService(
                 };
 
                 using var response = existingId is null
-                    ? await gh.SendMutationAsync(HttpMethod.Post, $"repos/{Cmdemo1PlatformCatalog.GitHubOrg}/{repo}/hooks", payload, ct)
-                    : await gh.SendMutationAsync(HttpMethod.Patch, $"repos/{Cmdemo1PlatformCatalog.GitHubOrg}/{repo}/hooks/{existingId.Value}", payload, ct);
+                    ? await gh.SendMutationAsync(HttpMethod.Post, $"repos/{PlatformCatalog.GitHubOrg}/{repo}/hooks", payload, ct)
+                    : await gh.SendMutationAsync(HttpMethod.Patch, $"repos/{PlatformCatalog.GitHubOrg}/{repo}/hooks/{existingId.Value}", payload, ct);
 
                 var respBody = await response.Content.ReadAsStringAsync(ct);
                 long? hookId = existingId;
@@ -350,14 +343,19 @@ public sealed partial class GitHubSyncService(
         return results;
     }
 
+    private static GitOpsStatusFeeds Feeds => PlatformCatalog.Current.GitHub.StatusFeeds;
+
+    private Task<string?> FeedAsync(string branch, string path, CancellationToken ct)
+        => string.IsNullOrWhiteSpace(path) ? Task.FromResult<string?>(null) : gh.GetRawPublicAsync(PlatformCatalog.GitHubOrg, PlatformCatalog.SystemRepository, branch, path, ct);
+
     private async Task SyncGitOpsDesiredStateAsync(DateTimeOffset now, CancellationToken ct)
     {
-        var systemJson = await gh.GetRawPublicAsync(Cmdemo1PlatformCatalog.GitHubOrg, Cmdemo1PlatformCatalog.SystemRepository, "main", "system.json", ct) ?? "{}";
+        var systemJson = await FeedAsync(Feeds.DesiredStateBranch, Feeds.SystemJson, ct) ?? "{}";
         var pinned = new Dictionary<string, Dictionary<string, string>>(StringComparer.OrdinalIgnoreCase);
 
         foreach (var stage in ActiveStages)
         {
-            var vJson = await gh.GetRawPublicAsync(Cmdemo1PlatformCatalog.GitHubOrg, Cmdemo1PlatformCatalog.SystemRepository, "main", $"environments/{stage}/versions.json", ct);
+            var vJson = await FeedAsync(Feeds.DesiredStateBranch, Feeds.StageVersions.Replace("{stage}", stage, StringComparison.Ordinal), ct);
             if (!string.IsNullOrWhiteSpace(vJson))
             {
                 try
@@ -369,13 +367,13 @@ public sealed partial class GitHubSyncService(
             }
         }
 
-        var costJson = await gh.GetRawPublicAsync(Cmdemo1PlatformCatalog.GitHubOrg, Cmdemo1PlatformCatalog.SystemRepository, "status", "cost.json", ct);
-        var containersJson = await gh.GetRawPublicAsync(Cmdemo1PlatformCatalog.GitHubOrg, Cmdemo1PlatformCatalog.SystemRepository, "status", "containers.json", ct);
+        var costJson = await FeedAsync(Feeds.StatusBranch, Feeds.Cost, ct);
+        var containersJson = await FeedAsync(Feeds.StatusBranch, Feeds.Containers, ct);
 
         await state.PublishAsync(StateKinds.DesiredConfig, [new DesiredSystemConfigSnapshot
         {
-            Id = Cmdemo1PlatformCatalog.SystemSlug,
-            SystemName = Cmdemo1PlatformCatalog.SystemName,
+            Id = PlatformCatalog.SystemSlug,
+            SystemName = PlatformCatalog.SystemName,
             SystemJson = systemJson,
             PinnedVersionsJson = JsonSerializer.Serialize(pinned),
             NodesJson = StableJson.Without(containersJson, "generated"),
@@ -392,7 +390,7 @@ public sealed partial class GitHubSyncService(
             if (costDoc.RootElement.TryGetProperty("environments", out var envCosts) && envCosts.ValueKind == JsonValueKind.Array)
             {
                 var updated = new List<EnvironmentInstanceSnapshot>();
-                foreach (var stageDef in Cmdemo1PlatformCatalog.Stages)
+                foreach (var stageDef in PlatformCatalog.Stages)
                 {
                     existingStages.TryGetValue(stageDef.Name, out var inst);
                     inst ??= new EnvironmentInstanceSnapshot
@@ -440,7 +438,7 @@ public sealed partial class GitHubSyncService(
         var commitsCount = fullBackfill ? 6 : 2;
         var prsCount = fullBackfill ? 15 : 6;
         var aliases = string.Join("\n  ", repos.Select((r, i) =>
-            $"r{i}: repository(owner: \"{Cmdemo1PlatformCatalog.GitHubOrg}\", name: \"{r}\") {{ ...RepoFields }}"));
+            $"r{i}: repository(owner: \"{PlatformCatalog.GitHubOrg}\", name: \"{r}\") {{ ...RepoFields }}"));
 
         var query = $$"""
         query {
@@ -524,10 +522,10 @@ public sealed partial class GitHubSyncService(
             _archivedRepos[repoName] = isArchived;
             var openIssues = repoEl.TryGetProperty("issues", out var iss) && iss.TryGetProperty("totalCount", out var ic) ? ic.GetInt32() : 0;
 
-            var pipelineId = Cmdemo1PlatformCatalog.ResolvePipelineIdFromRepository(repoName);
-            var deployable = Cmdemo1PlatformCatalog.ResolveDeployableFromRepository(repoName);
-            var isTwin = repoName.Equals(Cmdemo1PlatformCatalog.TwinRepository, StringComparison.OrdinalIgnoreCase);
-            var isRetired = isArchived || repoName is "cmdemo1-aisf" or "cmdemo1-fworker" or "cmdemo1-app2-ui" or "cmdemo1-scorecard";
+            var pipelineId = PlatformCatalog.ResolvePipelineIdFromRepository(repoName);
+            var deployable = PlatformCatalog.ResolveDeployableFromRepository(repoName);
+            var isTwin = repoName.Equals(PlatformCatalog.TwinRepository, StringComparison.OrdinalIgnoreCase);
+            var isRetired = isArchived || PlatformCatalog.Current.GitHub.RetiredRepositories.Contains(repoName, StringComparer.OrdinalIgnoreCase);
 
             var defaultBranch = "main";
             string? latestSha = null;
@@ -671,7 +669,7 @@ public sealed partial class GitHubSyncService(
             repoSnapshots.Add(new RepositorySnapshot
             {
                 Name = repoName,
-                FullName = $"{Cmdemo1PlatformCatalog.GitHubOrg}/{repoName}",
+                FullName = $"{PlatformCatalog.GitHubOrg}/{repoName}",
                 Url = htmlUrl,
                 DefaultBranch = defaultBranch,
                 IsPrivate = isPrivate,
@@ -704,7 +702,7 @@ public sealed partial class GitHubSyncService(
         CancellationToken ct)
     {
         var runsCount = fullBackfill ? 15 : 8;
-        var res = await gh.GetApiAsync($"repos/{Cmdemo1PlatformCatalog.GitHubOrg}/{repoName}/actions/runs?per_page={runsCount}", bypassPause: false, ct);
+        var res = await gh.GetApiAsync($"repos/{PlatformCatalog.GitHubOrg}/{repoName}/actions/runs?per_page={runsCount}", bypassPause: false, ct);
         if (!res.Success || string.IsNullOrWhiteSpace(res.Body))
         {
             return;
@@ -716,8 +714,8 @@ public sealed partial class GitHubSyncService(
             return;
         }
 
-        var pipelineId = Cmdemo1PlatformCatalog.ResolvePipelineIdFromRepository(repoName);
-        var deployable = Cmdemo1PlatformCatalog.ResolveDeployableFromRepository(repoName);
+        var pipelineId = PlatformCatalog.ResolvePipelineIdFromRepository(repoName);
+        var deployable = PlatformCatalog.ResolveDeployableFromRepository(repoName);
 
         using var runsDoc = JsonDocument.Parse(res.Body);
         if (!runsDoc.RootElement.TryGetProperty("workflow_runs", out var runsArr) || runsArr.ValueKind != JsonValueKind.Array)
@@ -803,7 +801,7 @@ public sealed partial class GitHubSyncService(
         DateTimeOffset now,
         CancellationToken ct)
     {
-        var res = await gh.GetApiAsync($"repos/{Cmdemo1PlatformCatalog.GitHubOrg}/{repoName}/hooks", bypassPause: false, ct);
+        var res = await gh.GetApiAsync($"repos/{PlatformCatalog.GitHubOrg}/{repoName}/hooks", bypassPause: false, ct);
         if (!res.Success || string.IsNullOrWhiteSpace(res.Body))
         {
             return null;
@@ -830,7 +828,7 @@ public sealed partial class GitHubSyncService(
 
                     if (includeDeliveries)
                     {
-                        var delRes = await gh.GetApiAsync($"repos/{Cmdemo1PlatformCatalog.GitHubOrg}/{repoName}/hooks/{webhookId.Value}/deliveries?per_page=1", bypassPause: false, ct);
+                        var delRes = await gh.GetApiAsync($"repos/{PlatformCatalog.GitHubOrg}/{repoName}/hooks/{webhookId.Value}/deliveries?per_page=1", bypassPause: false, ct);
                         if (delRes.Success && !string.IsNullOrWhiteSpace(delRes.Body))
                         {
                             using var delDoc = JsonDocument.Parse(delRes.Body);
@@ -877,7 +875,7 @@ public sealed partial class GitHubSyncService(
             return known;
         }
 
-        var meta = await gh.GetApiAsync($"repos/{Cmdemo1PlatformCatalog.GitHubOrg}/{repoName}", bypassPause: false, ct);
+        var meta = await gh.GetApiAsync($"repos/{PlatformCatalog.GitHubOrg}/{repoName}", bypassPause: false, ct);
         if (!meta.Success || string.IsNullOrWhiteSpace(meta.Body))
         {
             return false;
@@ -893,7 +891,7 @@ public sealed partial class GitHubSyncService(
         var itemsById = new Dictionary<string, WorkItemSnapshot>(StringComparer.OrdinalIgnoreCase);
 
         // 0-quota raw read of cmdemo1-system status/workitems.json
-        var workItemsJson = await gh.GetRawPublicAsync(Cmdemo1PlatformCatalog.GitHubOrg, Cmdemo1PlatformCatalog.SystemRepository, "status", "workitems.json", ct);
+        var workItemsJson = await FeedAsync(Feeds.StatusBranch, Feeds.WorkItems, ct);
         if (!string.IsNullOrWhiteSpace(workItemsJson))
         {
             using var doc = JsonDocument.Parse(workItemsJson);
@@ -902,7 +900,7 @@ public sealed partial class GitHubSyncService(
                 foreach (var item in arr.EnumerateArray().Take(150))
                 {
                     var number = item.GetProperty("number").GetInt32();
-                    var id = $"cmdemo1-workorders#{number}";
+                    var id = $"{PlatformCatalog.Current.GitHub.DefaultWorkItemRepository}#{number}";
                     var createdAt = item.TryGetProperty("createdAt", out var ca) && DateTimeOffset.TryParse(ca.GetString(), out var cdt) ? cdt.ToUniversalTime() : now;
                     var closedAt = item.TryGetProperty("closedAt", out var cla) && cla.ValueKind == JsonValueKind.String && DateTimeOffset.TryParse(cla.GetString(), out var cldt) ? cldt.ToUniversalTime() : (DateTimeOffset?)null;
                     var envs = item.TryGetProperty("environments", out var envEl) ? envEl : default;
@@ -910,7 +908,7 @@ public sealed partial class GitHubSyncService(
                     itemsById[id] = new WorkItemSnapshot
                     {
                         Id = id,
-                        Repository = "cmdemo1-workorders",
+                        Repository = PlatformCatalog.Current.GitHub.DefaultWorkItemRepository,
                         Number = number,
                         Title = item.TryGetProperty("title", out var t) ? t.GetString() ?? "" : "",
                         Url = item.TryGetProperty("url", out var u) ? u.GetString() ?? "" : "",
@@ -923,12 +921,12 @@ public sealed partial class GitHubSyncService(
                         CreatedAt = createdAt,
                         ClosedAt = closedAt,
                         ReleaseCandidateVersion = item.TryGetProperty("releaseCandidate", out var rc) && rc.ValueKind == JsonValueKind.Object && rc.TryGetProperty("version", out var rcv) ? rcv.GetString() : null,
-                        TddVersion = GetNestedString(envs, "tdd", "version"),
-                        TddDeployedAt = GetNestedDate(envs, "tdd", "deployedAt"),
-                        UatVersion = GetNestedString(envs, "uat", "version"),
-                        UatDeployedAt = GetNestedDate(envs, "uat", "deployedAt"),
-                        ProdVersion = GetNestedString(envs, "prod", "version"),
-                        ProdDeployedAt = GetNestedDate(envs, "prod", "deployedAt"),
+                        TddVersion = GetNestedString(envs, PlatformCatalog.FirstStage, "version"),
+                        TddDeployedAt = GetNestedDate(envs, PlatformCatalog.FirstStage, "deployedAt"),
+                        UatVersion = DeliveryStageSlots.MiddleStage is { } middle ? GetNestedString(envs, middle, "version") : null,
+                        UatDeployedAt = DeliveryStageSlots.MiddleStage is { } middleStage ? GetNestedDate(envs, middleStage, "deployedAt") : null,
+                        ProdVersion = GetNestedString(envs, PlatformCatalog.ProductionStage, "version"),
+                        ProdDeployedAt = GetNestedDate(envs, PlatformCatalog.ProductionStage, "deployedAt"),
                         FtFailures = item.TryGetProperty("ftFailures", out var ft) && ft.TryGetInt32(out var ftv) ? ftv : 0,
                         Reverts = item.TryGetProperty("reverts", out var rv) && rv.TryGetInt32(out var rvv) ? rvv : 0,
                         ColumnHistoryJson = item.TryGetProperty("columnHistory", out var ch) ? ch.GetRawText() : "[]",
@@ -961,6 +959,11 @@ public sealed partial class GitHubSyncService(
                 }
             }
             if (itemsById.Count > 0) await state.PublishAsync(StateKinds.WorkItem, WithTimings(itemsById.Values), EventSourceKind.GitHub, ct);
+            return;
+        }
+
+        if (string.IsNullOrWhiteSpace(PlatformCatalog.WorkItemsProjectNodeId))
+        {
             return;
         }
 
@@ -997,7 +1000,7 @@ public sealed partial class GitHubSyncService(
         string? cursor = null;
         for (var page = 0; page < 3; page++)
         {
-            var resp = await gh.PostGraphQlAsync(graphqlQuery, new { nodeId = Cmdemo1PlatformCatalog.WorkItemsProjectNodeId, cursor }, ct);
+            var resp = await gh.PostGraphQlAsync(graphqlQuery, new { nodeId = PlatformCatalog.WorkItemsProjectNodeId, cursor }, ct);
             if (!resp.Success || string.IsNullOrWhiteSpace(resp.Body))
             {
                 break;
@@ -1024,8 +1027,8 @@ public sealed partial class GitHubSyncService(
 
                     var number = numEl.GetInt32();
                     var repo = issue.TryGetProperty("repository", out var rep) && rep.TryGetProperty("name", out var rn)
-                        ? rn.GetString() ?? "cmdemo1-workorders"
-                        : "cmdemo1-workorders";
+                        ? rn.GetString() ?? PlatformCatalog.Current.GitHub.DefaultWorkItemRepository
+                        : PlatformCatalog.Current.GitHub.DefaultWorkItemRepository;
                     var id = $"{repo}#{number}";
                     var statusCol = n.TryGetProperty("fieldValueByName", out var fv) && fv.ValueKind == JsonValueKind.Object && fv.TryGetProperty("name", out var fn)
                         ? fn.GetString()
@@ -1103,13 +1106,13 @@ public sealed partial class GitHubSyncService(
             return;
         }
         _lastIssueSweep = now;
-        foreach (var repo in ActiveIncrementalRepos)
+        foreach (var repo in PlatformCatalog.Current.GitHub.PolledRepositories)
         {
             var since = _issuesSince.GetValueOrDefault(repo, now - IssueSweepInitialWindow);
             for (var page = 1; page <= 3; page++)
             {
                 var res = await gh.GetApiAsync(
-                    $"repos/{Cmdemo1PlatformCatalog.GitHubOrg}/{repo}/issues?state=all&sort=updated&direction=asc&per_page=100&page={page}&since={since.UtcDateTime:yyyy-MM-ddTHH:mm:ssZ}",
+                    $"repos/{PlatformCatalog.GitHubOrg}/{repo}/issues?state=all&sort=updated&direction=asc&per_page=100&page={page}&since={since.UtcDateTime:yyyy-MM-ddTHH:mm:ssZ}",
                     bypassPause: false, ct);
                 if (!res.Success || string.IsNullOrWhiteSpace(res.Body))
                 {

@@ -2,11 +2,13 @@ using System.Text.Json.Serialization;
 using DigitalTwin.Api.Auth;
 using DigitalTwin.Api.Endpoints;
 using DigitalTwin.Api.Mcp;
+using DigitalTwin.Api.Platform;
 using DigitalTwin.Archive;
 using DigitalTwin.Notifications;
 using DigitalTwin.Api.Realtime;
 using DigitalTwin.Application;
 using DigitalTwin.Azure;
+using DigitalTwin.Core.Hierarchy;
 using DigitalTwin.Core.Ports;
 using DigitalTwin.GitHub;
 using DigitalTwin.Messaging;
@@ -16,6 +18,7 @@ using DigitalTwin.Probes;
 using Microsoft.Extensions.Options;
 
 var builder = WebApplication.CreateBuilder(args);
+PlatformCatalog.Use(PlatformConfiguration.Load(builder.Configuration));
 
 builder.Services.ConfigureHttpJsonOptions(opts =>
 {
@@ -55,7 +58,7 @@ builder.Services.AddMcpServer(opts =>
 {
     opts.ServerInfo = new()
     {
-        Name = "cmdemo1-digitaltwin",
+        Name = PlatformCatalog.TwinServiceName,
         Version = "1.0.0"
     };
 })

@@ -42,7 +42,7 @@ public sealed class ProjectionBaselineSeeder(ITwinStore store, StateObservationP
         await PublishSetIfAnyAsync(StateKinds.Freeze, "octopus", await store.GetFreezesAsync(ct), ct);
         await PublishSetIfAnyAsync(StateKinds.Workload, "azure", await store.GetWorkloadsAsync(ct), ct);
         await PublishSetIfAnyAsync(StateKinds.AzureResource, "azure", await store.GetAzureResourcesAsync(ct), ct);
-        await PublishSetIfAnyAsync(StateKinds.Drift, Cmdemo1PlatformCatalog.SystemSlug, await store.GetDriftFindingsAsync(includeResolved: false, ct), ct);
+        await PublishSetIfAnyAsync(StateKinds.Drift, PlatformCatalog.SystemSlug, await store.GetDriftFindingsAsync(includeResolved: false, ct), ct);
         foreach (var group in (await store.GetWebhookStatusesAsync(ct)).GroupBy(w => w.Source))
         {
             await PublishSetIfAnyAsync(StateKinds.WebhookStatus, group.Key, group.ToList(), ct);

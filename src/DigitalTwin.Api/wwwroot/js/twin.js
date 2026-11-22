@@ -12,6 +12,9 @@
     replayTimer: null
   };
 
+  // Delivery stages come from the observed platform (summary.stages); tdd/uat/prod is cmdemo1's.
+  const platform = { stages: ['tdd', 'uat', 'prod'], first: 'tdd', middle: 'uat', prod: 'prod', slug: 'cmdemo1', primaryDeployable: 'ui', primaryPipeline: 'app-ui' };
+
   const stageColumns = [
     { key: 'work', label: 'Work Item' },
     { key: 'pr', label: 'Branch / PR' },
@@ -141,6 +144,7 @@
 
   function renderAll() {
     if (!state.data) return;
+    applyPlatform(state.data.summary);
     renderHeaderAndMetrics();
     renderSwimLanes();
     renderChains();
@@ -148,6 +152,58 @@
     renderWorkBoard();
     renderEventTicker();
     requestAnimationFrame(drawTrackConnectors);
+  }
+
+  function applyPlatform(s) {
+    const names = (s.stages || []).filter(x => !x.stage.isDeclaredOnly).sort((a, b) => a.stage.order - b.stage.order).map(x => x.stage.name);
+    if (names.length >= 2) {
+      platform.stages = names;
+      platform.first = names[0];
+      platform.middle = names.length === 3 ? names[1] : null;
+      platform.prod = names[names.length - 1];
+    }
+    platform.slug = s.systemSlug || platform.slug;
+    const primary = (s.pipelines || []).find(p => !p.definition.isTwinObserver && p.definition.kind === 'BusinessApp' && p.definition.deployableName);
+    if (primary) {
+      platform.primaryDeployable = primary.definition.deployableName;
+      platform.primaryPipeline = primary.definition.id;
+    }
+    document.getElementById('board-project').textContent = s.workItemsProjectNumber ? `Project #${s.workItemsProjectNumber}` : '';
+    document.getElementById('chain-path').textContent = `work → PR → build → RC → release → ${platform.stages.join(' → ')}`;
+    stageColumns.splice(5, stageColumns.length - 5, ...platform.stages.map(n => ({ key: n, label: n.toUpperCase() })));
+    chainStageLabels.Tdd = platform.first.toUpperCase();
+    chainStageLabels.Uat = (platform.middle || '').toUpperCase();
+    chainStageLabels.Prod = platform.prod.toUpperCase();
+
+    document.title = `${platform.slug} Digital Twin — ${s.platformName}`;
+    document.querySelector('.crumb-platform').textContent = (s.platformName || '').toUpperCase();
+    document.querySelector('.crumb-system').textContent = platform.slug;
+    document.querySelector('.level-pill').title = `Twin sits one level above ${platform.slug} and is not a ${platform.slug} deployable`;
+    document.getElementById('system-subtitle').textContent = s.systemName || '';
+    document.querySelector('.observer-badge').textContent = `OBSERVER LAYER (NOT IN ${platform.slug})`;
+    const twin = (s.pipelines || []).find(p => p.definition.isTwinObserver);
+    if (twin) document.getElementById('obs-repo').textContent = twin.definition.repository;
+
+    const heads = document.querySelector('.stage-headers');
+    heads.querySelectorAll('[data-delivery]').forEach(h => h.remove());
+    heads.querySelectorAll('.stage-tdd, .stage-uat, .stage-prod').forEach(h => h.remove());
+    platform.stages.forEach((n, i) => {
+      const head = document.createElement('div');
+      head.className = `stage-col-head ${i === 0 ? 'stage-tdd' : i === platform.stages.length - 1 ? 'stage-prod' : 'stage-uat'}`;
+      head.dataset.delivery = n;
+      head.textContent = n.toUpperCase();
+      heads.appendChild(head);
+    });
+  }
+
+  const isDeliveryColumn = key => platform.stages.includes(key);
+
+  // Work item / pipeline versions per delivery stage, labelled with the platform's stage names.
+  function stageVersionFields(first, middle, prod) {
+    const fields = { [platform.first.toUpperCase()]: first || '--' };
+    if (platform.middle) fields[platform.middle.toUpperCase()] = middle || '--';
+    fields[platform.prod.toUpperCase()] = prod || '--';
+    return fields;
   }
 
   function renderHeaderAndMetrics() {
@@ -217,7 +273,7 @@
     if (twinPipe) {
       const sha = twinPipe.repository?.latestCommitSha?.substring(0, 7) || 'head';
       const runStatus = twinPipe.latestRun?.conclusion || twinPipe.latestRun?.status || 'active';
-      document.getElementById('obs-detail').textContent = `${twinPipe.definition.repository} (${sha}, CI ${runStatus}) · observing cmdemo1`;
+      document.getElementById('obs-detail').textContent = `${twinPipe.definition.repository} (${sha}, CI ${runStatus}) · observing ${platform.slug}`;
     }
   }
 
@@ -251,8 +307,8 @@
       const pipeDeliveries = (recentDeliveries || []).filter(d => d.pipelineId === def.id);
       const pipeRuns = (recentRuns || []).filter(r => r.pipelineId === def.id);
       const pipePrs = (openPullRequests || []).filter(pr => pr.pipelineId === def.id);
-      const pipeWork = def.id === 'app-ui' || def.id === 'factory-agentic'
-        ? (workItems || []).filter(w => def.id !== 'factory-agentic' || w.workerKind === 'bot')
+      const pipeWork = def.repository === state.data.summary.workItemRepository || def.kind === 'SoftwareFactory'
+        ? (workItems || []).filter(w => def.kind !== 'SoftwareFactory' || w.workerKind === 'bot')
         : [];
 
       for (const col of stageColumns) {
@@ -270,7 +326,7 @@
     node.dataset.pipeline = def.id;
     node.dataset.stage = colKey;
 
-    if (def.isRetired && (colKey === 'tdd' || colKey === 'uat' || colKey === 'prod')) {
+    if (def.isRetired && isDeliveryColumn(colKey)) {
       node.classList.add('muted');
       node.innerHTML = `<div class="node-main">—</div><div class="node-sub">retired</div>`;
       return node;
@@ -284,8 +340,10 @@
     if (colKey === 'work') {
       const openCount = pipeWork.filter(w => w.state === 'open').length;
       const wipCount = pipeWork.filter(w => w.column !== 'Done').length;
-      main = def.id === 'app-ui' || def.id === 'factory-agentic' ? `${openCount} open` : def.kind;
-      sub = def.id === 'app-ui' ? `${wipCount} in flow (#679)` : def.id === 'factory-agentic' ? 'bot queue' : 'gitops/ops';
+      const s = state.data.summary;
+      const boardPipeline = def.repository === s.workItemRepository;
+      main = boardPipeline || def.kind === 'SoftwareFactory' ? `${openCount} open` : def.kind;
+      sub = boardPipeline ? `${wipCount} in flow${s.workItemsProjectNumber ? ` (#${s.workItemsProjectNumber})` : ''}` : def.kind === 'SoftwareFactory' ? 'bot queue' : 'gitops/ops';
       onClick = () => openPipelineInspector(pipeSummary);
     } else if (colKey === 'pr') {
       main = `${pipePrs.length} PRs`;
@@ -305,7 +363,7 @@
           Commit: latest.headSha,
           Updated: latest.updatedAt
         }, latest.url);
-      } else if (def.id === 'measurement-scorecard') {
+      } else if (def.kind === 'Measurement') {
         main = 'nightly';
         sub = pipeSummary.repository?.latestCommitMessage || 'space-scorecard';
         status = 'healthy';
@@ -316,7 +374,7 @@
       }
     } else if (colKey === 'rc') {
       const latestDel = pipeDeliveries.find(d => d.channelName === 'Default') || pipeDeliveries[0];
-      main = latestDel ? latestDel.releaseVersion : (pipeSummary.stageVersions?.tdd || '--');
+      main = latestDel ? latestDel.releaseVersion : (pipeSummary.stageVersions?.[platform.first] || '--');
       sub = def.deployableName ? `${def.deployableName} package` : 'artifact';
       onClick = () => openPipelineInspector(pipeSummary);
     } else if (colKey === 'release') {
@@ -334,7 +392,7 @@
         sub = 'Octopus';
       }
     } else {
-      // tdd | uat | prod
+      // a delivery stage
       const stageObj = (state.data.summary.stages || []).find(s => s.stage.name === colKey);
       const workload = stageObj?.workloads?.find(w => w.deployableName === def.deployableName);
       const probe = stageObj?.healthProbes?.find(pr => pr.deployableName === def.deployableName);
@@ -342,7 +400,7 @@
       const stageDrift = activeDrifts.filter(dr => dr.stageName === colKey && (!dr.deployableName || dr.deployableName === def.deployableName));
       const version = workload?.runningVersion || pipeSummary.stageVersions?.[colKey] || stageDel?.releaseVersion;
 
-      if (def.id === 'measurement-scorecard' && colKey !== 'prod') {
+      if (def.kind === 'Measurement' && colKey !== platform.prod) {
         node.classList.add('muted');
         node.innerHTML = `<div class="node-main">—</div><div class="node-sub">prod nightly</div>`;
         return node;
@@ -416,7 +474,7 @@
   }
 
   function spawnTokenAnimation(pipelineId, targetStageKey, outcome) {
-    const lane = dom.swimLanes.querySelector(`.swim-lane-row[data-pipeline="${CSS.escape(pipelineId || 'app-ui')}"]`);
+    const lane = dom.swimLanes.querySelector(`.swim-lane-row[data-pipeline="${CSS.escape(pipelineId || platform.primaryPipeline)}"]`);
     if (!lane) return;
     const nodes = [...lane.querySelectorAll('.stage-node')];
     const targetIdx = Math.max(1, nodes.findIndex(n => n.dataset.stage === (targetStageKey || 'build')));
@@ -482,8 +540,9 @@
           ? `<span class="badge crit">${critCount} DRIFT</span>`
           : `<span class="badge ok">SYNCED</span>`;
 
-      const uiWorkload = (s.workloads || []).find(w => w.deployableName === 'ui');
-      const uiProbe = (s.healthProbes || []).find(p => p.deployableName === 'ui');
+      const primary = platform.primaryDeployable;
+      const uiWorkload = (s.workloads || []).find(w => w.deployableName === primary);
+      const uiProbe = (s.healthProbes || []).find(p => p.deployableName === primary);
 
       card.innerHTML = `
         <div class="env-card-head">
@@ -495,7 +554,7 @@
           <span>${inst ? `${inst.resourceCount} res` : '0 res'}</span>
         </div>
         <div class="env-meta-row">
-          <span>ui: ${esc(uiWorkload?.runningVersion || '--')}</span>
+          <span>${esc(primary)}: ${esc(uiWorkload?.runningVersion || '--')}</span>
           <span>${uiProbe ? `${uiProbe.latencyMs}ms · db v${uiProbe.databaseVersion || '?'}` : 'inactive'}</span>
         </div>`;
       card.addEventListener('click', () => openStageFullInspector(s));
@@ -536,7 +595,9 @@
     document.getElementById('work-meta').textContent = `${ws.openItems} open · ${ws.botItems} bot / ${ws.teamItems} team`;
 
     dom.kanbanStrip.innerHTML = '';
-    const cols = ['Todo', 'In Progress', 'Review', 'Merged', 'TDD', 'UAT'];
+    const preferred = ['Todo', 'In Progress', 'Review', 'Merged', ...platform.stages.slice(0, -1).map(n => n.toUpperCase())];
+    const present = Object.keys(ws.wipByColumn || {});
+    const cols = preferred.some(c => present.includes(c)) || !present.length ? preferred : present.slice(0, 6);
     for (const c of cols) {
       const box = document.createElement('div');
       box.className = 'kanban-col';
@@ -564,9 +625,7 @@
         Worker: `${item.workerKind} (${item.agent || 'unassigned'})`,
         State: item.state,
         ReleaseCandidate: item.releaseCandidateVersion || '--',
-        TDD: item.tddVersion || '--',
-        UAT: item.uatVersion || '--',
-        PROD: item.prodVersion || '--',
+        ...stageVersionFields(item.tddVersion, item.uatVersion, item.prodVersion),
         Rework: `ftFailures=${item.ftFailures}, reverts=${item.reverts}`
       }, item.url));
       dom.workList.appendChild(row);
@@ -763,9 +822,7 @@
       Kind: def.kind,
       Repository: def.repository,
       OctopusProject: def.octopusProjectSlug || '--',
-      TDD: p.stageVersions?.tdd || '--',
-      UAT: p.stageVersions?.uat || '--',
-      PROD: p.stageVersions?.prod || '--',
+      ...Object.fromEntries(platform.stages.map(n => [n.toUpperCase(), p.stageVersions?.[n] || '--'])),
       OpenPRs: p.openPrCount,
       LatestCommit: p.repository?.latestCommitMessage || '--',
       Webhook: p.repository?.webhookRegistered ? `Active (${p.repository.lastWebhookStatusCode || 'ok'})` : 'Pending'
@@ -829,7 +886,7 @@
     renderEventTicker(new Set([key]));
 
     const stageTarget = ev.stageName || (ev.eventType?.includes('pipelineRun') ? 'build' : ev.eventType?.includes('change') ? 'pr' : 'work');
-    spawnTokenAnimation(ev.pipelineId || 'app-ui', stageTarget, ev.outcome);
+    spawnTokenAnimation(ev.pipelineId || platform.primaryPipeline, stageTarget, ev.outcome);
   }
 
   function setupRealtime() {
@@ -907,9 +964,7 @@
         Column: item.column,
         Worker: item.agent || item.workerKind,
         ReleaseCandidate: item.releaseCandidateVersion || '--',
-        TDD: item.tddVersion || '--',
-        UAT: item.uatVersion || '--',
-        PROD: item.prodVersion || '--'
+        ...stageVersionFields(item.tddVersion, item.uatVersion, item.prodVersion)
       }, item.url);
       return;
     }
@@ -932,7 +987,7 @@
     const sample = state.data.recentEvents[Math.floor(Math.random() * Math.min(6, state.data.recentEvents.length))];
     if (sample) {
       const targetStage = sample.stageName || (sample.eventType?.includes('pipelineRun') ? 'build' : 'release');
-      spawnTokenAnimation(sample.pipelineId || 'app-ui', targetStage, sample.outcome);
+      spawnTokenAnimation(sample.pipelineId || platform.primaryPipeline, targetStage, sample.outcome);
     }
   }, 4500);
 

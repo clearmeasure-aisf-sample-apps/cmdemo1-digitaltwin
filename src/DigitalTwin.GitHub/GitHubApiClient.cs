@@ -1,11 +1,12 @@
 using System.Collections.Concurrent;
 using System.Globalization;
-using System.Net;
 using System.Net.Http.Headers;
-using System.Text;
+using System.Net;
 using System.Text.Json;
-using DigitalTwin.Core.Ports;
+using System.Text;
+using DigitalTwin.Core.Hierarchy;
 using DigitalTwin.Core.Observation;
+using DigitalTwin.Core.Ports;
 using Microsoft.Extensions.Options;
 
 namespace DigitalTwin.GitHub;
@@ -188,7 +189,7 @@ public sealed class GitHubApiClient(
         var cacheKey = $"raw:{url}";
 
         using var client = httpClientFactory.CreateClient("github-raw");
-        client.DefaultRequestHeaders.UserAgent.ParseAdd("cmdemo1-digitaltwin/1.0");
+        client.DefaultRequestHeaders.UserAgent.ParseAdd($"{PlatformCatalog.TwinServiceName}/1.0");
         using var req = new HttpRequestMessage(HttpMethod.Get, url);
 
         if (_etagCache.TryGetValue(cacheKey, out var cached) && !string.IsNullOrWhiteSpace(cached.ETag))
@@ -270,7 +271,7 @@ public sealed class GitHubApiClient(
     {
         var client = httpClientFactory.CreateClient("github");
         client.BaseAddress = new Uri("https://api.github.com/");
-        client.DefaultRequestHeaders.UserAgent.ParseAdd("cmdemo1-digitaltwin/1.0");
+        client.DefaultRequestHeaders.UserAgent.ParseAdd($"{PlatformCatalog.TwinServiceName}/1.0");
         client.DefaultRequestHeaders.Accept.Add(new MediaTypeWithQualityHeaderValue("application/vnd.github+json"));
         client.DefaultRequestHeaders.Add("X-GitHub-Api-Version", "2022-11-28");
         if (!string.IsNullOrWhiteSpace(options.Value.Token))

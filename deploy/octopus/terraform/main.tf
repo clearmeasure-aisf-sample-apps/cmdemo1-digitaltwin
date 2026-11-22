@@ -65,6 +65,10 @@ locals {
     "Twin.Image"           = "${var.acr_name}.azurecr.io/${var.image_repository}:#{Octopus.Release.Number}"
     "Twin.OctopusUrl"      = var.octopus_url
     "Twin.EnableEventGrid" = var.enable_event_grid ? "true" : "false"
+    "Twin.SystemSlug"      = var.system_slug
+    "Twin.GitHubOrg"       = var.github_org
+    "Twin.OctopusSpace"    = var.space_id
+    "Twin.PlatformFile"    = var.platform_file
   }
 
   sensitive_names = ["Azure.ClientId", "Azure.ClientSecret", "Azure.TenantId", "Azure.SubscriptionId", "Twin.OctopusApiKey", "Twin.GitHubPat", "Twin.WebhookSecret", "Twin.ApiKey"]

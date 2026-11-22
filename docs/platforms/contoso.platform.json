@@ -1,0 +1,124 @@
+{
+  // Example: a second client's platform. Two delivery stages (dev, prod), no GitOps status feeds, no project board.
+  // Copy it, replace every value, and point the twin at it with Twin:Platform:File or Twin:Platform:Json (docs/setup/README.md).
+  "platformName": "Contoso Retail Platform",
+  "systemSlug": "contoso",
+  "systemName": "Contoso storefront",
+  "twinName": "contoso-digitaltwin",
+  "gitHub": {
+    "org": "contoso-retail",
+    "systemRepository": "contoso-system",
+    "twinRepository": "contoso-digitaltwin",
+    "observedRepositories": ["contoso-system", "contoso-storefront", "contoso-api", "contoso-digitaltwin"],
+    "incrementalRepositories": [],
+    "retiredRepositories": [],
+    "workItemsProjectNumber": 0,
+    "workItemsProjectNodeId": "",
+    "defaultWorkItemRepository": "contoso-storefront",
+    "twinHookUrlMarker": "contoso-twin",
+    "statusFeeds": {
+      "desiredStateBranch": "main",
+      "systemJson": "",
+      "stageVersions": "",
+      "statusBranch": "main",
+      "cost": "",
+      "containers": "",
+      "workItems": ""
+    }
+  },
+  "octopus": {
+    "url": "https://contoso.octopus.app",
+    "spaceId": "Spaces-42",
+    "spaceSlug": "contoso",
+    "automationUsers": ["contoso-ci"]
+  },
+  "azure": {
+    "subscriptionId": "00000000-0000-0000-0000-000000000000",
+    "tenantId": "00000000-0000-0000-0000-000000000000",
+    "nonprodResourceGroup": "rg-contoso-dev",
+    "prodResourceGroup": "rg-contoso-prod",
+    "additionalResourceGroups": [],
+    "acrName": "acrcontoso",
+    "acrLoginServer": "acrcontoso.azurecr.io"
+  },
+  "defaultPipelineId": "system",
+  "pipelines": [
+    {
+      "id": "storefront",
+      "name": "Storefront",
+      "kind": "BusinessApp",
+      "repository": "contoso-storefront",
+      "deployableName": "web",
+      "octopusProjectSlug": "contoso-web",
+      "isRetired": false,
+      "isTwinObserver": false,
+      "description": "Customer storefront on Azure Container Apps."
+    },
+    {
+      "id": "api",
+      "name": "Orders API",
+      "kind": "BusinessApp",
+      "repository": "contoso-api",
+      "deployableName": "api",
+      "octopusProjectSlug": "contoso-api",
+      "isRetired": false,
+      "isTwinObserver": false,
+      "description": "Orders API on Azure Container Apps."
+    },
+    {
+      "id": "system",
+      "name": "System & Infra",
+      "kind": "GitOpsInfra",
+      "repository": "contoso-system",
+      "deployableName": null,
+      "octopusProjectSlug": null,
+      "isRetired": false,
+      "isTwinObserver": false,
+      "description": "Infrastructure as code for the platform."
+    },
+    {
+      "id": "twin-observer",
+      "name": "Digital Twin Observer",
+      "kind": "PlatformObserver",
+      "repository": "contoso-digitaltwin",
+      "deployableName": null,
+      "octopusProjectSlug": null,
+      "isRetired": false,
+      "isTwinObserver": true,
+      "description": "The twin, one level above the platform it observes."
+    }
+  ],
+  "stages": [
+    { "name": "dev", "tier": "nonprod", "hostingBoundary": "cae-contoso-dev", "resourceGroup": "rg-contoso-dev", "order": 1, "autoDeploy": true, "hasAcceptanceTests": true, "requiresRestorePoint": false, "isDeclaredOnly": false },
+    { "name": "prod", "tier": "prod", "hostingBoundary": "cae-contoso-prod", "resourceGroup": "rg-contoso-prod", "order": 2, "autoDeploy": false, "hasAcceptanceTests": false, "requiresRestorePoint": true, "isDeclaredOnly": false }
+  ],
+  "hostingBoundaries": [
+    { "name": "cae-contoso-dev", "kind": "ContainerAppsEnvironment", "resourceGroup": "rg-contoso-dev", "location": "eastus2", "hostedStages": ["dev"] },
+    { "name": "cae-contoso-prod", "kind": "ContainerAppsEnvironment", "resourceGroup": "rg-contoso-prod", "location": "eastus2", "hostedStages": ["prod"] }
+  ],
+  "repositoryPipelines": {
+    "contoso-storefront": "storefront",
+    "contoso-api": "api",
+    "contoso-system": "system",
+    "contoso-digitaltwin": "twin-observer"
+  },
+  "repositoryDeployables": {
+    "contoso-storefront": "web",
+    "contoso-api": "api"
+  },
+  "octopusProjectPipelines": {
+    "contoso-web": "storefront",
+    "contoso-api": "api",
+    "contoso-digitaltwin": "twin-observer"
+  },
+  "octopusProjectDeployables": {
+    "contoso-web": "web",
+    "contoso-api": "api"
+  },
+  "azureStageRules": [
+    { "stage": "twin", "nameContains": ["twin"], "resourceGroups": [] },
+    { "stage": "dev", "nameContains": ["-dev"], "resourceGroups": ["rg-contoso-dev"] },
+    { "stage": "prod", "nameContains": ["-prod"], "resourceGroups": ["rg-contoso-prod"] }
+  ],
+  "defaultAzureStage": "shared"
+}

@@ -20,7 +20,7 @@ public static class TwinApiEndpoints
     public static void MapTwinEndpoints(this WebApplication app)
     {
         // Health checks for Container Apps & probes
-        app.MapGet("/health", () => Results.Ok(new { status = "Healthy", service = "cmdemo1-digitaltwin", version = BuildVersion }));
+        app.MapGet("/health", () => Results.Ok(new { status = "Healthy", service = PlatformCatalog.TwinServiceName, version = BuildVersion }));
         app.MapGet("/_healthcheck", () => Results.Text("Healthy\n"));
 
         // Public dashboard hydration + SignalR/SSE stream + public summary/graph
@@ -124,7 +124,7 @@ public static class TwinApiEndpoints
             => Results.Ok(await queries.GetDeploymentsAsync(stage, deployable, limit ?? 100, asOf, ct)));
 
         protectedApi.MapGet("/metrics", async (int? windowDays, string? stage, DateTimeOffset? asOf, TwinQueryService queries, CancellationToken ct)
-            => Results.Ok(await queries.GetMetricsAsync(windowDays ?? 7, stage ?? "prod", asOf, ct)));
+            => Results.Ok(await queries.GetMetricsAsync(windowDays ?? 7, stage ?? PlatformCatalog.ProductionStage, asOf, ct)));
 
         protectedApi.MapGet("/explain", async (string q, DateTimeOffset? asOf, TwinQueryService queries, CancellationToken ct)
             => Results.Ok(await queries.ExplainItemAsync(q, asOf, ct)));
@@ -244,10 +244,10 @@ public static class TwinApiEndpoints
         return string.Create(CultureInfo.InvariantCulture, $$"""
             # cmdemo1-digitaltwin — Platform DevOps Digital Twin
 
-            Platform: {{Cmdemo1PlatformCatalog.PlatformName}}
-            Observed System: {{Cmdemo1PlatformCatalog.SystemSlug}} ({{Cmdemo1PlatformCatalog.SystemName}})
-            GitOps Repository: https://github.com/{{Cmdemo1PlatformCatalog.GitHubOrg}}/{{Cmdemo1PlatformCatalog.SystemRepository}}
-            Octopus Space: {{Cmdemo1PlatformCatalog.OctopusUrl}}/app#/{{Cmdemo1PlatformCatalog.OctopusSpaceId}} ({{Cmdemo1PlatformCatalog.OctopusSpaceSlug}})
+            Platform: {{PlatformCatalog.PlatformName}}
+            Observed System: {{PlatformCatalog.SystemSlug}} ({{PlatformCatalog.SystemName}})
+            GitOps Repository: https://github.com/{{PlatformCatalog.GitHubOrg}}/{{PlatformCatalog.SystemRepository}}
+            Octopus Space: {{PlatformCatalog.OctopusUrl}}/app#/{{PlatformCatalog.OctopusSpaceId}} ({{PlatformCatalog.OctopusSpaceSlug}})
 
             ## Architecture Intent
             This digital twin sits ONE LEVEL ABOVE cmdemo1 (it observes cmdemo1 and is not a cmdemo1 deployable).

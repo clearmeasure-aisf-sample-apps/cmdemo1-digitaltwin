@@ -15,10 +15,10 @@ public static class GitHubEventNormalizer
         using var doc = JsonDocument.Parse(string.IsNullOrWhiteSpace(rawJson) ? "{}" : rawJson);
         var root = doc.RootElement;
 
-        var repoFullName = GetString(root, "repository", "full_name") ?? $"{Cmdemo1PlatformCatalog.GitHubOrg}/cmdemo1-system";
+        var repoFullName = GetString(root, "repository", "full_name") ?? $"{PlatformCatalog.GitHubOrg}/{PlatformCatalog.SystemRepository}";
         var repoShortName = GetString(root, "repository", "name") ?? repoFullName.Split('/').Last();
-        var pipelineId = Cmdemo1PlatformCatalog.ResolvePipelineIdFromRepository(repoShortName);
-        var deployable = Cmdemo1PlatformCatalog.ResolveDeployableFromRepository(repoShortName);
+        var pipelineId = PlatformCatalog.ResolvePipelineIdFromRepository(repoShortName);
+        var deployable = PlatformCatalog.ResolveDeployableFromRepository(repoShortName);
         var actor = GetString(root, "sender", "login") ?? GetString(root, "pusher", "name") ?? "github";
         var action = GetString(root, "action");
         var eventId = string.IsNullOrWhiteSpace(deliveryId) ? Guid.NewGuid().ToString("N") : deliveryId;
@@ -100,7 +100,7 @@ public static class GitHubEventNormalizer
         var at = ParseDate(GetString(root, "head_commit", "timestamp")) ?? fallbackTime;
 
         string? stage = null;
-        if (repoShortName.Equals("cmdemo1-system", StringComparison.OrdinalIgnoreCase) &&
+        if (repoShortName.Equals(PlatformCatalog.SystemRepository, StringComparison.OrdinalIgnoreCase) &&
             message.StartsWith("Pin ", StringComparison.OrdinalIgnoreCase))
         {
             var parts = message.Split(' ', StringSplitOptions.RemoveEmptyEntries);
