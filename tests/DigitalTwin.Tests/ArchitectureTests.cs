@@ -99,6 +99,17 @@ public sealed class ArchitectureTests
     }
 
     [Fact]
+    public void ReadModelsCanOnlyChangeThroughStateObservations()
+    {
+        var writers = typeof(DigitalTwin.Core.Ports.ITwinStore).GetMethods()
+            .Select(m => m.Name)
+            .Where(n => (n.StartsWith("Upsert", StringComparison.Ordinal) || n.StartsWith("Replace", StringComparison.Ordinal) || n.StartsWith("Reconcile", StringComparison.Ordinal))
+                && n != "UpsertCursorAsync")
+            .ToList();
+        Assert.True(writers.Count == 0, $"ITwinStore must not expose read-model writes (use StateObservationPublisher): {string.Join(", ", writers)}");
+    }
+
+    [Fact]
     public void EveryProjectUnderSrcIsClassified()
     {
         var known = IntegrationProjects.Concat([Core, Application, Api]).ToHashSet(StringComparer.Ordinal);

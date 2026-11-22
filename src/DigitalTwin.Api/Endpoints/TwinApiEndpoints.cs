@@ -113,8 +113,18 @@ public static class TwinApiEndpoints
         protectedApi.MapGet("/explain", async (string q, TwinQueryService queries, CancellationToken ct)
             => Results.Ok(await queries.ExplainItemAsync(q, ct)));
 
-        protectedApi.MapPost("/admin/rebuild", async (IBackfillCoordinator backfill, CancellationToken ct)
-            => Results.Ok(await backfill.RebuildAllAsync("manual-admin-rebuild", ct)));
+        // Full rebuild of the journal and every read model from the raw intake store.
+        protectedApi.MapPost("/admin/rebuild", async (bool? wait, IntakeRebuildService rebuild) =>
+        {
+            var running = rebuild.StartOrJoin();
+            return wait == false ? Results.Accepted("/api/admin/rebuild/status", rebuild.GetStatus()) : Results.Ok(await running);
+        });
+
+        protectedApi.MapGet("/admin/rebuild/status", (IntakeRebuildService rebuild) => Results.Ok(rebuild.GetStatus()));
+
+        // Re-poll every source now (publishes state observations through the intake).
+        protectedApi.MapPost("/admin/backfill", async (IBackfillCoordinator backfill, CancellationToken ct)
+            => Results.Ok(await backfill.RebuildAllAsync("manual-admin-backfill", ct)));
 
         protectedApi.MapGet("/intake", async (TwinQueryService queries, CancellationToken ct)
             => Results.Ok(await queries.GetIntakeQueueAsync(ct)));
@@ -131,8 +141,7 @@ public static class TwinApiEndpoints
             return Results.Ok(new { replayed });
         });
 
-        protectedApi.MapPost("/admin/rebuild-from-raw", async (IntakeRebuildService rebuild, CancellationToken ct)
-            => Results.Ok(await rebuild.RebuildFromRawAsync(ct)));
+        protectedApi.MapPost("/admin/rebuild-from-raw", async (IntakeRebuildService rebuild) => Results.Ok(await rebuild.StartOrJoin()));
 
         protectedApi.MapPost("/admin/register-hooks", async (
             string? publicBaseUrl,
@@ -197,7 +206,8 @@ public static class TwinApiEndpoints
             - GET {{baseUrl}}/api/intake — Durable intake queue: depth, oldest pending age, dead letters, transport [X-Twin-Key]
             - GET {{baseUrl}}/api/admin/deadletters — Dead-lettered intake messages [X-Twin-Key]
             - POST {{baseUrl}}/api/admin/deadletters/replay — Replay dead letters (all, or ids in the JSON body) [X-Twin-Key]
-            - POST {{baseUrl}}/api/admin/rebuild-from-raw — Rebuild the event journal from the raw intake table [X-Twin-Key]
+            - POST {{baseUrl}}/api/admin/rebuild — Rebuild the journal and ALL read models from the raw intake table; reports before/after fingerprints [X-Twin-Key]
+            - POST {{baseUrl}}/api/admin/backfill — Re-poll GitHub, Octopus, Azure and probes now [X-Twin-Key]
 
             ## MCP Server (Streamable HTTP)
             Endpoint: {{baseUrl}}/mcp (requires `X-Twin-Key` header)

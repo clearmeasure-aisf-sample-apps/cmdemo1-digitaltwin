@@ -20,7 +20,7 @@ public static class TwinIntakeCapturedHandler
         {
             await applier.ApplyAsync(message.RawEventId, ct);
         }
-        catch (Exception ex) when (ex is not OperationCanceledException)
+        catch (Exception ex) when (ex is not OperationCanceledException || !ct.IsCancellationRequested)
         {
             var finalAttempt = envelope.Attempts >= options.Value.MaxAttempts;
             await rawStore.RecordFailureAsync(

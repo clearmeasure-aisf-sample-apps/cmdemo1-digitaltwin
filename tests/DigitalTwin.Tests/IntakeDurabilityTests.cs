@@ -181,7 +181,7 @@ public sealed class IntakeDurabilityTests(SqlServerFixture sql)
         var before = Fingerprint(await store.QueryEventsAsync(null, null, null, null, null, 10_000, CancellationToken.None));
         Assert.Equal(4, before.Count);
 
-        var response = await client.PostAsync("/api/admin/rebuild-from-raw", null);
+        var response = await client.PostAsync("/api/admin/rebuild", null);
         Assert.Equal(HttpStatusCode.OK, response.StatusCode);
         var report = await response.Content.ReadFromJsonAsync<IntakeRebuildReport>(JsonWeb);
         Assert.Equal(4, report!.JournalEventsCleared);

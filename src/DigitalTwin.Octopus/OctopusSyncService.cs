@@ -3,6 +3,7 @@ using System.Text;
 using System.Text.Json;
 using System.Text.RegularExpressions;
 using DigitalTwin.Core.Ports;
+using DigitalTwin.Core.Projections;
 using DigitalTwin.Core.BuildAndArtifact;
 using DigitalTwin.Core.Hierarchy;
 using DigitalTwin.Core.Intake;
@@ -17,6 +18,7 @@ namespace DigitalTwin.Octopus;
 public sealed partial class OctopusSyncService(
     IHttpClientFactory httpClientFactory,
     ITwinStore store,
+    StateObservationPublisher state,
     ObservedEventIntake intake,
     IOptions<OctopusOptions> options,
     TimeProvider timeProvider,
@@ -140,7 +142,7 @@ public sealed partial class OctopusSyncService(
                     };
                 }
             }
-            await store.UpsertReleasesAsync(releaseMap.Values.ToList(), ct);
+            await state.PublishAsync(StateKinds.Release, releaseMap.Values.ToList(), EventSourceKind.Octopus, ct);
 
             // Tasks (Deploy + RunbookRun) + Interruptions
             var taskById = new Dictionary<string, JsonElement>(StringComparer.OrdinalIgnoreCase);
@@ -271,7 +273,7 @@ public sealed partial class OctopusSyncService(
                     });
                 }
             }
-            await store.UpsertDeliveriesAsync(deliverySnapshots, ct);
+            await state.PublishAsync(StateKinds.Delivery, deliverySnapshots, EventSourceKind.Octopus, ct);
 
             // Runbooks
             if (!string.IsNullOrWhiteSpace(runbooksJson) && !string.IsNullOrWhiteSpace(runbookRunsJson))
@@ -311,7 +313,7 @@ public sealed partial class OctopusSyncService(
                         TaskUrl = $"{baseUri}/app#/{space}/tasks/{taskId}"
                     });
                 }
-                await store.UpsertRunbooksAsync(runbookSnapshots, ct);
+                await state.PublishAsync(StateKinds.Runbook, runbookSnapshots, EventSourceKind.Octopus, ct);
             }
 
             // Packages
@@ -335,7 +337,7 @@ public sealed partial class OctopusSyncService(
                         PublishedAt = pub
                     });
                 }
-                await store.UpsertArtifactsAsync(pkgs, ct);
+                await state.PublishAsync(StateKinds.Artifact, pkgs, EventSourceKind.Octopus, ct);
             }
 
             // Freezes
@@ -377,7 +379,7 @@ public sealed partial class OctopusSyncService(
                         });
                     }
                 }
-                await store.ReplaceFreezesAsync(freezes, ct);
+                await state.PublishSetAsync(StateKinds.Freeze, "octopus", freezes, EventSourceKind.Octopus, ct);
             }
 
             // Subscription status
@@ -412,7 +414,7 @@ public sealed partial class OctopusSyncService(
                         CheckedAt = now
                     });
                 }
-                await store.ReplaceWebhookStatusesAsync("octopus", subStatuses, ct);
+                await state.PublishSetAsync(StateKinds.WebhookStatus, "octopus", subStatuses, EventSourceKind.Octopus, ct);
             }
 
             // Audit events -> Normalized Domain Events
@@ -446,7 +448,7 @@ public sealed partial class OctopusSyncService(
             cursor.LastCursor = now.ToString("O", CultureInfo.InvariantCulture);
             await store.UpsertCursorAsync(cursor, ct);
         }
-        catch (Exception ex) when (ex is not OperationCanceledException)
+        catch (Exception ex) when (ex is not OperationCanceledException || !ct.IsCancellationRequested)
         {
             LogOctopusSyncFailed(ex);
             cursor.Status = "error";
@@ -573,7 +575,7 @@ public sealed partial class OctopusSyncService(
             Detail = response.IsSuccessStatusCode ? $"registered ({categories.Count} categories)" : $"HTTP {(int)response.StatusCode}: {body}",
             CheckedAt = now
         };
-        await store.ReplaceWebhookStatusesAsync("octopus", [status], ct);
+        await state.PublishSetAsync(StateKinds.WebhookStatus, "octopus", [status], EventSourceKind.Octopus, ct);
         return status;
     }
 

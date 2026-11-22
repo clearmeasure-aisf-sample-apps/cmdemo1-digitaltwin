@@ -1,6 +1,7 @@
 using DigitalTwin.Core.Intake;
 using DigitalTwin.Core.Observation;
 using DigitalTwin.Core.Ports;
+using DigitalTwin.Core.Projections;
 
 namespace DigitalTwin.Application.Intake;
 
@@ -19,6 +20,7 @@ public sealed class IntakeEventApplier(
     ITwinStore store,
     IRealtimeEventPublisher realtime,
     FollowUpRefreshScheduler followUps,
+    ProjectionGate gate,
     IEnumerable<IIntakeApplyInterceptor> interceptors,
     TimeProvider timeProvider) : IIntakeEventApplier
 {
@@ -37,6 +39,7 @@ public sealed class IntakeEventApplier(
             return new IntakeApplyResult(raw.Id, 0, 0, AlreadyProcessed: true);
         }
 
+        using var _ = await gate.EnterAsync(ct);
         var (normalized, applied) = await ApplyRawAsync(raw, live: true, ct);
         return new IntakeApplyResult(raw.Id, normalized.Count, applied.Count, AlreadyProcessed: false);
     }
@@ -53,18 +56,40 @@ public sealed class IntakeEventApplier(
 
         var normalized = IntakeNormalizer.Normalize(raw);
         var applied = await store.AppendEventsReturnNewAsync(normalized.OrderBy(e => e.OccurredAt), ct);
+
+        // Idempotent (latest-wins per entity), so re-applying after a crash or redelivery is harmless.
+        var stateEvents = normalized.Where(StateObservations.IsStateEvent).ToList();
+        var projected = stateEvents.Count > 0 ? await store.ApplyStateObservationsAsync(stateEvents, ct) : 0;
         await rawStore.MarkProcessedAsync(raw.Id, applied.Count, timeProvider.GetUtcNow(), ct);
 
         if (live)
         {
-            foreach (var ev in applied)
+            foreach (var ev in applied.Where(e => !StateObservations.IsStateEvent(e)))
             {
                 await realtime.PublishEventAsync(ev, ct);
+            }
+            if (projected > 0)
+            {
+                await BroadcastStateChangedAsync(ct);
             }
             RequestFollowUps(raw, normalized);
         }
 
         return (normalized, applied);
+    }
+
+    private long _lastStateBroadcastTicks;
+
+    private async Task BroadcastStateChangedAsync(CancellationToken ct)
+    {
+        var now = timeProvider.GetUtcNow();
+        var last = Interlocked.Read(ref _lastStateBroadcastTicks);
+        if (now.UtcTicks - last < TimeSpan.FromSeconds(3).Ticks)
+        {
+            return;
+        }
+        Interlocked.Exchange(ref _lastStateBroadcastTicks, now.UtcTicks);
+        await realtime.PublishStateRefreshedAsync("state-observed", now, ct);
     }
 
     private void RequestFollowUps(RawIntakeEvent raw, IReadOnlyList<ObservedEvent> normalized)

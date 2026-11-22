@@ -1,6 +1,7 @@
 using DigitalTwin.Core.Ports;
 using DigitalTwin.Core.BuildAndArtifact;
 using DigitalTwin.Core.Observation;
+using DigitalTwin.Core.Projections;
 using DigitalTwin.Core.ReleaseAndDelivery;
 using DigitalTwin.Core.ReliabilityAndDrift;
 using DigitalTwin.Core.RuntimeAndPlatform;
@@ -10,7 +11,7 @@ using Microsoft.EntityFrameworkCore;
 
 namespace DigitalTwin.Persistence;
 
-public sealed class EfTwinStore(IDbContextFactory<TwinDbContext> factory) : ITwinStore
+public sealed partial class EfTwinStore(IDbContextFactory<TwinDbContext> factory) : ITwinStore
 {
     public async Task<bool> AppendEventIfNewAsync(ObservedEvent observedEvent, CancellationToken ct)
     {
@@ -220,6 +221,10 @@ public sealed class EfTwinStore(IDbContextFactory<TwinDbContext> factory) : ITwi
         if (!string.IsNullOrWhiteSpace(eventType))
         {
             query = query.Where(e => e.EventType == eventType);
+        }
+        else
+        {
+            query = query.Where(e => e.EventType != StateKinds.EventType);
         }
 
         if (!db.Database.IsSqlite())

@@ -66,7 +66,7 @@ public sealed class WolverineIntakeQueueMonitor(
                 TransportScheduled: counts.Scheduled,
                 Error: null);
         }
-        catch (Exception ex) when (ex is not OperationCanceledException)
+        catch (Exception ex) when (ex is not OperationCanceledException || !ct.IsCancellationRequested)
         {
             return new IntakeQueueStatus(transport, options.Value.ProcessorEnabled, 0, null, null, 0, 0, 0, null, null, 0, 0, ex.Message);
         }

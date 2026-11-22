@@ -1,6 +1,8 @@
+using DigitalTwin.Core.Hierarchy;
 using DigitalTwin.Core.Intake;
 using DigitalTwin.Core.Observation;
 using DigitalTwin.Core.Ports;
+using DigitalTwin.Core.Projections;
 using DigitalTwin.Core.ReliabilityAndDrift;
 
 namespace DigitalTwin.Application.Services;
@@ -9,6 +11,7 @@ namespace DigitalTwin.Application.Services;
 public sealed class DriftReconciliationService(
     ITwinStore store,
     ObservedEventIntake intake,
+    StateObservationPublisher state,
     IRealtimeEventPublisher realtime,
     TimeProvider timeProvider)
 {
@@ -26,7 +29,7 @@ public sealed class DriftReconciliationService(
             .ToHashSet(StringComparer.OrdinalIgnoreCase);
 
         var evaluated = DriftEvaluator.Evaluate(desired, workloads, probes, resources, repos, now);
-        await store.ReconcileDriftFindingsAsync(evaluated, now, ct);
+        await state.PublishSetAsync(StateKinds.Drift, Cmdemo1PlatformCatalog.SystemSlug, evaluated, EventSourceKind.Twin, ct);
 
         var opened = evaluated
             .Where(f => !previousActive.Contains(f.DriftKey))

@@ -57,7 +57,8 @@ public static class MessagingHostExtensions
             case IntakeTransport.LocalDurable:
                 opts.PersistMessagesWithSqlServer(wolverineConnection, messaging.WolverineSchema);
                 opts.PublishMessage<TwinIntakeCaptured>().ToLocalQueue(messaging.QueueName);
-                opts.LocalQueue(messaging.QueueName).UseDurableInbox();
+                // Sequential: live application order equals capture order, the order a rebuild replays in.
+                opts.LocalQueue(messaging.QueueName).Sequential().UseDurableInbox();
                 break;
 
             case IntakeTransport.SqlServer:
@@ -68,6 +69,7 @@ public static class MessagingHostExtensions
                     // Bounded polling keeps load trivial on the small (Basic 5 DTU) twin database.
                     opts.ListenToSqlServerQueue(messaging.SqlQueueName)
                         .PollingInterval(TimeSpan.FromMilliseconds(messaging.SqlQueuePollingMs))
+                        .Sequential()
                         .UseDurableInbox();
                 }
                 break;
@@ -86,7 +88,7 @@ public static class MessagingHostExtensions
                 opts.PublishMessage<TwinIntakeCaptured>().ToAzureServiceBusQueue(messaging.QueueName).UseDurableOutbox();
                 if (messaging.ProcessorEnabled)
                 {
-                    opts.ListenToAzureServiceBusQueue(messaging.QueueName).UseDurableInbox();
+                    opts.ListenToAzureServiceBusQueue(messaging.QueueName).Sequential().UseDurableInbox();
                 }
                 break;
 

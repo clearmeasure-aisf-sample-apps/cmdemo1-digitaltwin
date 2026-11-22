@@ -55,6 +55,11 @@ public static partial class PersistenceServiceCollectionExtensions
             {
                 await using var db = await dbFactory.CreateDbContextAsync(ct);
                 await db.Database.EnsureCreatedAsync(ct);
+                if (db.Database.IsSqlServer())
+                {
+                    // Tables added after the first deploy: EnsureCreated never alters an existing database.
+                    await db.Database.ExecuteSqlRawAsync(ProjectionVersionsDdl, ct);
+                }
                 return;
             }
             catch (Exception ex) when (attempt < 6)
@@ -64,6 +69,18 @@ public static partial class PersistenceServiceCollectionExtensions
             }
         }
     }
+
+    private const string ProjectionVersionsDdl = """
+        IF OBJECT_ID('dbo.TwinProjectionVersions') IS NULL
+        CREATE TABLE dbo.TwinProjectionVersions (
+            [Kind] nvarchar(64) NOT NULL,
+            [Key] nvarchar(256) NOT NULL,
+            [ObservedAt] datetimeoffset NOT NULL,
+            [EventKey] nvarchar(256) NOT NULL,
+            [ContentHash] nvarchar(32) NOT NULL,
+            CONSTRAINT PK_TwinProjectionVersions PRIMARY KEY ([Kind], [Key])
+        );
+        """;
 
     [LoggerMessage(Level = LogLevel.Warning, Message = "Twin database initialization attempt {Attempt} failed; retrying in 5s")]
     private static partial void LogDatabaseRetry(ILogger logger, int attempt, Exception ex);
