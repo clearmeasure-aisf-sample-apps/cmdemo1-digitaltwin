@@ -1,0 +1,251 @@
+{
+ "source": "GET /api/events/categories and /api/events/groups on https://clearmeasure.octopus.app (read-only), fetched 2026-11-22",
+ "categories": [
+  "ApiKeyExpired",
+  "ApiKeyExpiryFirstWarning",
+  "ApiKeyExpirySecondWarning",
+  "ArgoCDApplicationSyncInterruptionRaised",
+  "ArtifactContentModified",
+  "AttachmentsDeleted",
+  "AutoDeployTriggerBlocked",
+  "AutoDeployTriggerSucceeded",
+  "BuildInformationCreated",
+  "BuildInformationDeleted",
+  "BuildInformationModified",
+  "CertificateExpired",
+  "CertificateExpiryFirstWarning",
+  "CertificateExpirySecondWarning",
+  "CertificatePrivateKeyExported",
+  "CertificateReplaced",
+  "Comment",
+  "CompliancePolicyEvaluatedCompliant",
+  "CompliancePolicyEvaluatedNonCompliantBlocked",
+  "CompliancePolicyEvaluatedNonCompliantWarned",
+  "Created",
+  "DailyUsageCaptured",
+  "Deleted",
+  "DeploymentCanceled",
+  "DeploymentFailed",
+  "DeploymentPreconditionEvaluated",
+  "DeploymentQueued",
+  "DeploymentResumed",
+  "DeploymentStarted",
+  "DeploymentSucceeded",
+  "Downloaded",
+  "EphemeralEnvironmentCreationFailed",
+  "EphemeralEnvironmentCreationSucceeded",
+  "EphemeralEnvironmentDeploymentCreationFailed",
+  "Exported",
+  "GuidedFailureInterruptionRaised",
+  "Imported",
+  "IpAddressBanned",
+  "KubernetesResourceDeletionFailed",
+  "KubernetesResourceDeletionSucceeded",
+  "KubernetesResourceMonitoringStopped",
+  "KubernetesResourceVerificationInterruptionRaised",
+  "LicenseKeyExpired",
+  "LicenseKeyExpiryFirstWarning",
+  "LicenseKeyExpirySecondWarning",
+  "LicenseUsageAtLimit",
+  "LicenseUsageFirstWarning",
+  "LicenseUsageSecondWarning",
+  "LicenseUsageThirdWarning",
+  "LoginBanned",
+  "LoginChangedIdentityClaims",
+  "LoginCouldNotChangeIdentityClaims",
+  "LoginFailed",
+  "LoginMatchedByClaimSetThroughTheApi",
+  "LoginRefusedForConflictingUsers",
+  "LoginRefusedForUserLinkedToAnotherSubject",
+  "LoginRelinkedUserLinkedToAnotherSubject",
+  "LoginSucceeded",
+  "LoginTrustedUnverifiedEmail",
+  "MachineAdded",
+  "MachineCleanupFailed",
+  "MachineDeleted",
+  "MachineDeploymentRelatedPropertyWasUpdated",
+  "MachineDisabled",
+  "MachineEnabled",
+  "MachineHasWarnings",
+  "MachineHealthy",
+  "MachineUnavailable",
+  "MachineUnhealthy",
+  "ManualInterventionInterruptionRaised",
+  "McpOAuthAuthorizationCodeIssuanceFailed",
+  "McpOAuthAuthorizationCodeIssued",
+  "McpOAuthAuthorizationRequestRefused",
+  "McpOAuthTokenIssuanceFailed",
+  "McpOAuthTokenIssued",
+  "McpOAuthTokenRevocationRefused",
+  "McpOAuthTokenRevoked",
+  "Modified",
+  "OAuthRedirectUriNotAllowed",
+  "PackageAdded",
+  "PackageDeleted",
+  "PackageDeletedByRepositoryReIndexing",
+  "PackageDeletedByRetention",
+  "PackageReplaced",
+  "ProjectExportCompleted",
+  "ProjectExportQueued",
+  "ProjectImportCompleted",
+  "ProjectImportQueued",
+  "PullRequestCompletionInterruptionRaised",
+  "RateLimitExceeded",
+  "ReleaseDeletedByRetention",
+  "RunbookRunDeletedByRetention",
+  "RunbookRunFailed",
+  "RunbookRunQueued",
+  "RunbookRunResumed",
+  "RunbookRunStarted",
+  "RunbookRunSucceeded",
+  "RunbookSnapshotDeletedByRetention",
+  "RunbookSnapshotPublished",
+  "SigningKeyRotationFirstWarning",
+  "SigningKeyRotationSecondWarning",
+  "SigningKeyRotationThirdWarning",
+  "TaskCanceled",
+  "UsageDeclarationDownloaded",
+  "UsageDeclarationDueFirstWarning",
+  "UsageDeclarationDueSecondWarning",
+  "UsageDeclarationDueThirdWarning",
+  "UsageDeclarationOverdue",
+  "UsageDeclarationProcessed",
+  "UsageDeclarationReceiptForUnknownDeclaration",
+  "UsageDeclarationReceiptVerificationFailed",
+  "UsageDeclarationUsageDataAltered",
+  "UserPasswordChanged",
+  "WebhookTriggerRejected",
+  "WebhookTriggeredRunbookRunFailed"
+ ],
+ "groups": {
+  "AutoDeploy": [
+   "AutoDeployTriggerBlocked",
+   "AutoDeployTriggerSucceeded"
+  ],
+  "AutoDeployCritical": [
+   "AutoDeployTriggerBlocked"
+  ],
+  "Deployment": [
+   "DeploymentFailed",
+   "DeploymentQueued",
+   "DeploymentStarted",
+   "DeploymentSucceeded",
+   "GuidedFailureInterruptionRaised",
+   "ManualInterventionInterruptionRaised"
+  ],
+  "DeploymentCritical": [
+   "DeploymentFailed",
+   "GuidedFailureInterruptionRaised",
+   "ManualInterventionInterruptionRaised"
+  ],
+  "Machine": [
+   "MachineAdded",
+   "MachineCleanupFailed",
+   "MachineDeleted",
+   "MachineDeploymentRelatedPropertyWasUpdated",
+   "MachineDisabled",
+   "MachineEnabled",
+   "MachineHasWarnings",
+   "MachineHealthy",
+   "MachineUnavailable",
+   "MachineUnhealthy"
+  ],
+  "MachineCritical": [
+   "MachineCleanupFailed",
+   "MachineUnavailable"
+  ],
+  "MachineAvailableForDeployment": [
+   "MachineEnabled",
+   "MachineHealthy",
+   "MachineHasWarnings"
+  ],
+  "MachineUnavailableForDeployment": [
+   "MachineDisabled",
+   "MachineUnhealthy",
+   "MachineUnavailable"
+  ],
+  "MachineHealthChanged": [
+   "MachineHealthy",
+   "MachineHasWarnings",
+   "MachineUnhealthy",
+   "MachineUnavailable"
+  ],
+  "CertificateExpiry": [
+   "CertificateExpiryFirstWarning",
+   "CertificateExpirySecondWarning",
+   "CertificateExpired"
+  ],
+  "ApiKeyExpiry": [
+   "ApiKeyExpiryFirstWarning",
+   "ApiKeyExpirySecondWarning",
+   "ApiKeyExpired"
+  ],
+  "LicenseKeyExpiry": [
+   "LicenseKeyExpiryFirstWarning",
+   "LicenseKeyExpirySecondWarning",
+   "LicenseKeyExpired"
+  ],
+  "LicenseUsage": [
+   "LicenseUsageFirstWarning",
+   "LicenseUsageSecondWarning",
+   "LicenseUsageThirdWarning",
+   "LicenseUsageAtLimit"
+  ],
+  "Document": [
+   "Created",
+   "Modified",
+   "Deleted"
+  ],
+  "AuthenticationBanned": [
+   "LoginBanned",
+   "IpAddressBanned"
+  ],
+  "BuildInformation": [
+   "BuildInformationCreated",
+   "BuildInformationModified",
+   "BuildInformationDeleted"
+  ],
+  "EphemeralEnvironments": [
+   "EphemeralEnvironmentCreationSucceeded",
+   "EphemeralEnvironmentCreationFailed"
+  ],
+  "CompliancePolicyEvaluated": [
+   "CompliancePolicyEvaluatedCompliant",
+   "CompliancePolicyEvaluatedNonCompliantBlocked",
+   "CompliancePolicyEvaluatedNonCompliantWarned"
+  ],
+  "McpOAuth": [
+   "McpOAuthAuthorizationCodeIssued",
+   "McpOAuthAuthorizationCodeIssuanceFailed",
+   "McpOAuthTokenIssued",
+   "McpOAuthTokenIssuanceFailed",
+   "McpOAuthTokenRevoked",
+   "McpOAuthTokenRevocationRefused",
+   "McpOAuthAuthorizationRequestRefused",
+   "OAuthRedirectUriNotAllowed"
+  ],
+  "McpOAuthCritical": [
+   "McpOAuthAuthorizationCodeIssuanceFailed",
+   "McpOAuthTokenIssuanceFailed",
+   "McpOAuthTokenRevocationRefused",
+   "McpOAuthAuthorizationRequestRefused"
+  ],
+  "SigningKeyRotation": [
+   "SigningKeyRotationFirstWarning",
+   "SigningKeyRotationSecondWarning",
+   "SigningKeyRotationThirdWarning"
+  ],
+  "UsageDeclaration": [
+   "DailyUsageCaptured",
+   "UsageDeclarationDownloaded",
+   "UsageDeclarationProcessed",
+   "UsageDeclarationUsageDataAltered",
+   "UsageDeclarationReceiptVerificationFailed",
+   "UsageDeclarationReceiptForUnknownDeclaration",
+   "UsageDeclarationDueFirstWarning",
+   "UsageDeclarationDueSecondWarning",
+   "UsageDeclarationDueThirdWarning",
+   "UsageDeclarationOverdue"
+  ]
+ }
+}

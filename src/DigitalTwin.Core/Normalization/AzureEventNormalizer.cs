@@ -140,7 +140,9 @@ public static class AzureEventNormalizer
         {
             "Microsoft.Resources.ResourceWriteSuccess" => "dev.cdevents.environment.modified",
             "Microsoft.Resources.ResourceDeleteSuccess" => "dev.cdevents.environment.deleted",
-            "Microsoft.Resources.ResourceWriteFailure" or "Microsoft.Resources.ResourceActionFailure" => "twin.azure.resource.failed",
+            "Microsoft.Resources.ResourceWriteFailure" or "Microsoft.Resources.ResourceActionFailure" or "Microsoft.Resources.ResourceDeleteFailure" => "twin.azure.resource.failed",
+            "Microsoft.Resources.ResourceActionSuccess" => "twin.azure.resource.action",
+            "Microsoft.Resources.ResourceWriteCancel" or "Microsoft.Resources.ResourceDeleteCancel" or "Microsoft.Resources.ResourceActionCancel" => "twin.azure.resource.canceled",
             _ => $"twin.azure.{eventType.ToLowerInvariant()}"
         };
 

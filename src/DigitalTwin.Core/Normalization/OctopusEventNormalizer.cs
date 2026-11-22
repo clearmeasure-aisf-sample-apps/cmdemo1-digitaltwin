@@ -42,6 +42,13 @@ public static class OctopusEventNormalizer
         return null;
     }
 
+    /// <summary>Instance-level categories (logins, licensing, keys, certificates, MCP OAuth) the space subscription never requests.</summary>
+    public static bool IsExcludedFromSubscription(string categoryId)
+        => SubscriptionExcludedPrefixes.Any(p => categoryId.StartsWith(p, StringComparison.OrdinalIgnoreCase));
+
+    public static readonly IReadOnlyList<string> SubscriptionExcludedPrefixes =
+        ["Login", "License", "UsageDeclaration", "ApiKey", "Certificate", "SigningKey", "McpOAuth"];
+
     public static bool IsNoiseAuditEvent(string? category, string? message)
     {
         if (string.IsNullOrWhiteSpace(message))
@@ -158,6 +165,21 @@ public static class OctopusEventNormalizer
             "BuildInformationCreated" => ("twin.octopus.buildInformation.created", "artifact", "provenance", EventOutcome.Success),
             "EphemeralEnvironmentCreationSucceeded" => ("dev.cdevents.environment.created", "environment", "created", EventOutcome.Success),
             "EphemeralEnvironmentCreationFailed" => ("twin.octopus.ephemeral.failed", "environment", "failed", EventOutcome.Failure),
+            "DeploymentPreconditionEvaluated" => ("twin.octopus.deployment.preconditionEvaluated", "service", "evaluated", EventOutcome.None),
+            "TaskCanceled" => ("twin.octopus.task.canceled", "taskRun", "canceled", EventOutcome.Canceled),
+            "AutoDeployTriggerSucceeded" => ("twin.octopus.autoDeploy.succeeded", "service", "triggered", EventOutcome.Success),
+            "AutoDeployTriggerBlocked" => ("twin.octopus.autoDeploy.blocked", "service", "blocked", EventOutcome.Failure),
+            "RunbookSnapshotPublished" => ("twin.octopus.runbook.snapshotPublished", "taskRun", "published", EventOutcome.Success),
+            "PackageDeleted" => ("dev.cdevents.artifact.deleted", "artifact", "deleted", EventOutcome.Success),
+            "PackageDeletedByRetention" or "PackageDeletedByRepositoryReIndexing" or "ReleaseDeletedByRetention"
+                or "RunbookRunDeletedByRetention" or "RunbookSnapshotDeletedByRetention" => ("twin.octopus.retention.deleted", "octopusDocument", "deleted", EventOutcome.None),
+            "Created" => ("twin.octopus.document.created", "octopusDocument", "created", EventOutcome.None),
+            "Modified" => ("twin.octopus.document.modified", "octopusDocument", "modified", EventOutcome.None),
+            "Deleted" => ("twin.octopus.document.deleted", "octopusDocument", "deleted", EventOutcome.None),
+            "CompliancePolicyEvaluatedCompliant" => ("twin.octopus.compliance.evaluated", "service", "compliant", EventOutcome.Success),
+            "CompliancePolicyEvaluatedNonCompliantBlocked" => ("twin.octopus.compliance.evaluated", "service", "blocked", EventOutcome.Failure),
+            "CompliancePolicyEvaluatedNonCompliantWarned" => ("twin.octopus.compliance.evaluated", "service", "warned", EventOutcome.None),
+            "RateLimitExceeded" => ("twin.octopus.rateLimit.exceeded", "octopusDocument", "exceeded", EventOutcome.Failure),
             _ => ($"twin.octopus.audit.{category}", "octopusDocument", category.ToLowerInvariant(), EventOutcome.None)
         };
 

@@ -1,0 +1,14 @@
+{
+ "source": "https://learn.microsoft.com/en-us/azure/event-grid/event-schema-resource-groups (Azure resource group as an Event Grid source), fetched 2026-11-22",
+ "eventTypes": [
+  "Microsoft.Resources.ResourceActionCancel",
+  "Microsoft.Resources.ResourceActionFailure",
+  "Microsoft.Resources.ResourceActionSuccess",
+  "Microsoft.Resources.ResourceDeleteCancel",
+  "Microsoft.Resources.ResourceDeleteFailure",
+  "Microsoft.Resources.ResourceDeleteSuccess",
+  "Microsoft.Resources.ResourceWriteCancel",
+  "Microsoft.Resources.ResourceWriteFailure",
+  "Microsoft.Resources.ResourceWriteSuccess"
+ ]
+}
