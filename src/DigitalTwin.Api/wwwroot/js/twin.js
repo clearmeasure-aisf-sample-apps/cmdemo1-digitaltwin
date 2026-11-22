@@ -1002,12 +1002,20 @@
   // Before/after: the selected instant against now, per environment and for the platform.
   async function showComparison() {
     if (!state.asOf) return;
+    dom.compareTitle.textContent = `BEFORE ${fmtUtc(new Date(state.asOf).getTime())} / AFTER NOW`;
+    dom.compareBody.innerHTML = '<div class="compare-card">Comparing… folding the journal at both instants.</div>';
+    dom.comparePanel.classList.remove('hidden');
     const res = await fetch(`/api/environments/compare?from=${encodeURIComponent(state.asOf)}`, { cache: 'no-store' });
-    if (!res.ok) return;
+    if (!res.ok) {
+      dom.compareBody.innerHTML = `<div class="compare-card">Comparison unavailable (HTTP ${res.status}).</div>`;
+      return;
+    }
     const cmp = await res.json();
     const row = v => `<div class="compare-row ${v.changed ? 'changed' : ''}"><span>${esc(v.name)}</span><span>${esc(v.from ?? '—')}</span><span class="arrow">→</span><span>${esc(v.to ?? '—')}</span></div>`;
+    const known = v => v.from != null || v.to != null;
+    const shortRev = r => r && r.includes('--') ? '--' + r.split('--').pop() : r;
     const stages = (cmp.stages || []).map(st => `<div class="compare-card"><h5>${esc(st.stage.toUpperCase())}${st.changed ? ' · CHANGED' : ''}</h5>
-        ${st.versions.map(row).join('')}${st.revisions.filter(r => r.changed).map(r => row({ ...r, name: r.name + ' rev' })).join('')}</div>`).join('');
+        ${st.versions.filter(known).map(row).join('')}${st.revisions.filter(r => r.changed).map(r => row({ ...r, name: r.name + ' rev', from: shortRev(r.from), to: shortRev(r.to) })).join('')}</div>`).join('');
     const list = (items, cls) => items.map(i => `<div class="${cls}">${cls === 'add' ? '+' : '−'} ${esc(i)}</div>`).join('');
     dom.compareTitle.textContent = `BEFORE ${fmtUtc(new Date(cmp.from).getTime())} / AFTER ${fmtUtc(new Date(cmp.to).getTime())}`;
     dom.compareBody.innerHTML = stages + `
@@ -1016,7 +1024,7 @@
       <div class="compare-card"><h5>WORK BOARD</h5>${cmp.boardColumns.map(row).join('')}</div>`;
     dom.comparePanel.classList.remove('hidden');
   }
-  dom.ttCompare.addEventListener('click', () => showComparison().catch(() => {}));
+  dom.ttCompare.addEventListener('click', () => showComparison().catch(() => { dom.compareBody.innerHTML = '<div class="compare-card">Comparison unavailable.</div>'; }));
   document.getElementById('compare-close').addEventListener('click', () => dom.comparePanel.classList.add('hidden'));
   dom.ttPlay.addEventListener('click', () => {
     if (state.replayTimer) { stopReplay(); return; }
