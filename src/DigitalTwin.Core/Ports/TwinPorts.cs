@@ -1,5 +1,6 @@
 using DigitalTwin.Core.BuildAndArtifact;
 using DigitalTwin.Core.Observation;
+using DigitalTwin.Core.Projections;
 using DigitalTwin.Core.ReleaseAndDelivery;
 using DigitalTwin.Core.ReliabilityAndDrift;
 using DigitalTwin.Core.RuntimeAndPlatform;
@@ -87,6 +88,21 @@ public interface ITwinStore : ITwinReadModel
     /// <summary>Space used by the twin database (SQL Server; zeros elsewhere), for keeping well under the tier cap.</summary>
     Task<DatabaseUsage> GetDatabaseUsageAsync(CancellationToken ct);
 
+    /// <summary>UTC days (of occurrence) that hold journal rows, from <paramref name="from"/> up to, not including, <paramref name="before"/>.</summary>
+    Task<IReadOnlyList<DateOnly>> GetJournalDaysAsync(DateTimeOffset from, DateTimeOffset before, CancellationToken ct);
+
+    /// <summary>Journal rows that occurred in [<paramref name="from"/>, <paramref name="until"/>), oldest first, streamed.</summary>
+    IAsyncEnumerable<ObservedEvent> StreamJournalAsync(DateTimeOffset from, DateTimeOffset until, CancellationToken ct);
+
+    /// <summary>
+    /// After a day is archived: removes state observations (drift excepted) superseded before the end of <paramref name="day"/>,
+    /// and that day's lifecycle events <paramref name="keep"/> does not keep.
+    /// </summary>
+    Task<JournalCompaction> CompactJournalDayAsync(DateOnly day, JournalKeepRule keep, CancellationToken ct);
+
+    /// <summary>Days before <paramref name="before"/> still holding rows a compaction would remove (rows that arrived after their day was archived).</summary>
+    Task<IReadOnlyList<DateOnly>> GetCompactableJournalDaysAsync(DateTimeOffset before, JournalKeepRule keep, CancellationToken ct);
+
     /// <summary>Journal size and composition; <paramref name="detail"/> adds payload MB per kind (scans the journal).</summary>
     Task<JournalUsage> GetJournalUsageAsync(bool detail, CancellationToken ct);
 }
@@ -103,6 +119,35 @@ public interface IRebuildTarget
     Task SwapAsync(CancellationToken ct);
     Task DiscardAsync(CancellationToken ct);
 }
+
+/// <summary>Archived journal: day files, end-of-day state checkpoints and history facts (see <see cref="JournalArchiveFormat"/>).</summary>
+public interface IJournalArchive
+{
+    bool IsEnabled { get; }
+    string Location { get; }
+    Task<IReadOnlyList<DateOnly>> ListDaysAsync(CancellationToken ct);
+    Task<IReadOnlyList<DateOnly>> ListCheckpointsAsync(CancellationToken ct);
+    IAsyncEnumerable<ObservedEvent> ReadDayAsync(DateOnly day, CancellationToken ct);
+    IAsyncEnumerable<ObservedEvent> ReadCheckpointAsync(DateOnly day, CancellationToken ct);
+    Task<int> WriteDayAsync(DateOnly day, IAsyncEnumerable<ObservedEvent> events, CancellationToken ct);
+    Task<int> WriteCheckpointAsync(DateOnly day, IAsyncEnumerable<ObservedEvent> events, CancellationToken ct);
+    Task<JournalArchiveMeta?> ReadMetaAsync(CancellationToken ct);
+    Task WriteMetaAsync(JournalArchiveMeta meta, CancellationToken ct);
+}
+
+/// <summary>
+/// Lifecycle events that stay in SQL after their day is archived, because change chains, DORA and config views read them:
+/// <paramref name="Always"/> with a chain id, <paramref name="FailuresOnly"/> with a chain id when they failed, and every <paramref name="Unconditional"/>.
+/// </summary>
+public sealed record JournalKeepRule(IReadOnlyList<string> Always, IReadOnlyList<string> FailuresOnly, IReadOnlyList<string> Unconditional)
+{
+    public bool Keeps(ObservedEvent e)
+        => (e.ChainId is not null && (Always.Contains(e.EventType) || (FailuresOnly.Contains(e.EventType) && e.Outcome == EventOutcome.Failure)))
+           || Unconditional.Contains(e.EventType);
+}
+
+/// <summary>What one compaction removed from SQL.</summary>
+public sealed record JournalCompaction(int SupersededStateRows, int LifecycleRows);
 
 public sealed record DatabaseUsage(double UsedMb, double AllocatedMb, double MaxMb, IReadOnlyDictionary<string, double> LargestTablesMb);
 

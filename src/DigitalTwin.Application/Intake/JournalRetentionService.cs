@@ -1,0 +1,211 @@
+using System.Runtime.CompilerServices;
+using DigitalTwin.Application.Services;
+using DigitalTwin.Core.ChangeChains;
+using DigitalTwin.Core.Observation;
+using DigitalTwin.Core.Ports;
+using DigitalTwin.Core.Projections;
+using Microsoft.Extensions.Options;
+
+namespace DigitalTwin.Application.Intake;
+
+public sealed class JournalRetentionOptions
+{
+    public bool Enabled { get; set; } = true;
+
+    /// <summary>Days of journal kept whole in SQL (ADR-035): two weeks of every event for investigations.</summary>
+    public int Days { get; set; } = 14;
+
+    /// <summary>
+    /// Size budget for the journal table: while it is larger, the oldest complete days are archived early (never today).
+    /// At current volume this, not <see cref="Days"/>, decides how much stays in SQL, like the raw intake budget.
+    /// </summary>
+    public double MaxJournalMb { get; set; } = 250;
+}
+
+public sealed record JournalRetentionDay(DateOnly Day, int Archived, int CheckpointSubjects, int SupersededStateRemoved, int LifecycleRemoved, string Reason);
+
+public sealed record JournalRetentionReport(
+    DateTimeOffset StartedAt,
+    DateTimeOffset FinishedAt,
+    string Archive,
+    string? Skipped,
+    IReadOnlyList<JournalRetentionDay> Days,
+    double JournalMbBefore,
+    double JournalMbAfter);
+
+/// <summary>
+/// Moves whole UTC days of the event journal into the archive (one file per day of occurrence, merged with any earlier
+/// file, read back and checked), writes the day's end-of-day state checkpoint, then compacts SQL: state observations a
+/// newer one supersedes are removed (drift history stays whole), and lifecycle events leave unless change chains, DORA
+/// or config views read them. Time travel into archived days folds the checkpoint and day files (ADR-035).
+/// </summary>
+public sealed class JournalRetentionService(
+    ITwinStore store,
+    IJournalArchive archive,
+    MaintenanceLock maintenance,
+    TwinTimeTravel timeTravel,
+    IOptions<JournalRetentionOptions> options,
+    TimeProvider timeProvider)
+{
+    /// <summary>Lifecycle events SQL keeps after archiving (chain signals, config changes).</summary>
+    public static readonly JournalKeepRule Keep = new(
+        Always: ChangeChainSignals.EventTypes.Where(t => t is not "dev.cdevents.taskRun.finished" and not "dev.cdevents.build.finished").ToList(),
+        FailuresOnly: ["dev.cdevents.taskRun.finished", "dev.cdevents.build.finished"],
+        Unconditional: TwinQueryService.ConfigChangeEventTypes);
+
+    private readonly Lock _lock = new();
+    private Task<JournalRetentionReport>? _current;
+
+    public JournalRetentionReport? LastReport { get; private set; }
+
+    public string? LastError { get; private set; }
+
+    public bool Running => _current is { IsCompleted: false };
+
+    /// <summary>Starts a run (or joins the running one), detached from callers: an HTTP timeout never cancels it.</summary>
+    public Task<JournalRetentionReport> StartOrJoin(double? olderThanDays)
+    {
+        lock (_lock)
+        {
+            if (_current is { IsCompleted: false })
+            {
+                return _current;
+            }
+            _current = Task.Run(async () =>
+            {
+                try
+                {
+                    var report = await RunAsync(olderThanDays, CancellationToken.None);
+                    LastError = null;
+                    return report;
+                }
+                catch (Exception ex)
+                {
+                    LastError = $"{ex.GetType().Name}: {ex.GetBaseException().Message}";
+                    throw;
+                }
+            });
+            return _current;
+        }
+    }
+
+    public async Task<JournalRetentionReport> RunAsync(double? olderThanDays, CancellationToken ct)
+    {
+        var startedAt = timeProvider.GetUtcNow();
+        var sizeBefore = await JournalMbAsync(ct);
+        JournalRetentionReport Done(string? skipped, IReadOnlyList<JournalRetentionDay> days, double sizeAfter)
+            => LastReport = new JournalRetentionReport(startedAt, timeProvider.GetUtcNow(), archive.Location, skipped, days, sizeBefore, sizeAfter);
+
+        if (!archive.IsEnabled)
+        {
+            return Done("no archive configured: the journal is kept whole in SQL", [], sizeBefore);
+        }
+        using var held = await maintenance.TryEnterAsync("journal-retention", TimeSpan.Zero, ct);
+        if (held is null)
+        {
+            return Done($"{maintenance.Holder} is running", [], sizeBefore);
+        }
+
+        if (await archive.ReadMetaAsync(ct) is null && await store.GetStateHistoryStartAsync(ct) is { } historyStart)
+        {
+            // Compaction can remove the very first observations; time travel still starts where history did.
+            await archive.WriteMetaAsync(new JournalArchiveMeta(historyStart), ct);
+        }
+
+        var results = new List<JournalRetentionDay>();
+        try
+        {
+            var archived = (await archive.ListDaysAsync(ct)).ToHashSet();
+            var from = archived.Count > 0 ? JournalArchiveFormat.StartOf(archived.Max().AddDays(1)) : DateTimeOffset.MinValue;
+
+            // Rows that arrived after their day was archived (backfilled lifecycle events with old timestamps).
+            foreach (var day in await store.GetCompactableJournalDaysAsync(from, Keep, ct))
+            {
+                results.Add(await ArchiveDayAsync(day, archived.Contains(day), "late", ct));
+                archived.Add(day);
+            }
+
+            // Age: complete days before the window.
+            var cutoff = JournalArchiveFormat.StartOf(JournalArchiveFormat.DayOf(startedAt.AddDays(-(olderThanDays ?? options.Value.Days))));
+            foreach (var day in await store.GetJournalDaysAsync(from, cutoff, ct))
+            {
+                results.Add(await ArchiveDayAsync(day, archived.Contains(day), "age", ct));
+                archived.Add(day);
+            }
+
+            // Size budget: oldest complete day first, never today.
+            var today = JournalArchiveFormat.StartOf(JournalArchiveFormat.DayOf(startedAt));
+            var size = await JournalMbAsync(ct);
+            var next = archived.Count > 0 ? JournalArchiveFormat.StartOf(archived.Max().AddDays(1)) : DateTimeOffset.MinValue;
+            foreach (var day in await store.GetJournalDaysAsync(next, today, ct))
+            {
+                if (size <= options.Value.MaxJournalMb)
+                {
+                    break;
+                }
+                results.Add(await ArchiveDayAsync(day, archived.Contains(day), "size", ct));
+                archived.Add(day);
+                size = await JournalMbAsync(ct);
+            }
+        }
+        finally
+        {
+            timeTravel.InvalidateArchive();
+        }
+        return Done(null, results, await JournalMbAsync(ct));
+    }
+
+    private async Task<JournalRetentionDay> ArchiveDayAsync(DateOnly day, bool alreadyArchived, string reason, CancellationToken ct)
+    {
+        var start = JournalArchiveFormat.StartOf(day);
+        var end = JournalArchiveFormat.StartOf(day.AddDays(1));
+
+        var fromSql = new HashSet<long>();
+        var written = await archive.WriteDayAsync(day, MergedAsync(day, alreadyArchived, start, end, fromSql, ct), ct);
+        var check = new HashSet<long>();
+        await foreach (var ev in archive.ReadDayAsync(day, ct))
+        {
+            check.Add(ev.Id);
+        }
+        if (check.Count != written || !fromSql.IsSubsetOf(check))
+        {
+            throw new InvalidOperationException($"Journal archive verification failed for {day:yyyy-MM-dd}: wrote {written}, read back {check.Count}.");
+        }
+
+        // The fold input for "as of the end of this day": SQL still holds every subject's newest observation before it.
+        var checkpoint = await store.GetLatestStateEventsAsync(end.AddTicks(-1), ct);
+        var subjects = await archive.WriteCheckpointAsync(day, checkpoint.ToAsyncEnumerable(), ct);
+        if (subjects != checkpoint.Count)
+        {
+            throw new InvalidOperationException($"Journal checkpoint verification failed for {day:yyyy-MM-dd}: wrote {subjects} of {checkpoint.Count}.");
+        }
+
+        var compaction = await store.CompactJournalDayAsync(day, Keep, ct);
+        return new JournalRetentionDay(day, written, subjects, compaction.SupersededStateRows, compaction.LifecycleRows, reason);
+    }
+
+    private async IAsyncEnumerable<ObservedEvent> MergedAsync(DateOnly day, bool alreadyArchived, DateTimeOffset start, DateTimeOffset end,
+        HashSet<long> fromSql, [EnumeratorCancellation] CancellationToken ct)
+    {
+        var seen = new HashSet<long>();
+        if (alreadyArchived)
+        {
+            await foreach (var ev in archive.ReadDayAsync(day, ct))
+            {
+                seen.Add(ev.Id);
+                yield return ev;
+            }
+        }
+        await foreach (var ev in store.StreamJournalAsync(start, end, ct))
+        {
+            fromSql.Add(ev.Id);
+            if (seen.Add(ev.Id))
+            {
+                yield return ev;
+            }
+        }
+    }
+
+    private async Task<double> JournalMbAsync(CancellationToken ct)
+        => (await store.GetDatabaseUsageAsync(ct)).LargestTablesMb.GetValueOrDefault("dbo.ObservedEvents");
+}

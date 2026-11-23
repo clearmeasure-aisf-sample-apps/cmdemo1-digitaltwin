@@ -123,7 +123,7 @@
     const pill = document.querySelector('[data-source="storage"]');
     if (pill) {
       pill.title = `Database ${db.usedMb} of ${db.maxMb} MB · raw intake ${s.rawIntake.sizeMb} MB (${s.rawIntake.rows} rows, budget ${s.rawIntake.budgetMb} MB, ${s.rawIntake.archiveDays} archived days)` +
-        ` · journal ${s.journal.sizeMb} MB (${s.journal.rows} events, ${s.journal.stateRows} state observations)` +
+        ` · journal ${s.journal.sizeMb} MB (${s.journal.rows} events, ${s.journal.stateRows} state observations, budget ${s.journal.budgetMb} MB, ${s.journal.archiveDays} archived days${s.journal.archivedThrough ? ' through ' + s.journal.archivedThrough : ''})` +
         ` · rebuild peak ${s.rebuild.projectedPeakMb} of ${s.rebuild.budgetMb} MB budget`;
     }
   }

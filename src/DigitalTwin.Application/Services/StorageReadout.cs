@@ -15,7 +15,9 @@ public sealed record StorageDatabaseDto(double UsedMb, double MaxMb);
 
 public sealed record StorageRawDto(long Rows, long Pending, long DeadLettered, double SizeMb, double BudgetMb, int ArchiveDays, DateOnly? OldestArchivedDay);
 
-public sealed record StorageJournalDto(long Rows, long StateRows, long DriftRows, long LifecycleRows, double SizeMb, IReadOnlyList<JournalKindUsage>? Kinds);
+/// <param name="ArchivedThrough">Last archived day: before its end SQL keeps each subject's newest state observation and the lifecycle events chains read.</param>
+public sealed record StorageJournalDto(long Rows, long StateRows, long DriftRows, long LifecycleRows, double SizeMb, double BudgetMb, int ArchiveDays, DateOnly? ArchivedThrough,
+    IReadOnlyList<JournalKindUsage>? Kinds);
 
 /// <param name="ProjectedPeakMb">Live database plus a shadow copy of every rebuilt table.</param>
 public sealed record StorageRebuildDto(double ProjectedPeakMb, double BudgetMb, bool WithinBudget);
@@ -31,7 +33,9 @@ public sealed class StorageReadout(
     ITwinStore store,
     IRawIntakeStore rawStore,
     IRawIntakeArchive archive,
+    IJournalArchive journalArchive,
     IOptions<RetentionOptions> retention,
+    IOptions<JournalRetentionOptions> journalRetention,
     IOptions<StorageOptions> options,
     TimeProvider timeProvider)
 {
@@ -96,13 +100,15 @@ public sealed class StorageReadout(
         var rawMb = await Timed("rawSize", () => rawStore.GetSizeMbAsync(ct));
         var days = await Timed("archiveDays", () => archive.ListDaysAsync(ct));
         var journal = await Timed("journal", () => store.GetJournalUsageAsync(detail, ct));
+        var journalDays = await Timed("journalArchiveDays", () => journalArchive.ListDaysAsync(ct));
 
         var peak = Math.Round(database.UsedMb + journal.ModelTablesMb, 1);
         var readout = new StorageReadoutDto(
             now,
             new StorageDatabaseDto(database.UsedMb, database.MaxMb),
             new StorageRawDto(raw.Total, raw.Pending, raw.DeadLettered, Math.Round(rawMb, 1), retention.Value.MaxRawMb, days.Count, days.Count > 0 ? days[0] : null),
-            new StorageJournalDto(journal.Rows, journal.StateRows, journal.DriftRows, journal.LifecycleRows, journal.TableMb, journal.Kinds),
+            new StorageJournalDto(journal.Rows, journal.StateRows, journal.DriftRows, journal.LifecycleRows, journal.TableMb, journalRetention.Value.MaxJournalMb,
+                journalDays.Count, journalDays.Count > 0 ? journalDays[^1] : null, journal.Kinds),
             new StorageRebuildDto(peak, options.Value.RebuildPeakBudgetMb, peak <= options.Value.RebuildPeakBudgetMb),
             archive.IsEnabled,
             timings);

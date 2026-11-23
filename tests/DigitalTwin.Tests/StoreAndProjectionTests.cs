@@ -1,3 +1,4 @@
+using DigitalTwin.Core.Projections;
 using DigitalTwin.Core.Ports;
 using DigitalTwin.Application.Services;
 using DigitalTwin.Core.BuildAndArtifact;
@@ -243,7 +244,7 @@ public sealed class StoreAndProjectionTests : IAsyncLifetime, IAsyncDisposable
             }
         ], CancellationToken.None);
 
-        var queries = new TwinQueryService(_store, new TwinTimeTravel(_store, TimeProvider.System), new StubRateProvider(), new StubIntakeMonitor());
+        var queries = new TwinQueryService(_store, new TwinTimeTravel(_store, new DisabledJournalArchive(), TimeProvider.System), new StubRateProvider(), new StubIntakeMonitor());
         var explanation = await queries.ExplainItemAsync("1941", null, CancellationToken.None);
 
         Assert.True(explanation.Found);
