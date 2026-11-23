@@ -86,6 +86,12 @@ public sealed class IntakeRebuildService(
                     _lastError = null;
                     return report;
                 }
+                catch (Exception ex) when (token.IsCancellationRequested && ex is not OperationCanceledException)
+                {
+                    // A SQL command aborted by the cancel surfaces as SqlException ("Operation cancelled by user").
+                    _lastError = "OperationCanceledException: Rebuild cancelled.";
+                    throw new OperationCanceledException("Rebuild cancelled.", ex, token);
+                }
                 catch (Exception ex)
                 {
                     _lastError = $"{ex.GetType().Name}: {ex.GetBaseException().Message}";
