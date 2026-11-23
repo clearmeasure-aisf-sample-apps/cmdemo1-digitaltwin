@@ -988,6 +988,8 @@ public sealed partial class GitHubSyncService(
                       closedAt
                       updatedAt
                       repository { name }
+                      author { login }
+                      assignees(first: 1) { nodes { login } }
                     }
                   }
                 }
@@ -1051,6 +1053,10 @@ public sealed partial class GitHubSyncService(
                     }
                     else
                     {
+                        var author = issue.TryGetProperty("author", out var au) && au.ValueKind == JsonValueKind.Object && au.TryGetProperty("login", out var aul) ? aul.GetString() : null;
+                        var assignee = issue.TryGetProperty("assignees", out var asg) && asg.TryGetProperty("nodes", out var asn) && asn.ValueKind == JsonValueKind.Array && asn.GetArrayLength() > 0
+                            && asn[0].TryGetProperty("login", out var asl) ? asl.GetString() : null;
+                        var (workerKind, agent) = Worker(author, assignee);
                         itemsById[id] = new WorkItemSnapshot
                         {
                             Id = id,
@@ -1061,7 +1067,9 @@ public sealed partial class GitHubSyncService(
                             State = issueState,
                             Column = statusCol ?? (issueState == "closed" ? "Done" : "Todo"),
                             ColumnSource = string.IsNullOrWhiteSpace(statusCol) ? "derived" : "project",
-                            WorkerKind = "team",
+                            WorkerKind = workerKind,
+                            Agent = agent,
+                            Assignee = assignee,
                             CreatedAt = createdAt,
                             ClosedAt = closedAt,
                             UpdatedAt = updatedAt
@@ -1150,7 +1158,7 @@ public sealed partial class GitHubSyncService(
         var state = issue.TryGetProperty("state", out var st) ? st.GetString() ?? "open" : "open";
         var author = issue.TryGetProperty("user", out var u) && u.TryGetProperty("login", out var l) ? l.GetString() : null;
         var assignee = issue.TryGetProperty("assignee", out var a) && a.ValueKind == JsonValueKind.Object && a.TryGetProperty("login", out var al) ? al.GetString() : null;
-        var isBot = (author ?? "").Contains("bot", StringComparison.OrdinalIgnoreCase) || (assignee ?? "").Contains("bot", StringComparison.OrdinalIgnoreCase);
+        var (workerKind, agent) = Worker(author, assignee);
         var createdAt = Date(issue, "created_at") ?? now;
         return new WorkItemSnapshot
         {
@@ -1162,13 +1170,25 @@ public sealed partial class GitHubSyncService(
             State = state,
             Column = state == "closed" ? "Done" : assignee is null ? "Todo" : "In Progress",
             ColumnSource = "derived",
-            WorkerKind = isBot ? "bot" : "team",
-            Agent = isBot ? author : null,
+            WorkerKind = workerKind,
+            Agent = agent,
             Assignee = assignee,
             CreatedAt = createdAt,
             ClosedAt = Date(issue, "closed_at"),
             UpdatedAt = Date(issue, "updated_at") ?? createdAt
         };
+    }
+
+    /// <summary>
+    /// Who works an issue, derived the same way by the board and the issue sweep: they observe the same item on alternate
+    /// runs, so different answers made every such item flap between two observations (about 1,400 an hour).
+    /// </summary>
+    internal static (string WorkerKind, string? Agent) Worker(string? author, string? assignee)
+    {
+        var bot = (author ?? "").Contains("bot", StringComparison.OrdinalIgnoreCase) ? author
+            : (assignee ?? "").Contains("bot", StringComparison.OrdinalIgnoreCase) ? assignee
+            : null;
+        return bot is null ? ("team", null) : ("bot", bot);
     }
 
     /// <summary>Lead and cycle times, computed the same way whichever path observed the item.</summary>
