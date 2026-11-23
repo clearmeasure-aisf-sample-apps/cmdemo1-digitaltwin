@@ -1,5 +1,6 @@
 # Octopus bootstrap: map project variables to the environment deploy/scripts expects, then run the packaged script.
 set -euo pipefail
+command -v jq >/dev/null || { curl -fsSL -o /tmp/jq https://github.com/jqlang/jq/releases/download/jq-1.7.1/jq-linux-amd64 && chmod +x /tmp/jq && export PATH="/tmp:$PATH"; }
 PKG=$(get_octopusvariable "Octopus.Action.Package[twin].ExtractedPath")
 export ARM_CLIENT_ID=$(get_octopusvariable "Azure.ClientId")
 export ARM_CLIENT_SECRET=$(get_octopusvariable "Azure.ClientSecret")

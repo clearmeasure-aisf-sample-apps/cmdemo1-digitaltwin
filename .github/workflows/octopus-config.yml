@@ -1,0 +1,91 @@
+name: Twin Octopus project (Terraform)
+
+# The twin's own Octopus project, lifecycle, variables and process (deploy/octopus/terraform).
+# Plans on pull requests, applies on main. It creates nothing else in the space: environments, the project group,
+# the worker pool and the feeds are looked up only.
+on:
+  pull_request:
+    branches: [main]
+    paths:
+      - deploy/octopus/terraform/**
+      - .github/workflows/octopus-config.yml
+  push:
+    branches: [main]
+    paths:
+      - deploy/octopus/terraform/**
+      - .github/workflows/octopus-config.yml
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: octopus-config
+  cancel-in-progress: false
+
+jobs:
+  terraform:
+    runs-on: ubuntu-24.04
+    defaults:
+      run:
+        working-directory: deploy/octopus/terraform
+    env:
+      TWIN_RESOURCE_GROUP: ${{ vars.TWIN_RESOURCE_GROUP || 'rg-cmdemo1-nonprod' }}
+      TF_VAR_octopus_url: ${{ secrets.OCTOPUS_URL }}
+      TF_VAR_octopus_api_key: ${{ secrets.OCTOPUS_API_KEY }}
+      TF_VAR_twin_octopus_api_key: ${{ secrets.OCTOPUS_API_KEY }}
+      TF_VAR_azure_client_id: ${{ secrets.AZURE_CLIENT_ID }}
+      TF_VAR_azure_client_secret: ${{ secrets.AZURE_CLIENT_SECRET }}
+      TF_VAR_azure_tenant_id: ${{ secrets.AZURE_TENANT_ID }}
+      TF_VAR_azure_subscription_id: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
+      TF_VAR_github_pat: ${{ secrets.GH_PAT }}
+      TF_VAR_webhook_secret: ${{ secrets.WEBHOOK_SECRET }}
+      TF_VAR_twin_api_key: ${{ secrets.TWIN_API_KEY }}
+    steps:
+      - uses: actions/checkout@v6.0.1
+
+      - name: Azure login
+        env:
+          ARM_CLIENT_ID: ${{ secrets.AZURE_CLIENT_ID }}
+          ARM_CLIENT_SECRET: ${{ secrets.AZURE_CLIENT_SECRET }}
+          ARM_TENANT_ID: ${{ secrets.AZURE_TENANT_ID }}
+          ARM_SUBSCRIPTION_ID: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
+        run: bash ../../scripts/azure-login.sh
+
+      - name: State container in the twin's storage account
+        id: state
+        run: |
+          set -euo pipefail
+          ACCOUNT=$(az storage account list -g "$TWIN_RESOURCE_GROUP" --query "[?tags.purpose=='digital-twin'].name | [0]" -o tsv)
+          KEY=$(az storage account keys list -g "$TWIN_RESOURCE_GROUP" -n "$ACCOUNT" --query "[0].value" -o tsv)
+          echo "::add-mask::$KEY"
+          az storage container create --name tfstate --account-name "$ACCOUNT" --account-key "$KEY" --public-access off --output none
+          echo "ARM_ACCESS_KEY=$KEY" >> "$GITHUB_ENV"
+          echo "account=$ACCOUNT" >> "$GITHUB_OUTPUT"
+
+      - uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_wrapper: false
+
+      - name: Init
+        run: |
+          terraform init -input=false \
+            -backend-config="resource_group_name=${TWIN_RESOURCE_GROUP}" \
+            -backend-config="storage_account_name=${{ steps.state.outputs.account }}" \
+            -backend-config="container_name=tfstate" \
+            -backend-config="key=octopus-twin-project.tfstate"
+
+      - name: Plan
+        run: |
+          set -euo pipefail
+          terraform plan -input=false -no-color -out=tfplan > plan.txt
+          grep -E '^  # |^Plan:|^No changes' plan.txt || true
+
+      - name: Apply
+        if: github.event_name != 'pull_request'
+        run: |
+          set -euo pipefail
+          terraform apply -input=false -no-color tfplan > apply.txt
+          grep -E 'Creation complete|Modifications complete|Destruction complete|^Apply complete' apply.txt || true
+          terraform output -no-color project_id
+          terraform output -no-color project_url

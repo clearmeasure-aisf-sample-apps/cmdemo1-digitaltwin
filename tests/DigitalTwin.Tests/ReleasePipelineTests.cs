@@ -1,6 +1,15 @@
+using System.Net.Http.Json;
+using System.Text.Json;
 using System.Text.RegularExpressions;
 using DigitalTwin.Core.Hierarchy;
+using DigitalTwin.Core.Observation;
+using DigitalTwin.Core.Projections;
+using DigitalTwin.Tests.Infrastructure;
+using Microsoft.Extensions.DependencyInjection;
+using Wolverine;
+using Wolverine.Tracking;
 using Xunit;
+using F = DigitalTwin.Tests.Infrastructure.TwinStateFixtures;
 
 namespace DigitalTwin.Tests;
 
@@ -25,7 +34,7 @@ public sealed partial class ReleasePipelineTests
 
         var defined = QuotedKey().Matches(main).Select(m => m.Groups[1].Value).ToHashSet(StringComparer.Ordinal);
         var stepFiles = StepFile().Matches(process).Select(m => m.Groups[1].Value).ToList();
-        Assert.Equal(["deploy.sh", "register-hooks.sh", "verify.sh"], stepFiles.Order(StringComparer.Ordinal));
+        Assert.Equal(["deploy.sh", "preflight.sh", "register-hooks.sh", "verify.sh"], stepFiles.Order(StringComparer.Ordinal));
 
         foreach (var step in stepFiles)
         {
@@ -44,7 +53,7 @@ public sealed partial class ReleasePipelineTests
         }
 
         Assert.Contains("Octopus.Action[Deploy twin].Output.TwinUrl", File.ReadAllText(Path.Combine(terraform, "steps", "verify.sh")), StringComparison.Ordinal);
-        Assert.Contains("name  = \"Deploy twin\"", process, StringComparison.Ordinal);
+        Assert.Matches("name\\s+= \"Deploy twin\"", process);
     }
 
     [Fact]
@@ -80,4 +89,29 @@ public sealed partial class ReleasePipelineTests
 
     [GeneratedRegex("\\$PKG/([A-Za-z/.-]+\\.sh)")]
     private static partial Regex PackagedScript();
+}
+
+[Collection(SqlServerTests.Name)]
+public sealed class TwinOwnDeploymentTests(SqlServerFixture sql)
+{
+    [Fact]
+    public async Task TheTwinsOwnOctopusDeploymentsAreNotCountedAsPlatformDeployments()
+    {
+        var clock = new ManualClock(F.T0.AddHours(3));
+        await using var app = new TwinAppFactory(await sql.CreateDatabaseAsync(), configureServices: s => s.AddSingleton<TimeProvider>(clock));
+        using var client = app.CreateAuthedClient();
+        var state = app.Services.GetRequiredService<StateObservationPublisher>();
+        var twinDelivery = F.Delivery("prod", "succeeded", 70, 72);
+        twinDelivery.DeploymentId = "Deployments-twin";
+        twinDelivery.PipelineId = "twin-observer";
+        twinDelivery.DeployableName = null;
+        twinDelivery.ProjectSlug = "cmdemo1-digitaltwin";
+        await app.Services.TrackActivity().Timeout(TimeSpan.FromSeconds(60)).ExecuteAndWaitAsync((Func<IMessageContext, Task>)(_ =>
+            state.PublishAsync(StateKinds.Delivery, [F.Delivery("prod", "succeeded", 90, 95), twinDelivery], EventSourceKind.Octopus, default)));
+
+        var metrics = await client.GetFromJsonAsync<JsonElement>("/api/metrics?windowDays=7&stage=prod");
+        Assert.Equal(1, metrics.GetProperty("totalDeployments").GetInt32());
+        var deployments = await client.GetFromJsonAsync<List<JsonElement>>("/api/deployments?stage=prod");
+        Assert.Equal(2, deployments!.Count);
+    }
 }

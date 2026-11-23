@@ -1,6 +1,8 @@
 #!/usr/bin/env bash
 # Deploys one twin release candidate: waits out a running rebuild, deploys infra/main.bicep with the image,
 # then waits until the new revision is ready and serving VERSION.
+# TWIN_WHAT_IF=true is the gate used before the rollout: the image must be in the registry and a Bicep what-if of the
+# release must delete nothing; nothing is deployed.
 # Used by GitHub Actions (ci-deploy.yml) and by the Octopus process in deploy/octopus/terraform.
 # Expects an Azure CLI session (deploy/scripts/azure-login.sh). Secrets come from the environment only and are never echoed.
 set -euo pipefail
@@ -26,6 +28,13 @@ if [ -z "${TEMPLATE_FILE:-}" ]; then
 fi
 mask() { if [ -n "${GITHUB_ACTIONS:-}" ]; then echo "::add-mask::$1"; fi; }
 
+WHAT_IF="${TWIN_WHAT_IF:-false}"
+if [ "$WHAT_IF" = "true" ]; then
+  echo "== Gate: ${IMAGE} is in ${ACR_NAME}"
+  az acr repository show --name "$ACR_NAME" --image "${IMAGE#*/}" --query "{tag: name, createdTime: createdTime}" -o tsv
+fi
+
+if [ "$WHAT_IF" != "true" ]; then
 echo "== Deferring while a twin rebuild is running"
 # Restarting mid-rebuild would discard its shadow tables (live state is safe, but the work is lost).
 FQDN=$(az containerapp show -n "$APP" -g "$RG" --query properties.configuration.ingress.fqdn -o tsv 2>/dev/null || true)
@@ -40,9 +49,10 @@ if [ -n "$FQDN" ]; then
 else
   echo "Twin not deployed yet."
 fi
+fi
 
 echo "== Deploying ${TEMPLATE_FILE##*/} to ${RG} with ${IMAGE}"
-az acr update --name "$ACR_NAME" --resource-group "$ACR_RG" --admin-enabled true --output none
+if [ "$WHAT_IF" != "true" ]; then az acr update --name "$ACR_NAME" --resource-group "$ACR_RG" --admin-enabled true --output none; fi
 ACR_USER=$(az acr credential show --name "$ACR_NAME" --resource-group "$ACR_RG" --query username -o tsv)
 ACR_PASS=$(az acr credential show --name "$ACR_NAME" --resource-group "$ACR_RG" --query 'passwords[0].value' -o tsv)
 mask "$ACR_PASS"
@@ -86,6 +96,19 @@ jq -n \
       "platformJson": { "value": $platformJson }
     }
   }' > "$PARAMS_FILE"
+
+if [ "$WHAT_IF" = "true" ]; then
+  echo "== Gate: Bicep what-if for ${VERSION}"
+  CHANGES=$(az deployment group what-if --resource-group "$RG" --name "$DEPLOYMENT_NAME" --template-file "$TEMPLATE_FILE" \
+    --parameters "@${PARAMS_FILE}" --no-pretty-print --query "changes[].[changeType, resourceId]" -o tsv)
+  echo "$CHANGES" | cut -f1 | sort | uniq -c
+  echo "$CHANGES" | awk -F'\t' '$1 != "Ignore" && $1 != "NoChange" { print "  " $1 ": " $2 }' | sed -E 's#/subscriptions/[^/]+#/subscriptions/<sub>#'
+  if echo "$CHANGES" | grep -q '^Delete'; then echo "What-if would delete resources; refusing to promote ${VERSION}" >&2; exit 1; fi
+  FQDN=$(az containerapp show -n "$APP" -g "$RG" --query properties.configuration.ingress.fqdn -o tsv)
+  if [ -n "${TWIN_OUTPUT_FILE:-}" ]; then echo "https://${FQDN}" > "$TWIN_OUTPUT_FILE"; fi
+  echo "Gate passed for ${VERSION}"
+  exit 0
+fi
 
 TWIN_URL=$(az deployment group create \
   --resource-group "$RG" \

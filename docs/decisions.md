@@ -317,3 +317,10 @@ Following the domain research in the prompt's prior-art references:
 - **Stages**: a change chain keeps three delivery slots (first, optional middle, production), mapped from the platform's two or three active stages in order. The API keeps the slot names `Tdd`, `Uat` and `Prod` as stable identifiers; the dashboard shows the platform's own stage names. Production is the last stage, which is where DORA metrics are measured.
 - **Infrastructure**: Bicep names every twin resource from `systemSlug`. The default `cmdemo1` gives exactly today's names and unique suffix, so the live twin is unchanged. The workflow, deploy scripts, hook registration and Octopus Terraform take the same settings from repository variables or Octopus project variables.
 
+## ADR-033: The Twin Deploys Through Octopus (tdd, uat, prod)
+
+- **Decision**: with the owner's approval, the Terraform in `deploy/octopus/terraform` is applied by CI to Spaces-355, using the existing `ai-ops` key. It creates only the twin's own project, lifecycle, variables and process. The existing tdd, uat and prod environments, the project group, the feeds and the worker pool are looked up, not changed.
+- **One instance, three environments**: the twin is a single platform-level deployment. tdd and uat are gates (the image exists, a Bicep what-if deletes nothing, the live twin is healthy); prod rolls the release out and verifies it serves the release number. The lifecycle promotes automatically after each success, so a release reaches prod with no manual step, and any failed gate stops it.
+- **Not platform changes**: the twin's deployments go through cmdemo1's environment names, so the summary, DORA and stage cards exclude observer-pipeline deliveries. The twin's own pipeline row still shows them.
+- **State**: Terraform state is in a private container of the twin's storage account, because it holds the sensitive project variables.
+

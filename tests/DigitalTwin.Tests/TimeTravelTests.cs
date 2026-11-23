@@ -203,11 +203,4 @@ public sealed class TimeTravelTests(SqlServerFixture sql)
             ["webhooks"] = J(await model.GetWebhookStatusesAsync(default))
         };
     }
-
-    private sealed class ManualClock(DateTimeOffset start) : TimeProvider
-    {
-        public DateTimeOffset Now { get; set; } = start;
-
-        public override DateTimeOffset GetUtcNow() => Now;
-    }
 }

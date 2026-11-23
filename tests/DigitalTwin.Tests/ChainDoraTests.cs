@@ -111,11 +111,4 @@ public sealed class ChainDoraApiTests(SqlServerFixture sql)
         var earlier = await client.GetFromJsonAsync<JsonElement>($"/api/dora?windowDays=7&asOf={before}");
         Assert.Equal(0, earlier.GetProperty("deployments").GetInt32());
     }
-
-    private sealed class ManualClock(DateTimeOffset start) : TimeProvider
-    {
-        public DateTimeOffset Now { get; set; } = start;
-
-        public override DateTimeOffset GetUtcNow() => Now;
-    }
 }

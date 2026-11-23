@@ -22,28 +22,40 @@ variable "project_name" {
   default     = "cmdemo1-digitaltwin"
 }
 
-variable "project_group_id" {
-  description = "Existing project group for the twin; leave empty to create one named project_group_name."
-  type        = string
-  default     = ""
-}
-
 variable "project_group_name" {
-  description = "Project group created when project_group_id is empty."
+  description = "Existing project group for the twin's project (looked up, not created)."
   type        = string
-  default     = "Platform"
+  default     = "Default Project Group"
 }
 
-variable "environment_name" {
-  description = "Octopus environment the twin deploys to. The twin is one platform-level instance, above the system's tdd/uat/prod."
+variable "environment_names" {
+  description = "Existing environments the twin's lifecycle promotes through, in order (looked up, never changed)."
+  type        = list(string)
+  default     = ["tdd", "uat", "prod"]
+}
+
+variable "rollout_environment" {
+  description = "The environment whose deployment rolls the release out to the twin's single instance; the earlier ones are gates (image, Bicep what-if, live health)."
   type        = string
-  default     = "Platform Twin"
+  default     = "prod"
 }
 
 variable "auto_deploy" {
-  description = "Deploy each new release to the twin environment automatically. Off by default: releases wait for someone to deploy them."
+  description = "Promote each release through every phase automatically once the previous one succeeds."
   type        = bool
-  default     = false
+  default     = true
+}
+
+variable "worker_container_feed_name" {
+  description = "Docker feed used to pull worker_container_image (looked up by name); empty runs the steps directly on the worker."
+  type        = string
+  default     = "docker-hub"
+}
+
+variable "worker_container_image" {
+  description = "Execution container with the Azure CLI, jq, curl and python3 (the same image cmdemo1's projects use)."
+  type        = string
+  default     = "octopusdeploy/worker-tools:6.6.5-ubuntu.24.04"
 }
 
 variable "package_id" {
@@ -62,18 +74,6 @@ variable "worker_pool_name" {
   description = "Linux worker pool looked up when worker_pool_id is empty (the steps are Bash). Falls back to the space's default pool if none matches."
   type        = string
   default     = "Hosted Ubuntu"
-}
-
-variable "worker_container_feed_id" {
-  description = "Docker feed used to pull worker_container_image; empty runs the steps directly on the worker (it then needs az, jq, curl, python3, unzip)."
-  type        = string
-  default     = ""
-}
-
-variable "worker_container_image" {
-  description = "Execution container with the Azure CLI, jq, curl and python3."
-  type        = string
-  default     = "octopusdeploy/worker-tools:6-ubuntu.22.04"
 }
 
 variable "system_slug" {
