@@ -9,7 +9,9 @@ namespace DigitalTwin.Persistence;
 /// <summary>Journal archiving support: day discovery, streaming a day out, and compacting what the archive now holds.</summary>
 public sealed partial class EfTwinStore
 {
-    private const int CompactionBatch = 2000;
+    // Small batches with low deadlock priority and a breather in between: live intake keeps writing the journal meanwhile.
+    private const int CompactionBatch = 500;
+    private static readonly TimeSpan CompactionPause = TimeSpan.FromMilliseconds(250);
 
     public async Task<IReadOnlyList<DateOnly>> GetJournalDaysAsync(DateTimeOffset from, DateTimeOffset before, CancellationToken ct)
     {
@@ -59,10 +61,10 @@ public sealed partial class EfTwinStore
         }
     }
 
-    public async Task<JournalCompaction> CompactJournalDayAsync(DateOnly day, JournalKeepRule keep, CancellationToken ct)
+    public async Task<JournalCompaction> CompactJournalAsync(DateTimeOffset from, DateTimeOffset until, JournalKeepRule keep, CancellationToken ct)
     {
-        var start = JournalArchiveFormat.StartOf(day);
-        var end = JournalArchiveFormat.StartOf(day.AddDays(1));
+        var start = from;
+        var end = until;
         await using var db = await factory.CreateDbContextAsync(ct);
         db.Database.SetCommandTimeout(TimeSpan.FromMinutes(5));
         if (db.Database.IsSqlite())
@@ -71,6 +73,8 @@ public sealed partial class EfTwinStore
         }
 
         var table = JournalTable(db);
+        await db.Database.OpenConnectionAsync(ct);
+        await db.Database.ExecuteSqlRawAsync("SET DEADLOCK_PRIORITY LOW", ct);
         // Superseded: a newer observation of the same subject before the end of the day exists, so no fold at or after
         // the end of the day can pick this row (ties at the newest instant are all kept; the fold breaks them by key).
         var stateSql =
@@ -83,6 +87,7 @@ public sealed partial class EfTwinStore
         {
             deleted = await db.Database.ExecuteSqlRawAsync(stateSql, [StateKinds.EventType, StateKinds.Drift.Name, end], ct);
             superseded += deleted;
+            await Task.Delay(CompactionPause, ct);
         }
         while (deleted > 0);
 
@@ -105,6 +110,7 @@ public sealed partial class EfTwinStore
         {
             deleted = await db.Database.ExecuteSqlRawAsync(lifecycleSql, parameters, ct);
             lifecycle += deleted;
+            await Task.Delay(CompactionPause, ct);
         }
         while (deleted > 0);
         return new JournalCompaction(superseded, lifecycle);

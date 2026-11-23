@@ -79,7 +79,9 @@ public static class JournalArchiveFormat
 
 /// <summary>Facts about the archived journal that SQL no longer holds once old rows are compacted.</summary>
 /// <param name="HistoryStart">The first state observation ever (time travel starts here).</param>
-public sealed record JournalArchiveMeta(DateTimeOffset? HistoryStart);
+/// <param name="ArchivedThrough">Everything that occurred before this instant is archived and compacted; folds before it read the archive.
+/// The day it falls in is archived up to it and merged again by the next run.</param>
+public sealed record JournalArchiveMeta(DateTimeOffset? HistoryStart, DateTimeOffset? ArchivedThrough = null);
 
 /// <summary>No archive configured: the journal is kept whole in SQL.</summary>
 public sealed class DisabledJournalArchive : IJournalArchive
