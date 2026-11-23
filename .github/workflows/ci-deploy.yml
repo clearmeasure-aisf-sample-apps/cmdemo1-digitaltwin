@@ -364,7 +364,8 @@ jobs:
           az tag update --resource-id "$WS_ID" --operation Merge --tags "twinIntakeProbe=${PROBE}" --output none
           echo "Tagged ${WS} (twinIntakeProbe=${PROBE}) at ${SINCE}"
           FOUND=""
-          for i in $(seq 1 36); do
+          # Processing is in capture order, so the event can sit behind a backlog of platform events for a while.
+          for i in $(seq 1 120); do
             FOUND=$(curl -fsS -H "X-Twin-Key: ${TWIN_API_KEY}" "${TWIN_URL}/api/events?source=Azure&since=${SINCE}&limit=200" \
               | jq -c --arg ws "$WS" '[.[] | select(.channel == "Webhook" and (.payloadJson | contains($ws)))] | first // empty')
             if [ -n "$FOUND" ]; then break; fi
@@ -372,7 +373,7 @@ jobs:
           done
           az tag update --resource-id "$WS_ID" --operation Delete --tags "twinIntakeProbe=${PROBE}" --output none
           if [ -z "$FOUND" ]; then
-            echo "::error::Azure change on ${WS} did not reach the event journal within 3 minutes"
+            echo "::error::Azure change on ${WS} did not reach the event journal within 10 minutes"
             exit 1
           fi
           echo "$FOUND" | jq '{idempotencyKey, eventType, predicate, channel, subjectId, occurredAt, capturedAt: .ingestedAt}'
