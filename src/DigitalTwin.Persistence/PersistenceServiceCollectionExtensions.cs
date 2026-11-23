@@ -73,6 +73,7 @@ public static partial class PersistenceServiceCollectionExtensions
                     await db.Database.ExecuteSqlRawAsync(StateAsOfIndexDdl, ct);
                     await db.Database.ExecuteSqlRawAsync(ChainIndexDdl, ct);
                     await db.Database.ExecuteSqlRawAsync(TwinDbContext.RecentJournalIndexDdl("dbo"), ct);
+                    await db.Database.ExecuteSqlRawAsync(TypeTimeIndexDdl, ct);
                     // A rebuild interrupted by a restart left its shadow behind; live tables were never touched.
                     await services.GetRequiredService<IRebuildTarget>().DiscardAsync(ct);
                 }
@@ -101,6 +102,11 @@ public static partial class PersistenceServiceCollectionExtensions
     private const string StateAsOfIndexDdl = $"""
         IF NOT EXISTS (SELECT 1 FROM sys.indexes WHERE name = '{TwinDbContext.StateAsOfIndexName}' AND object_id = OBJECT_ID('dbo.ObservedEvents'))
         CREATE INDEX [{TwinDbContext.StateAsOfIndexName}] ON dbo.ObservedEvents ([EventType], [SubjectType], [SubjectId], [OccurredAt]);
+        """;
+
+    private const string TypeTimeIndexDdl = $"""
+        IF NOT EXISTS (SELECT 1 FROM sys.indexes WHERE name = '{TwinDbContext.TypeTimeIndexName}' AND object_id = OBJECT_ID('dbo.ObservedEvents'))
+        CREATE INDEX [{TwinDbContext.TypeTimeIndexName}] ON dbo.ObservedEvents ([EventType], [OccurredAt]);
         """;
 
     private const string ChainIndexDdl = $"""
