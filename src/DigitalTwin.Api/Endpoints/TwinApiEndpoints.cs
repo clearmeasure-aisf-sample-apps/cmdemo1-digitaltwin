@@ -43,6 +43,9 @@ public static class TwinApiEndpoints
         app.MapGet("/api/environments/compare", async (DateTimeOffset from, DateTimeOffset? to, TwinQueryService queries, CancellationToken ct)
             => Results.Ok(await queries.CompareAsync(from, to, ct)));
 
+        // Public like the dashboard: sizes and budgets only.
+        app.MapGet("/api/storage", async (StorageReadout readout, CancellationToken ct) => Results.Ok(await readout.GetAsync(detail: false, ct)));
+
         app.MapGet("/api/alerts/status", (AlertService alerts) =>
         {
             var snapshot = alerts.Snapshot();
@@ -168,13 +171,16 @@ public static class TwinApiEndpoints
             return wait == false ? Results.Accepted("/api/admin/storage", new { running = retention.Running }) : Results.Ok(await running);
         });
 
-        protectedApi.MapGet("/admin/storage", async (RawIntakeRetentionService retention, IRawIntakeArchive archive, IRawIntakeStore rawStore, ITwinStore store, CancellationToken ct) =>
+        protectedApi.MapGet("/admin/storage", async (bool? detail, RawIntakeRetentionService retention, IRawIntakeArchive archive, IRawIntakeStore rawStore, ITwinStore store, StorageReadout readout, CancellationToken ct) =>
         {
             var days = await archive.ListDaysAsync(ct);
+            var storage = await readout.GetAsync(detail == true, ct);
             return Results.Ok(new
             {
                 database = await store.GetDatabaseUsageAsync(ct),
                 rawIntake = await rawStore.GetStatsAsync(ct),
+                journal = storage.Journal,
+                rebuild = storage.Rebuild,
                 archive = new { enabled = archive.IsEnabled, location = archive.Location, days = days.Count, oldestDay = days.Count > 0 ? days[0] : (DateOnly?)null, newestDay = days.Count > 0 ? days[^1] : (DateOnly?)null },
                 retention = new { running = retention.Running, lastReport = retention.LastReport, lastError = retention.LastError }
             });
@@ -283,7 +289,8 @@ public static class TwinApiEndpoints
             - POST {{baseUrl}}/api/admin/deadletters/replay — Replay dead letters (all, or ids in the JSON body) [X-Twin-Key]
             - POST {{baseUrl}}/api/admin/rebuild[?force=true&wait=false] — Rebuild the journal and ALL read models from the raw history into shadow tables without pausing intake; swaps them in atomically only when the read models match live (or force); reports fingerprints [X-Twin-Key]
             - POST {{baseUrl}}/api/admin/retention/run[?olderThanDays=&wait=false] — Archive whole days of processed raw events to Blob Storage, then prune them from SQL [X-Twin-Key]
-            - GET {{baseUrl}}/api/admin/storage — Database usage, raw intake counts, archive days, last retention run [X-Twin-Key]
+            - GET {{baseUrl}}/api/storage — Database MB against its cap, raw intake and journal sizes, archive days, and the projected rebuild peak against its budget (public)
+            - GET {{baseUrl}}/api/admin/storage[?detail=true] — Database usage, raw intake counts, journal composition (detail: payload MB per kind), archive days, last retention run [X-Twin-Key]
             - POST {{baseUrl}}/api/admin/rebuild/cancel — Stop a running rebuild; its shadow tables are discarded and live state is untouched [X-Twin-Key]
             - GET {{baseUrl}}/api/admin/rebuild/preflight — What a rebuild would produce versus the live read models, per kind [X-Twin-Key]
             - POST {{baseUrl}}/api/admin/backfill — Re-poll GitHub, Octopus, Azure and probes now [X-Twin-Key]

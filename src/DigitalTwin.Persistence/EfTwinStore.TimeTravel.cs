@@ -101,6 +101,58 @@ public sealed partial class EfTwinStore
             tables.ToDictionary(t => t.Name, t => Math.Round(t.UsedMb, 1), StringComparer.Ordinal));
     }
 
+    public async Task<JournalUsage> GetJournalUsageAsync(bool detail, CancellationToken ct)
+    {
+        await using var db = await factory.CreateDbContextAsync(ct);
+        if (!db.Database.IsSqlServer())
+        {
+            var all = await db.ObservedEvents.AsNoTracking().Select(e => new { e.EventType, e.SubjectType, e.Source, Bytes = e.PayloadJson.Length * 2 }).ToListAsync(ct);
+            var stateRows = all.Count(e => e.EventType == StateKinds.EventType);
+            var driftRows = all.Count(e => e.EventType == StateKinds.EventType && e.SubjectType == StateKinds.Drift.Name);
+            return new JournalUsage(all.Count, stateRows, driftRows, all.Count - stateRows, 0, 0, detail
+                ? all.GroupBy(e => e.EventType == StateKinds.EventType ? $"state:{e.SubjectType}" : $"lifecycle:{e.Source}")
+                    .Select(g => new JournalKindUsage(g.Key, g.Count(), Math.Round(g.Sum(e => e.Bytes) / 1048576.0, 1)))
+                    .OrderByDescending(k => k.PayloadMb).ToList()
+                : null);
+        }
+
+        db.Database.SetCommandTimeout(TimeSpan.FromMinutes(5));
+        var table = JournalTable(db);
+        var schema = db.Model.FindEntityType(typeof(ObservedEvent))!.GetSchema() ?? "dbo";
+        // Counts come from the (EventType, OccurredAt) and state-as-of indexes, sizes from allocation metadata: cheap enough for a readout.
+        var countsSql =
+            "SELECT (SELECT CAST(SUM(p.rows) AS bigint) FROM sys.partitions p WHERE p.object_id = OBJECT_ID({0}) AND p.index_id IN (0, 1)) AS Rows, " +
+            "(SELECT COUNT_BIG(*) FROM " + table + " WHERE EventType = {1}) AS StateRows, " +
+            "(SELECT COUNT_BIG(*) FROM " + table + " WHERE EventType = {1} AND SubjectType = {2}) AS DriftRows, " +
+            "(SELECT CAST(ISNULL(SUM(a.used_pages), 0) * 8 / 1024.0 AS float) FROM sys.partitions p JOIN sys.allocation_units a ON a.container_id = p.partition_id WHERE p.object_id = OBJECT_ID({0})) AS TableMb, " +
+            "(SELECT CAST(ISNULL(SUM(a.used_pages), 0) * 8 / 1024.0 AS float) FROM sys.tables t JOIN sys.schemas s ON s.schema_id = t.schema_id " +
+            "JOIN sys.partitions p ON p.object_id = t.object_id JOIN sys.allocation_units a ON a.container_id = p.partition_id WHERE s.name = {3}) AS ModelTablesMb";
+        var counts = await db.Database.SqlQueryRaw<JournalCounts>(countsSql, $"[{schema}].[ObservedEvents]", StateKinds.EventType, StateKinds.Drift.Name, schema).SingleAsync(ct);
+
+        List<JournalKindUsage>? kinds = null;
+        if (detail)
+        {
+            var kindsSql =
+                "SELECT CASE WHEN EventType = {0} THEN 'state:' + SubjectType ELSE 'lifecycle:' + CAST(Source AS nvarchar(8)) END AS Kind, COUNT_BIG(*) AS Rows, " +
+                "CAST(SUM(CAST(DATALENGTH(PayloadJson) AS bigint)) / 1048576.0 AS float) AS PayloadMb FROM " + table +
+                " GROUP BY CASE WHEN EventType = {0} THEN 'state:' + SubjectType ELSE 'lifecycle:' + CAST(Source AS nvarchar(8)) END";
+            var rows = await db.Database.SqlQueryRaw<KindUsageRow>(kindsSql, StateKinds.EventType).ToListAsync(ct);
+            kinds = rows.Select(r => new JournalKindUsage(LifecycleSourceName(r.Kind), r.Rows, Math.Round(r.PayloadMb, 1))).OrderByDescending(k => k.PayloadMb).ToList();
+        }
+
+        return new JournalUsage(counts.Rows, counts.StateRows, counts.DriftRows, counts.Rows - counts.StateRows,
+            Math.Round(counts.TableMb, 1), Math.Round(counts.ModelTablesMb, 1), kinds);
+    }
+
+    private static string LifecycleSourceName(string kind)
+        => kind.StartsWith("lifecycle:", StringComparison.Ordinal) && int.TryParse(kind["lifecycle:".Length..], System.Globalization.CultureInfo.InvariantCulture, out var source)
+            ? $"lifecycle:{(EventSourceKind)source}"
+            : kind;
+
+    private sealed record JournalCounts(long Rows, long StateRows, long DriftRows, double TableMb, double ModelTablesMb);
+
+    private sealed record KindUsageRow(string Kind, long Rows, double PayloadMb);
+
     private sealed record FileUsage(double UsedMb, double AllocatedMb, double MaxMb);
 
     private sealed record TableUsage(string Name, double UsedMb);

@@ -86,6 +86,9 @@ public interface ITwinStore : ITwinReadModel
 
     /// <summary>Space used by the twin database (SQL Server; zeros elsewhere), for keeping well under the tier cap.</summary>
     Task<DatabaseUsage> GetDatabaseUsageAsync(CancellationToken ct);
+
+    /// <summary>Journal size and composition; <paramref name="detail"/> adds payload MB per kind (scans the journal).</summary>
+    Task<JournalUsage> GetJournalUsageAsync(bool detail, CancellationToken ct);
 }
 
 /// <summary>
@@ -102,6 +105,13 @@ public interface IRebuildTarget
 }
 
 public sealed record DatabaseUsage(double UsedMb, double AllocatedMb, double MaxMb, IReadOnlyDictionary<string, double> LargestTablesMb);
+
+/// <param name="TableMb">The journal table with its indexes.</param>
+/// <param name="ModelTablesMb">Every table a rebuild recreates beside the live ones (journal, read models, projection versions).</param>
+public sealed record JournalUsage(long Rows, long StateRows, long DriftRows, long LifecycleRows, double TableMb, double ModelTablesMb, IReadOnlyList<JournalKindUsage>? Kinds = null);
+
+/// <param name="Kind">State kind ("state:work-item") or lifecycle source ("lifecycle:GitHub").</param>
+public sealed record JournalKindUsage(string Kind, long Rows, double PayloadMb);
 
 public interface IRealtimeEventPublisher
 {
