@@ -142,25 +142,24 @@ public sealed partial class EfTwinStore
         }
 
         // Rows that arrived after their day was archived: only lifecycle events can (old source timestamps from backfills).
-        var always = keep.Always.ToList();
-        var failuresOnly = keep.FailuresOnly.ToList();
-        var unconditional = keep.Unconditional.ToList();
-        var deletable = lifecycle.Where(e => !((e.ChainId != null && (always.Contains(e.EventType) || (failuresOnly.Contains(e.EventType) && e.Outcome == EventOutcome.Failure)))
-                                               || unconditional.Contains(e.EventType)));
-        var days = new List<DateOnly>();
-        DateTimeOffset? cursor = DateTimeOffset.MinValue;
-        while (cursor is { } from && from < before)
+        // Before the boundary only kept and late lifecycle rows remain, so their narrow columns are few and cheap to read
+        // through the (EventType, OccurredAt) index; the keep rule is applied here rather than in the query.
+        var remaining = await lifecycle.Where(e => e.OccurredAt < before)
+            .Select(e => new { e.OccurredAt, e.EventType, e.ChainId, e.Outcome }).ToListAsync(ct);
+        return remaining.Where(r => !keep.Keeps(new ObservedEvent { EventType = r.EventType, ChainId = r.ChainId, Outcome = r.Outcome }))
+            .Select(r => JournalArchiveFormat.DayOf(r.OccurredAt)).Distinct().Order().ToList();
+    }
+
+    public async Task RefreshJournalStatisticsAsync(CancellationToken ct)
+    {
+        await using var db = await factory.CreateDbContextAsync(ct);
+        if (!db.Database.IsSqlServer())
         {
-            var next = await deletable.Where(e => e.OccurredAt >= from && e.OccurredAt < before).MinAsync(e => (DateTimeOffset?)e.OccurredAt, ct);
-            if (next is null)
-            {
-                break;
-            }
-            var day = JournalArchiveFormat.DayOf(next.Value);
-            days.Add(day);
-            cursor = JournalArchiveFormat.StartOf(day.AddDays(1));
+            return;
         }
-        return days;
+        db.Database.SetCommandTimeout(TimeSpan.FromMinutes(5));
+        var sql = "UPDATE STATISTICS " + JournalTable(db);
+        await db.Database.ExecuteSqlRawAsync(sql, ct);
     }
 
     private static async Task<JournalCompaction> CompactInMemoryAsync(TwinDbContext db, DateTimeOffset start, DateTimeOffset end, JournalKeepRule keep, CancellationToken ct)
