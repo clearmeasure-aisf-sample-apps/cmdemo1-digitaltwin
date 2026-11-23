@@ -72,6 +72,7 @@ public static partial class PersistenceServiceCollectionExtensions
                     await db.Database.ExecuteSqlRawAsync(ProjectionVersionsDdl, ct);
                     await db.Database.ExecuteSqlRawAsync(StateAsOfIndexDdl, ct);
                     await db.Database.ExecuteSqlRawAsync(ChainIndexDdl, ct);
+                    await db.Database.ExecuteSqlRawAsync(TwinDbContext.RecentJournalIndexDdl("dbo"), ct);
                     // A rebuild interrupted by a restart left its shadow behind; live tables were never touched.
                     await services.GetRequiredService<IRebuildTarget>().DiscardAsync(ct);
                 }

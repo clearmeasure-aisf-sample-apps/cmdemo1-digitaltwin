@@ -45,6 +45,8 @@ public sealed class ShadowRebuildTests(SqlServerFixture sql)
         Assert.Equal(1, await app.ScalarAsync("SELECT COUNT(*) FROM dbo.ObservedEvents WHERE IdempotencyKey = 'github:during-shadow-1'"));
         Assert.Equal(450, (await app.Services.GetRequiredService<ITwinStore>().GetPipelineRunsAsync(int.MaxValue, default)).Count);
         Assert.Equal(0, await ShadowTableCountAsync(app));
+        // The swapped-in journal keeps the filtered index the dashboard's recent-events query reads.
+        Assert.Equal(1, await app.ScalarAsync("SELECT COUNT(*) FROM sys.indexes WHERE name = 'IX_ObservedEvents_Recent' AND object_id = OBJECT_ID('dbo.ObservedEvents') AND has_filter = 1"));
     }
 
     [Fact]
