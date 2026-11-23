@@ -125,39 +125,38 @@ jobs:
           retention-days: 30
           if-no-files-found: error
 
-  # Off unless the Octopus owner applies deploy/octopus/terraform and sets the repository variable TWIN_OCTOPUS_RELEASES=true.
-  # Pushes the package to the space's built-in feed and creates a release; it never deploys or promotes.
+  # The twin deploys through its own Octopus project (deploy/octopus/terraform): this job pushes the package, creates the
+  # release and follows the lifecycle's automatic tdd -> uat -> prod deployments. TWIN_OCTOPUS_RELEASES=false turns it off.
   octopus-release:
     needs: release-candidate
-    if: github.event_name != 'pull_request' && vars.TWIN_OCTOPUS_RELEASES == 'true'
+    if: github.event_name != 'pull_request' && vars.TWIN_OCTOPUS_RELEASES != 'false'
     runs-on: ubuntu-24.04
+    timeout-minutes: 90
     steps:
+      - uses: actions/checkout@v6.0.1
+
       - uses: actions/download-artifact@v4
         with:
           name: cmdemo1-digitaltwin.${{ needs.release-candidate.outputs.version }}
+          path: out
 
-      - name: Push the package and create the Octopus release
+      - name: Release through Octopus (tdd, uat, prod)
         env:
           OCTOPUS_URL: ${{ secrets.OCTOPUS_URL }}
           OCTOPUS_API_KEY: ${{ secrets.OCTOPUS_API_KEY }}
           VERSION: ${{ needs.release-candidate.outputs.version }}
+          PACKAGE_FILE: out/cmdemo1-digitaltwin.${{ needs.release-candidate.outputs.version }}.zip
           SPACE: ${{ vars.TWIN_OCTOPUS_SPACE || 'Spaces-355' }}
           PROJECT: ${{ vars.TWIN_OCTOPUS_PROJECT || 'cmdemo1-digitaltwin' }}
-        run: |
-          set -euo pipefail
-          BASE="${OCTOPUS_URL%/}"
-          curl -fsS -X POST -H "X-Octopus-ApiKey: ${OCTOPUS_API_KEY}" -F "file=@cmdemo1-digitaltwin.${VERSION}.zip" \
-            "${BASE}/api/${SPACE}/packages/raw?overwriteMode=IgnoreIfExists" | jq -c '{PackageId, Version}'
-          jq -n --arg space "$SPACE" --arg project "$PROJECT" --arg v "$VERSION" \
-            '{spaceIdOrName: $space, projectName: $project, releaseVersion: $v, packageVersion: $v}' \
-            | curl -fsS -X POST -H "X-Octopus-ApiKey: ${OCTOPUS_API_KEY}" -H "Content-Type: application/json" -d @- \
-                "${BASE}/api/${SPACE}/releases/create/v1" | jq -c '{ReleaseId, ReleaseVersion}'
+        run: bash deploy/scripts/octopus-release.sh
 
-  # Direct deploy of each release candidate. Once the Octopus project is applied and deploying, set the repository
-  # variable TWIN_DEPLOY_VIA_OCTOPUS=true to hand deploys to Octopus (the same scripts run there).
+  # End-to-end checks of each release. It deploys directly only when TWIN_DEPLOY_VIA_OCTOPUS=false; otherwise Octopus
+  # has rolled the release out (octopus-release) and this job verifies it.
   deploy:
-    needs: release-candidate
-    if: github.event_name != 'pull_request' && vars.TWIN_DEPLOY_VIA_OCTOPUS != 'true'
+    needs: [release-candidate, octopus-release]
+    if: >-
+      !cancelled() && github.event_name != 'pull_request' && needs.release-candidate.result == 'success'
+      && (needs.octopus-release.result == 'success' || needs.octopus-release.result == 'skipped')
     runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v6.0.1
@@ -171,7 +170,8 @@ jobs:
         run: bash deploy/scripts/azure-login.sh
 
       - name: Deploy the release candidate (rebuild deferral, Bicep, revision ready)
-        id: bicep
+        id: direct
+        if: vars.TWIN_DEPLOY_VIA_OCTOPUS == 'false'
         env:
           IMAGE: ${{ needs.release-candidate.outputs.image }}
           VERSION: ${{ needs.release-candidate.outputs.version }}
@@ -186,7 +186,18 @@ jobs:
           TWIN_API_KEY: ${{ secrets.TWIN_API_KEY }}
         run: bash deploy/scripts/deploy-twin.sh
 
+      - name: Twin URL
+        id: bicep
+        env:
+          DIRECT_URL: ${{ steps.direct.outputs.twin_url }}
+        run: |
+          set -euo pipefail
+          URL="${DIRECT_URL:-https://$(az containerapp show -n "ca-${TWIN_SYSTEM_SLUG}-twin" -g "$TWIN_RESOURCE_GROUP" --query properties.configuration.ingress.fqdn -o tsv)}"
+          echo "twin_url=${URL}" >> "$GITHUB_OUTPUT"
+          echo "Twin at ${URL}"
+
       - name: Register GitHub webhooks, Octopus subscription, and Azure Event Grid
+        if: vars.TWIN_DEPLOY_VIA_OCTOPUS == 'false'
         env:
           TWIN_URL: ${{ steps.bicep.outputs.twin_url }}
           GH_PAT: ${{ secrets.GH_PAT }}

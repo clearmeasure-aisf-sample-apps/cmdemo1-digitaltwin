@@ -242,7 +242,9 @@ The setup guide is [docs/setup/README.md](docs/setup/README.md). [docs/teaching/
 
 ## The Twin's Own Release Pipeline (as code)
 
-Each push to `main` builds a **release candidate**: the image `cmdemo1/digitaltwin:1.0.<run>` in ACR, plus the Octopus package `cmdemo1-digitaltwin.1.0.<run>.zip`. The package holds the compiled ARM template, the Bicep sources, `deploy/scripts/*` and `scripts/register-hooks.sh`, and is kept as a workflow artifact. GitHub Actions deploys it with `deploy/scripts/deploy-twin.sh`, then gates it with `deploy/scripts/verify-twin.sh`: Healthy at the release version, 0 dead letters, database under budget, MCP answering.
+Each push to `main` builds a **release candidate**: the image `cmdemo1/digitaltwin:1.0.<run>` in ACR, plus the Octopus package `cmdemo1-digitaltwin.1.0.<run>.zip`. The package holds the compiled ARM template, the Bicep sources, `deploy/scripts/*`, `scripts/register-hooks.sh` and the platform definitions.
+
+The `octopus-release` job (`deploy/scripts/octopus-release.sh`) uploads the package, creates the release, and follows the twin's lifecycle as it deploys tdd, then uat, then prod. Then the `deploy` job runs the end-to-end checks against the live twin. Setting `TWIN_DEPLOY_VIA_OCTOPUS=false` and `TWIN_OCTOPUS_RELEASES=false` goes back to direct deploys with `deploy/scripts/deploy-twin.sh`.
 
 The twin's Octopus project `cmdemo1-digitaltwin` (Spaces-355) is defined in `deploy/octopus/terraform` and applied by `.github/workflows/octopus-config.yml`. It has its own lifecycle (tdd, then uat, then prod, each automatic), project variables, and four steps that run the same scripts from the package:
 - In tdd and uat, a gate: the image is in ACR, a Bicep what-if deletes nothing, and the live twin is healthy.
