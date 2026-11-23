@@ -63,8 +63,9 @@ public sealed partial class ReleasePipelineTests
         Assert.Contains("bash deploy/scripts/deploy-twin.sh", workflow, StringComparison.Ordinal);
         Assert.Contains("bash deploy/scripts/verify-twin.sh", workflow, StringComparison.Ordinal);
         Assert.Contains("bash deploy/scripts/package-twin.sh", workflow, StringComparison.Ordinal);
-        Assert.Contains("vars.TWIN_OCTOPUS_RELEASES == 'true'", workflow, StringComparison.Ordinal);
-        Assert.Contains("vars.TWIN_DEPLOY_VIA_OCTOPUS != 'true'", workflow, StringComparison.Ordinal);
+        Assert.Contains("bash deploy/scripts/octopus-release.sh", workflow, StringComparison.Ordinal);
+        Assert.Contains("vars.TWIN_OCTOPUS_RELEASES != 'false'", workflow, StringComparison.Ordinal);
+        Assert.Contains("vars.TWIN_DEPLOY_VIA_OCTOPUS == 'false'", workflow, StringComparison.Ordinal);
     }
 
     private static string RepoRoot()
