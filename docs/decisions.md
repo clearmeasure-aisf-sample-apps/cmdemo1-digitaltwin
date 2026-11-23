@@ -346,3 +346,12 @@ Following the domain research in the prompt's prior-art references:
 - **Late rows**: lifecycle events can arrive with old timestamps (backfills). A run finds archived days that still hold removable rows, merges them into the day's file and compacts again.
 - **Verified by** `JournalArchiveTests`. It records three days of observations, lifecycle events and drift, archives two, and requires identical state-at answers and read-model dumps at six instants before and after, plus "as of now" equal to the live tables. It fails if archived days are not read.
 
+## ADR-036: A Rebuild Only Copies What the Live Database Holds, and Pauses Intake for Seconds
+
+- **Context**: a rebuild builds every table in a shadow schema beside the live one, so its peak is the live database plus a full copy of the journal and read models: 1,473 MB on Nov 23. Its final round, under the projection gate, also fingerprinted the whole journal of both schemas. That took 241 s of a 245 s live-intake pause.
+- **Decision**:
+  - **Compacted shadow:** the shadow journal is compacted to the journal archive boundary (`ArchivedThrough`) as the replay goes, every 50 pages (10,000 raw events) and once more at the end. The rule is the same as the live compaction, so the shadow never holds more than the live journal does plus one compaction interval.
+  - **Journals compared outside the gate:** both schemas are fingerprinted in parallel before the final round, over everything that occurred more than 15 minutes earlier. Under the gate, only the final catch-up, the read-model fingerprints (small tables) and the schema swap run. The swap still requires identical read models. Journal equality is reported (`identical`) but does not gate the swap, as before.
+  - **Budget guard:** `POST /api/admin/rebuild` refuses with 409 when the projected peak exceeds `Twin:Storage:RebuildPeakBudgetMb` (1,500 MB). The projection is the live database plus a copy of every rebuilt table. `force=true` overrides. Deploys refuse the same way: the health gate in tdd, uat and prod and the GitHub deploy job check `/api/storage` `rebuild.withinBudget`. `TWIN_ALLOW_OVER_BUDGET=true` overrides it, for example to ship the fix that frees space.
+- **Trade-off**: a lifecycle event that arrived after its day was archived, and that the next retention run has not merged yet, is dropped from SQL by a rebuild's compaction. It is still in the raw archive, which a rebuild replays.
+

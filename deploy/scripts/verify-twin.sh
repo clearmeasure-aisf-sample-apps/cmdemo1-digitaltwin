@@ -24,6 +24,13 @@ STORAGE=$(get -H "$K" "${TWIN_URL}/api/admin/storage")
 echo "$STORAGE" | jq -c '{usedMb: .database.usedMb, maxMb: .database.maxMb, archiveEnabled: .archive.enabled, archiveDays: .archive.days}'
 echo "$STORAGE" | jq -e '.database.usedMb < 1500' >/dev/null || { echo "Database above 1500 MB of the Basic tier's 2 GB" >&2; exit 1; }
 
+# Rebuild budget guard: a rebuild must fit beside the live tables (TWIN_ALLOW_OVER_BUDGET=true overrides, e.g. to ship the fix).
+READOUT=$(get "${TWIN_URL}/api/storage")
+echo "$READOUT" | jq -c '{usedMb: .database.usedMb, journalMb: .journal.sizeMb, rawMb: .rawIntake.sizeMb, rebuild: .rebuild}'
+if [ "${TWIN_ALLOW_OVER_BUDGET:-false}" != "true" ]; then
+  echo "$READOUT" | jq -e '.rebuild.withinBudget == true' >/dev/null || { echo "Projected rebuild peak is over budget; archive the journal or set TWIN_ALLOW_OVER_BUDGET=true" >&2; exit 1; }
+fi
+
 MCP=$(get -X POST "${TWIN_URL}/mcp" -H "$K" -H "Content-Type: application/json" -H "Accept: application/json, text/event-stream" \
   -d '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-03-26","capabilities":{},"clientInfo":{"name":"verify-twin","version":"1.0"}}}')
 echo "$MCP" | grep -q '"serverInfo"' || { echo "MCP initialize did not answer" >&2; exit 1; }

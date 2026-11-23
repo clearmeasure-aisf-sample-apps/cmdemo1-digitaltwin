@@ -83,6 +83,66 @@ public sealed class ShadowRebuildTests(SqlServerFixture sql)
         Assert.Equal(0, await ShadowTableCountAsync(second));
     }
 
+    [Fact]
+    public async Task ARebuildCompactsTheShadowJournalToTheArchiveBoundaryAndSwapsIdentically()
+    {
+        var archiveRoot = Path.Combine(Path.GetTempPath(), $"twin-rebuild-archive-{Guid.NewGuid():N}");
+        try
+        {
+            await using var app = new TwinAppFactory(await sql.CreateDatabaseAsync(), new Dictionary<string, string?>
+            {
+                ["Twin:Archive:Provider"] = "FileSystem",
+                ["Twin:Archive:Path"] = archiveRoot
+            });
+            using var client = app.CreateAuthedClient();
+            await SeedHistoryAsync(app);
+            // The same work item observed five times: four of those observations are superseded.
+            var state = app.Services.GetRequiredService<StateObservationPublisher>();
+            for (var i = 0; i < 5; i++)
+            {
+                var item = F.WorkItem();
+                item.Title = $"revision {i}";
+                await app.Services.TrackActivity().Timeout(TimeSpan.FromSeconds(60)).ExecuteAndWaitAsync((Func<IMessageContext, Task>)(_ =>
+                    state.PublishAsync(StateKinds.WorkItem, [item], EventSourceKind.GitHub, default)));
+            }
+
+            var journal = await app.Services.GetRequiredService<JournalRetentionService>().RunAsync(olderThanDays: 0, default);
+            Assert.True(journal.Days.Sum(d => d.SupersededStateRemoved) >= 4);
+            var compactedRows = await app.ScalarAsync("SELECT COUNT(*) FROM dbo.ObservedEvents");
+
+            var report = await app.Services.GetRequiredService<IntakeRebuildService>().StartOrJoin();
+
+            Assert.True(report.Swapped, string.Join("; ", report.Differences));
+            Assert.True(report.ReadModelsIdentical, string.Join("; ", report.Differences));
+            Assert.True(report.Identical, string.Join("; ", report.Differences));
+            Assert.NotNull(report.JournalArchivedThrough);
+            Assert.True(report.ShadowCompaction!.SupersededStateRows >= 4);
+            Assert.Equal(compactedRows, await app.ScalarAsync("SELECT COUNT(*) FROM dbo.ObservedEvents"));
+            Assert.True(report.LivePausedMilliseconds < 10_000, $"live paused {report.LivePausedMilliseconds} ms");
+            Assert.True(report.StepSeconds!.ContainsKey("journalFingerprints"));
+        }
+        finally
+        {
+            if (Directory.Exists(archiveRoot))
+            {
+                Directory.Delete(archiveRoot, recursive: true);
+            }
+        }
+    }
+
+    [Fact]
+    public async Task ARebuildThatWouldExceedThePeakBudgetIsRefused()
+    {
+        await using var app = new TwinAppFactory(await sql.CreateDatabaseAsync(), new Dictionary<string, string?> { ["Twin:Storage:RebuildPeakBudgetMb"] = "1" });
+        using var client = app.CreateAuthedClient();
+
+        var response = await client.PostAsync("/api/admin/rebuild?wait=false", null);
+
+        Assert.Equal(HttpStatusCode.Conflict, response.StatusCode);
+        Assert.Contains("over the 1 MB budget", await response.Content.ReadAsStringAsync(), StringComparison.Ordinal);
+        Assert.False(app.Services.GetRequiredService<IntakeRebuildService>().IsRunning);
+    }
+
     private static async Task SeedHistoryAsync(TwinAppFactory app)
     {
         using var client = app.CreateAuthedClient();

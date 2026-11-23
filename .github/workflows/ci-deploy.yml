@@ -24,6 +24,7 @@ env:
   TWIN_GITHUB_ORG: ${{ vars.TWIN_GITHUB_ORG || 'clearmeasure-aisf-sample-apps' }}
   TWIN_OCTOPUS_SPACE: ${{ vars.TWIN_OCTOPUS_SPACE || 'Spaces-355' }}
   TWIN_INTAKE_TRANSPORT: ${{ vars.TWIN_INTAKE_TRANSPORT || '' }}
+  TWIN_ALLOW_OVER_BUDGET: ${{ vars.TWIN_ALLOW_OVER_BUDGET || 'false' }}
 
 concurrency:
   group: ci-deploy-${{ github.ref }}
