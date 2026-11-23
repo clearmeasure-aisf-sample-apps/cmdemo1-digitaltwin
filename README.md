@@ -219,15 +219,16 @@ Every 5 minutes the twin evaluates:
 
 Each new condition is sent once. The first evaluation after a start only records the current state, so deploys never re-send old alerts. The channel is an incoming-webhook URL in `Twin:Alerts:WebhookUrl` (Bicep `alertWebhookUrl`, a secure parameter stored as a Container App secret), using `Twin:Alerts:Format` = `Slack` (`{"text": …}`), `Teams` (MessageCard) or `Generic` (the alert as JSON). The URL is **empty by default, so nothing is posted anywhere**; no channel has been created or configured. `GET /api/alerts`, MCP `get_alerts` and the dashboard's **Alerts** pill show active and recently sent alerts. `POST /api/admin/alerts/test` sends a test message once a URL is set.
 
-## Azure Service Bus Transport (switch ready, not enabled)
+## Azure Service Bus Transport
 
-The intake transport is configuration: `Twin:Messaging:Transport` = `LocalDurable`, `SqlServer` (deployed today) or `AzureServiceBus`. Service Bus can use a managed identity (`ServiceBusNamespace` + `ManagedIdentityClientId`) or a connection string (`ServiceBusConnectionString`: a Send+Listen shared access key, or the local emulator). Incomplete settings fail at startup.
+The intake queue is Azure Service Bus: namespace `sb-cmdemo1-twin` (Standard) in `rg-cmdemo1-nonprod`, queue `twin-intake`. The twin connects with a Send+Listen shared access key (`twin-intake-app`), which the Bicep reads with `listKeys` and passes as a Container App secret. That needs no role assignment, so the Contributor deploy principal can deploy it. The raw intake table, the Wolverine outbox and inbox, and the dead letters stay in SQL Server, so captured events are durable before the hook answers, whatever the queue.
 
-The Bicep has `deployServiceBus` (default **false**) and `serviceBusAuth`:
-- `ManagedIdentity` needs `Microsoft.Authorization/roleAssignments/write` for the Data Owner role.
-- `SharedAccessKey` creates a Send+Listen rule and passes its connection string as a Container App secret, which is Contributor-compatible.
+`Twin:Messaging:Transport` is configuration: `AzureServiceBus` (deployed), `SqlServer` (the fallback, a queue table in the twin database) or `LocalDurable` (local and tests). Incomplete settings fail at startup. In Bicep, `deployServiceBus` (default true) deploys the namespace and `intakeTransport` (default `AzureServiceBus`) picks the queue. To fall back to SQL Server without removing the namespace, set `TWIN_INTAKE_TRANSPORT=SqlServer` (repository variable, direct deploys) or the Octopus project variable `Twin.IntakeTransport=SqlServer` (Terraform `intake_transport`). `serviceBusAuth=ManagedIdentity` is the alternative when a role assignment can be granted.
 
-**Status (2026-11-22):** `Microsoft.ServiceBus` shows as Registered in the subscription. `az provider register` with the deploy principal fails with `AuthorizationFailed` (no `Microsoft.ServiceBus/register/action`), so the registration was done by someone else. Per instructions the transport stays on SQL Server with `deployServiceBus=false`. Enabling it is a decision for a subscription Owner: grant `roleAssignments/write` for the managed-identity mode, or approve `serviceBusAuth=SharedAccessKey`.
+Switching in either direction is safe. Raw events still unprocessed 10 minutes after capture are re-sent (`StrandedIntakeRecovery`, `Twin:Messaging:RecoverStrandedAfterMinutes`), so messages left in the queue the twin no longer listens to are picked up again. The handler ignores rows already processed. CI checks after every release:
+- the transport is the expected one;
+- a GitHub (signed test ping), Octopus (the release's own deployment events) and Azure (Event Grid tag change) webhook each reached the journal;
+- captured equals processed, with 0 dead letters.
 
 `TWIN_TEST_SERVICEBUS=1 dotnet test` runs the transport end to end against the Testcontainers Service Bus emulator (with SQL Server 2022 as its engine). In the cloud agent sandbox used for this work, the emulator container crashed (exit 139) when connecting to its database, so that test has not been run successfully yet. The default suite covers selection and validation by configuration.
 

@@ -8,7 +8,7 @@ public enum IntakeTransport
     /// <summary>Wolverine SQL Server transport queue in the twin database (deployed twin today).</summary>
     SqlServer,
 
-    /// <summary>Azure Service Bus queue with managed identity; outbox/inbox/dead letters stay in SQL Server.</summary>
+    /// <summary>Azure Service Bus queue (managed identity or a Send+Listen shared access key); outbox/inbox/dead letters stay in SQL Server.</summary>
     AzureServiceBus
 }
 
@@ -39,6 +39,9 @@ public sealed class MessagingOptions
 
     /// <summary>Comma-separated backoff (ms) between retries; after the last retry fails the message is dead-lettered.</summary>
     public string RetryDelays { get; set; } = "1000,5000,15000";
+
+    /// <summary>Raw events still unprocessed this many minutes after capture are re-sent (0 turns recovery off).</summary>
+    public int RecoverStrandedAfterMinutes { get; set; } = 10;
 
     /// <summary>Wolverine durability mode: Balanced (multi-node safe, default) or Solo (single node, faster recovery; tests).</summary>
     public string DurabilityMode { get; set; } = "Balanced";
