@@ -22,6 +22,9 @@ public sealed partial class RawIntakeRetentionHostedService(
     [LoggerMessage(Level = LogLevel.Information, Message = "Journal retention: archived {Days} day(s), removed {State} superseded state and {Lifecycle} lifecycle row(s); skipped: {Skipped}")]
     private partial void LogJournal(int days, int state, int lifecycle, string? skipped);
 
+    [LoggerMessage(Level = LogLevel.Warning, Message = "Journal retention failed; next attempt at the next interval")]
+    private partial void LogJournalFailed(Exception ex);
+
     [LoggerMessage(Level = LogLevel.Warning, Message = "Raw intake retention failed; next attempt at the next interval")]
     private partial void LogFailed(Exception ex);
 
@@ -40,6 +43,15 @@ public sealed partial class RawIntakeRetentionHostedService(
                 var report = await retention.StartOrJoin(null).WaitAsync(stoppingToken);
                 var archived = report.Days.Sum(d => d.Archived);
                 LogRun(report.Days.Count, archived, report.Skipped);
+            }
+            catch (Exception ex) when (ex is not OperationCanceledException || !stoppingToken.IsCancellationRequested)
+            {
+                LogFailed(ex);
+            }
+
+            // Independent of raw retention: one failing must not keep the other from running for another day.
+            try
+            {
                 if (journalOptions.Value.Enabled)
                 {
                     var journal = await journalRetention.StartOrJoin(null).WaitAsync(stoppingToken);
@@ -50,7 +62,7 @@ public sealed partial class RawIntakeRetentionHostedService(
             }
             catch (Exception ex) when (ex is not OperationCanceledException || !stoppingToken.IsCancellationRequested)
             {
-                LogFailed(ex);
+                LogJournalFailed(ex);
             }
         }
         while (await timer.WaitForNextTickAsync(stoppingToken));

@@ -191,7 +191,7 @@ public static class TwinApiEndpoints
             return wait == false ? Results.Accepted("/api/admin/storage", new { running = journal.Running }) : Results.Ok(await running);
         });
 
-        protectedApi.MapGet("/admin/storage", async (bool? detail, RawIntakeRetentionService retention, IRawIntakeArchive archive, IRawIntakeStore rawStore, ITwinStore store, StorageReadout readout, CancellationToken ct) =>
+        protectedApi.MapGet("/admin/storage", async (bool? detail, RawIntakeRetentionService retention, JournalRetentionService journalRetention, IRawIntakeArchive archive, IRawIntakeStore rawStore, ITwinStore store, StorageReadout readout, CancellationToken ct) =>
         {
             var days = await archive.ListDaysAsync(ct);
             // The health gate reads this right after a deploy: journal figures come from the background readout, never awaited here.
@@ -209,7 +209,8 @@ public static class TwinApiEndpoints
                 readoutAt = storage?.At,
                 readoutTimingsMs = storage?.TimingsMs,
                 archive = new { enabled = archive.IsEnabled, location = archive.Location, days = days.Count, oldestDay = days.Count > 0 ? days[0] : (DateOnly?)null, newestDay = days.Count > 0 ? days[^1] : (DateOnly?)null },
-                retention = new { running = retention.Running, lastReport = retention.LastReport, lastError = retention.LastError }
+                retention = new { running = retention.Running, lastReport = retention.LastReport, lastError = retention.LastError },
+                journalRetention = new { running = journalRetention.Running, lastReport = journalRetention.LastReport, lastError = journalRetention.LastError }
             });
         });
 
