@@ -20,9 +20,13 @@ public sealed record StorageJournalDto(long Rows, long StateRows, long DriftRows
 /// <param name="ProjectedPeakMb">Live database plus a shadow copy of every rebuilt table.</param>
 public sealed record StorageRebuildDto(double ProjectedPeakMb, double BudgetMb, bool WithinBudget);
 
-public sealed record StorageReadoutDto(DateTimeOffset At, StorageDatabaseDto Database, StorageRawDto RawIntake, StorageJournalDto Journal, StorageRebuildDto Rebuild, bool ArchiveEnabled);
+public sealed record StorageReadoutDto(DateTimeOffset At, StorageDatabaseDto Database, StorageRawDto RawIntake, StorageJournalDto Journal, StorageRebuildDto Rebuild, bool ArchiveEnabled,
+    IReadOnlyDictionary<string, long>? TimingsMs = null);
 
-/// <summary>Database, raw intake, journal and archive sizes, and whether a rebuild would fit the budget.</summary>
+/// <summary>
+/// Database, raw intake, journal and archive sizes, and whether a rebuild would fit the budget. Computed in the background
+/// (one computation at a time) and served from the last result, so callers never wait on the database while it is busy.
+/// </summary>
 public sealed class StorageReadout(
     ITwinStore store,
     IRawIntakeStore rawStore,
@@ -31,22 +35,67 @@ public sealed class StorageReadout(
     IOptions<StorageOptions> options,
     TimeProvider timeProvider)
 {
-    private static readonly TimeSpan CacheFor = TimeSpan.FromMinutes(1);
-    private (DateTimeOffset At, StorageReadoutDto Readout)? _cached;
+    public static readonly TimeSpan RefreshAfter = TimeSpan.FromMinutes(1);
+    private readonly Lock _lock = new();
+    private Task<StorageReadoutDto>? _refresh;
 
+    /// <summary>The last computed readout, or null before the first one finished.</summary>
+    public StorageReadoutDto? Cached { get; private set; }
+
+    /// <summary>The cached readout (refreshed in the background when older than a minute); waits only for the very first one.</summary>
     public async Task<StorageReadoutDto> GetAsync(bool detail, CancellationToken ct)
     {
-        var now = timeProvider.GetUtcNow();
-        if (!detail && _cached is { } hit && now - hit.At < CacheFor)
+        if (detail)
         {
-            return hit.Readout;
+            return await ComputeAsync(detail: true, ct);
+        }
+        if (Cached is { } cached)
+        {
+            if (timeProvider.GetUtcNow() - cached.At >= RefreshAfter)
+            {
+                _ = Refresh();
+            }
+            return cached;
+        }
+        return await Refresh().WaitAsync(ct);
+    }
+
+    /// <summary>Starts a background computation unless one is running; never cancelled by a caller.</summary>
+    public Task<StorageReadoutDto> Refresh()
+    {
+        lock (_lock)
+        {
+            if (_refresh is { IsCompleted: false })
+            {
+                return _refresh;
+            }
+            _refresh = Task.Run(async () =>
+            {
+                var readout = await ComputeAsync(detail: false, CancellationToken.None);
+                Cached = readout;
+                return readout;
+            });
+            return _refresh;
+        }
+    }
+
+    private async Task<StorageReadoutDto> ComputeAsync(bool detail, CancellationToken ct)
+    {
+        var now = timeProvider.GetUtcNow();
+        var timings = new Dictionary<string, long>(StringComparer.Ordinal);
+        async Task<T> Timed<T>(string name, Func<Task<T>> step)
+        {
+            var started = timeProvider.GetTimestamp();
+            var result = await step();
+            timings[name] = (long)timeProvider.GetElapsedTime(started).TotalMilliseconds;
+            return result;
         }
 
-        var database = await store.GetDatabaseUsageAsync(ct);
-        var raw = await rawStore.GetStatsAsync(ct);
-        var rawMb = await rawStore.GetSizeMbAsync(ct);
-        var days = await archive.ListDaysAsync(ct);
-        var journal = await store.GetJournalUsageAsync(detail, ct);
+        var database = await Timed("database", () => store.GetDatabaseUsageAsync(ct));
+        var raw = await Timed("rawStats", () => rawStore.GetStatsAsync(ct));
+        var rawMb = await Timed("rawSize", () => rawStore.GetSizeMbAsync(ct));
+        var days = await Timed("archiveDays", () => archive.ListDaysAsync(ct));
+        var journal = await Timed("journal", () => store.GetJournalUsageAsync(detail, ct));
 
         var peak = Math.Round(database.UsedMb + journal.ModelTablesMb, 1);
         var readout = new StorageReadoutDto(
@@ -55,11 +104,8 @@ public sealed class StorageReadout(
             new StorageRawDto(raw.Total, raw.Pending, raw.DeadLettered, Math.Round(rawMb, 1), retention.Value.MaxRawMb, days.Count, days.Count > 0 ? days[0] : null),
             new StorageJournalDto(journal.Rows, journal.StateRows, journal.DriftRows, journal.LifecycleRows, journal.TableMb, journal.Kinds),
             new StorageRebuildDto(peak, options.Value.RebuildPeakBudgetMb, peak <= options.Value.RebuildPeakBudgetMb),
-            archive.IsEnabled);
-        if (!detail)
-        {
-            _cached = (now, readout);
-        }
+            archive.IsEnabled,
+            timings);
         return readout;
     }
 }
