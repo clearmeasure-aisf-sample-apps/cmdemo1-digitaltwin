@@ -129,6 +129,25 @@
     if (res.ok) renderIntake(await res.json());
   }
 
+  // One dashboard refresh in flight at a time; signals arriving meanwhile collapse into one follow-up refresh.
+  let stateFetch = null;
+  let stateRefetch = false;
+  function refreshState() {
+    if (state.asOf) return Promise.resolve();
+    if (stateFetch) {
+      stateRefetch = true;
+      return stateFetch;
+    }
+    stateFetch = fetchState().catch(() => {}).finally(() => {
+      stateFetch = null;
+      if (stateRefetch) {
+        stateRefetch = false;
+        setTimeout(refreshState, 2000);
+      }
+    });
+    return stateFetch;
+  }
+
   async function fetchState() {
     const url = state.asOf ? `/api/dashboard/state?asOf=${encodeURIComponent(state.asOf)}` : '/api/dashboard/state';
     const res = await fetch(url, { cache: 'no-store' });
@@ -897,7 +916,7 @@
         .build();
 
       connection.on('twinEvent', handleIncomingEvent);
-      connection.on('stateRefreshed', () => { if (!state.asOf) fetchState().catch(() => {}); });
+      connection.on('stateRefreshed', () => refreshState());
 
       connection.onreconnecting(() => {
         dom.liveStatus.classList.remove('connected');
@@ -929,7 +948,7 @@
     es.addEventListener('twinEvent', e => {
       try { handleIncomingEvent(JSON.parse(e.data)); } catch {}
     });
-    es.addEventListener('stateRefreshed', () => { if (!state.asOf) fetchState().catch(() => {}); });
+    es.addEventListener('stateRefreshed', () => refreshState());
   }
 
   // Event listeners
@@ -1097,7 +1116,7 @@
     }, 900);
   });
 
-  setInterval(() => { if (!state.asOf) fetchState().catch(() => {}); }, 30000);
+  setInterval(() => refreshState(), 30000);
   setInterval(() => fetchIntake().catch(() => {}), 5000);
   setInterval(() => fetchAccuracy().catch(() => {}), 60000);
   setInterval(() => fetchAlerts().catch(() => {}), 60000);
