@@ -1,5 +1,6 @@
 using DigitalTwin.Application.Intake;
 using DigitalTwin.Core.Ports;
+using DigitalTwin.Core.Projections;
 using Microsoft.Extensions.Options;
 
 namespace DigitalTwin.Application.Services;
@@ -16,7 +17,7 @@ public sealed record StorageDatabaseDto(double UsedMb, double MaxMb);
 public sealed record StorageRawDto(long Rows, long Pending, long DeadLettered, double SizeMb, double BudgetMb, int ArchiveDays, DateOnly? OldestArchivedDay);
 
 /// <param name="ArchivedThrough">Last archived day: before its end SQL keeps each subject's newest state observation and the lifecycle events chains read.</param>
-public sealed record StorageJournalDto(long Rows, long StateRows, long DriftRows, long LifecycleRows, double SizeMb, double BudgetMb, int ArchiveDays, DateOnly? ArchivedThrough,
+public sealed record StorageJournalDto(long Rows, long StateRows, long DriftRows, long LifecycleRows, double SizeMb, double BudgetMb, int ArchiveDays, DateTimeOffset? ArchivedThrough,
     IReadOnlyList<JournalKindUsage>? Kinds);
 
 /// <param name="ProjectedPeakMb">Live database plus a shadow copy of every rebuilt table.</param>
@@ -101,6 +102,7 @@ public sealed class StorageReadout(
         var days = await Timed("archiveDays", () => archive.ListDaysAsync(ct));
         var journal = await Timed("journal", () => store.GetJournalUsageAsync(detail, ct));
         var journalDays = await Timed("journalArchiveDays", () => journalArchive.ListDaysAsync(ct));
+        var journalMeta = journalDays.Count > 0 ? await journalArchive.ReadMetaAsync(ct) : null;
 
         var peak = Math.Round(database.UsedMb + journal.ModelTablesMb, 1);
         var readout = new StorageReadoutDto(
@@ -108,7 +110,7 @@ public sealed class StorageReadout(
             new StorageDatabaseDto(database.UsedMb, database.MaxMb),
             new StorageRawDto(raw.Total, raw.Pending, raw.DeadLettered, Math.Round(rawMb, 1), retention.Value.MaxRawMb, days.Count, days.Count > 0 ? days[0] : null),
             new StorageJournalDto(journal.Rows, journal.StateRows, journal.DriftRows, journal.LifecycleRows, journal.TableMb, journalRetention.Value.MaxJournalMb,
-                journalDays.Count, journalDays.Count > 0 ? journalDays[^1] : null, journal.Kinds),
+                journalDays.Count, journalMeta?.ArchivedThrough ?? (journalDays.Count > 0 ? JournalArchiveFormat.StartOf(journalDays[^1].AddDays(1)) : null), journal.Kinds),
             new StorageRebuildDto(peak, options.Value.RebuildPeakBudgetMb, peak <= options.Value.RebuildPeakBudgetMb),
             archive.IsEnabled,
             timings);

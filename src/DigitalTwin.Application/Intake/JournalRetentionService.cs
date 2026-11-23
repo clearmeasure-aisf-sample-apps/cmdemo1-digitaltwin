@@ -106,46 +106,47 @@ public sealed class JournalRetentionService(
             return Done($"{maintenance.Holder} is running", [], sizeBefore);
         }
 
-        if (await archive.ReadMetaAsync(ct) is null && await store.GetStateHistoryStartAsync(ct) is { } historyStart)
-        {
-            // Compaction can remove the very first observations; time travel still starts where history did.
-            await archive.WriteMetaAsync(new JournalArchiveMeta(historyStart), ct);
-        }
-
+        var meta = await archive.ReadMetaAsync(ct) ?? new JournalArchiveMeta(await store.GetStateHistoryStartAsync(ct));
         var results = new List<JournalRetentionDay>();
         try
         {
             var archived = (await archive.ListDaysAsync(ct)).ToHashSet();
-            var from = archived.Count > 0 ? JournalArchiveFormat.StartOf(archived.Max().AddDays(1)) : DateTimeOffset.MinValue;
+            var through = meta.ArchivedThrough ?? (archived.Count > 0 ? JournalArchiveFormat.StartOf(archived.Max().AddDays(1)) : DateTimeOffset.MinValue);
 
             // Rows that arrived after their day was archived (backfilled lifecycle events with old timestamps).
-            foreach (var day in await store.GetCompactableJournalDaysAsync(from, Keep, ct))
+            foreach (var day in await store.GetCompactableJournalDaysAsync(through, Keep, ct))
             {
-                results.Add(await ArchiveDayAsync(day, archived.Contains(day), "late", ct));
+                results.Add(await ArchiveAsync(day, through, archived.Contains(day), "late", ct));
                 archived.Add(day);
             }
 
-            // Age: complete days before the window.
-            var cutoff = JournalArchiveFormat.StartOf(JournalArchiveFormat.DayOf(startedAt.AddDays(-(olderThanDays ?? options.Value.Days))));
-            foreach (var day in await store.GetJournalDaysAsync(from, cutoff, ct))
+            // Age keeps whole days; over the size budget everything but the last hour goes (the day it ends in is merged
+            // again by the next run), so a single busy day cannot hold the database above budget until midnight.
+            var target = JournalArchiveFormat.StartOf(JournalArchiveFormat.DayOf(startedAt.AddDays(-(olderThanDays ?? options.Value.Days))));
+            var reason = "age";
+            if (olderThanDays is not null)
             {
-                results.Add(await ArchiveDayAsync(day, archived.Contains(day), "age", ct));
-                archived.Add(day);
+                target = startedAt.AddDays(-olderThanDays.Value);
+            }
+            else if (await JournalMbAsync(ct) > options.Value.MaxJournalMb)
+            {
+                target = startedAt - RecentKeptWhole;
+                reason = "size";
             }
 
-            // Size budget: oldest complete day first, never today.
-            var today = JournalArchiveFormat.StartOf(JournalArchiveFormat.DayOf(startedAt));
-            var size = await JournalMbAsync(ct);
-            var next = archived.Count > 0 ? JournalArchiveFormat.StartOf(archived.Max().AddDays(1)) : DateTimeOffset.MinValue;
-            foreach (var day in await store.GetJournalDaysAsync(next, today, ct))
+            if (target > through)
             {
-                if (size <= options.Value.MaxJournalMb)
+                var from = through == DateTimeOffset.MinValue ? through : JournalArchiveFormat.StartOf(JournalArchiveFormat.DayOf(through));
+                foreach (var day in await store.GetJournalDaysAsync(from, target, ct))
                 {
-                    break;
+                    results.Add(await ArchiveAsync(day, target, archived.Contains(day), reason, ct));
+                    archived.Add(day);
                 }
-                results.Add(await ArchiveDayAsync(day, archived.Contains(day), "size", ct));
-                archived.Add(day);
-                size = await JournalMbAsync(ct);
+                meta = meta with { ArchivedThrough = target };
+            }
+            if (meta.HistoryStart is not null || meta.ArchivedThrough is not null)
+            {
+                await archive.WriteMetaAsync(meta, ct);
             }
         }
         finally
@@ -155,10 +156,18 @@ public sealed class JournalRetentionService(
         return Done(null, results, await JournalMbAsync(ct));
     }
 
-    private async Task<JournalRetentionDay> ArchiveDayAsync(DateOnly day, bool alreadyArchived, string reason, CancellationToken ct)
+    /// <summary>How much of the newest journal stays whole in SQL even when the size budget forces archiving.</summary>
+    public static readonly TimeSpan RecentKeptWhole = TimeSpan.FromHours(1);
+
+    /// <summary>Archives what occurred on <paramref name="day"/> before <paramref name="until"/>, checkpoints it, then compacts SQL.</summary>
+    private async Task<JournalRetentionDay> ArchiveAsync(DateOnly day, DateTimeOffset until, bool alreadyArchived, string reason, CancellationToken ct)
     {
         var start = JournalArchiveFormat.StartOf(day);
         var end = JournalArchiveFormat.StartOf(day.AddDays(1));
+        if (until < end)
+        {
+            end = until;
+        }
 
         var fromSql = new HashSet<long>();
         var written = await archive.WriteDayAsync(day, MergedAsync(day, alreadyArchived, start, end, fromSql, ct), ct);
@@ -172,7 +181,7 @@ public sealed class JournalRetentionService(
             throw new InvalidOperationException($"Journal archive verification failed for {day:yyyy-MM-dd}: wrote {written}, read back {check.Count}.");
         }
 
-        // The fold input for "as of the end of this day": SQL still holds every subject's newest observation before it.
+        // The fold input for "as of the end of what is archived": SQL still holds every subject's newest observation before it.
         var checkpoint = await store.GetLatestStateEventsAsync(end.AddTicks(-1), ct);
         var subjects = await archive.WriteCheckpointAsync(day, checkpoint.ToAsyncEnumerable(), ct);
         if (subjects != checkpoint.Count)
@@ -180,7 +189,7 @@ public sealed class JournalRetentionService(
             throw new InvalidOperationException($"Journal checkpoint verification failed for {day:yyyy-MM-dd}: wrote {subjects} of {checkpoint.Count}.");
         }
 
-        var compaction = await store.CompactJournalDayAsync(day, Keep, ct);
+        var compaction = await store.CompactJournalAsync(start, end, Keep, ct);
         return new JournalRetentionDay(day, written, subjects, compaction.SupersededStateRows, compaction.LifecycleRows, reason);
     }
 

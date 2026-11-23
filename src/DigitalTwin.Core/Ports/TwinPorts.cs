@@ -95,10 +95,10 @@ public interface ITwinStore : ITwinReadModel
     IAsyncEnumerable<ObservedEvent> StreamJournalAsync(DateTimeOffset from, DateTimeOffset until, CancellationToken ct);
 
     /// <summary>
-    /// After a day is archived: removes state observations (drift excepted) superseded before the end of <paramref name="day"/>,
-    /// and that day's lifecycle events <paramref name="keep"/> does not keep.
+    /// After [<paramref name="from"/>, <paramref name="until"/>) is archived: removes state observations (drift excepted)
+    /// superseded before <paramref name="until"/>, and lifecycle events of that range <paramref name="keep"/> does not keep.
     /// </summary>
-    Task<JournalCompaction> CompactJournalDayAsync(DateOnly day, JournalKeepRule keep, CancellationToken ct);
+    Task<JournalCompaction> CompactJournalAsync(DateTimeOffset from, DateTimeOffset until, JournalKeepRule keep, CancellationToken ct);
 
     /// <summary>Days before <paramref name="before"/> still holding rows a compaction would remove (rows that arrived after their day was archived).</summary>
     Task<IReadOnlyList<DateOnly>> GetCompactableJournalDaysAsync(DateTimeOffset before, JournalKeepRule keep, CancellationToken ct);

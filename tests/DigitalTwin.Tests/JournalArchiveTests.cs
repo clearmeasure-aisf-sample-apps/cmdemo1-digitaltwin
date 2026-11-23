@@ -80,7 +80,7 @@ public sealed class JournalArchiveTests(SqlServerFixture sql) : IDisposable
         var rowsBefore = await app.ScalarAsync("SELECT COUNT(*) FROM ObservedEvents");
 
         var retention = app.Services.GetRequiredService<JournalRetentionService>();
-        var report = await retention.RunAsync(olderThanDays: 0, default);
+        var report = await retention.RunAsync(olderThanDays: 0.5, default);
 
         Assert.Null(report.Skipped);
         Assert.Equal([DateOnly.FromDateTime(Day1.UtcDateTime), DateOnly.FromDateTime(Day2.UtcDateTime)], report.Days.Select(d => d.Day).Order());
@@ -104,15 +104,66 @@ public sealed class JournalArchiveTests(SqlServerFixture sql) : IDisposable
         var live = await ReadModelDump.DumpAsync(store);
         Assert.Equal(live, await ReadModelDump.DumpAsync((await timeTravel.ResolveAsync(clock.Now.AddTicks(-1), default)).Model));
 
-        // Nothing left to do on a second run; a lifecycle event arriving late for an archived day is merged into its file.
-        Assert.Empty((await retention.RunAsync(olderThanDays: 0, default)).Days);
+        Assert.Empty((await retention.RunAsync(olderThanDays: 0.5, default)).Days);
+
+        // Part of today (before 09:36) is archived; a newer observation then arrives and the open day is merged again.
+        var partial = await retention.RunAsync(olderThanDays: 0.1, default);
+        Assert.Equal(DateOnly.FromDateTime(Day3.UtcDateTime), Assert.Single(partial.Days).Day);
+        foreach (var at in instants)
+        {
+            Assert.Equal(before[at], await AnswerAsync(queries, timeTravel, at));
+        }
+        await Observe(Day3.AddHours(11), () => state.PublishAsync(StateKinds.WorkItem, [Item("v5")], EventSourceKind.GitHub, default));
+        clock.Now = Day3.AddHours(12);
+        var afterV5 = Day3.AddHours(11).AddMinutes(30);
+        var answerAfterV5 = await AnswerAsync(queries, timeTravel, afterV5);
+        Assert.Single((await retention.RunAsync(olderThanDays: 0.01, default)).Days);
+        Assert.Equal(answerAfterV5, await AnswerAsync(queries, timeTravel, afterV5));
+        foreach (var at in instants)
+        {
+            Assert.Equal(before[at], await AnswerAsync(queries, timeTravel, at));
+        }
+        Assert.Equal(1, await app.ScalarAsync("SELECT COUNT(*) FROM ObservedEvents WHERE SubjectType = 'work-item'"));
+        Assert.Equal(await ReadModelDump.DumpAsync(store), await ReadModelDump.DumpAsync((await timeTravel.ResolveAsync(clock.Now.AddTicks(-1), default)).Model));
+
+        // A lifecycle event arriving late for an archived day is merged into its file.
         await store.AppendEventsIfNewAsync([Lifecycle("late", "dev.cdevents.change.merged", Day1.AddHours(15), null, EventOutcome.Success)], default);
-        var late = await retention.RunAsync(olderThanDays: 0, default);
+        var late = await retention.RunAsync(olderThanDays: 0.01, default);
         var lateDay = Assert.Single(late.Days);
         Assert.Equal(("late", 1), (lateDay.Reason, lateDay.LifecycleRemoved));
         var day1File = await archive.ReadDayAsync(DateOnly.FromDateTime(Day1.UtcDateTime), default).Select(e => e.IdempotencyKey).ToListAsync();
         Assert.Contains("test:late", day1File);
         Assert.Contains("test:push", day1File);
+    }
+
+    [Fact]
+    public async Task OverTheSizeBudgetEverythingButTheLastHourIsArchived()
+    {
+        var clock = new ManualClock(Day1.AddHours(10));
+        await using var app = new TwinAppFactory(await sql.CreateDatabaseAsync(), new Dictionary<string, string?>
+        {
+            ["Twin:Archive:Provider"] = "FileSystem",
+            ["Twin:Archive:Path"] = _archiveRoot,
+            ["Twin:JournalRetention:MaxJournalMb"] = "0"
+        }, s => s.AddSingleton<TimeProvider>(clock));
+        using var client = app.CreateAuthedClient();
+        var state = app.Services.GetRequiredService<StateObservationPublisher>();
+        foreach (var hour in new[] { 10, 11, 12 })
+        {
+            clock.Now = Day1.AddHours(hour);
+            var item = F.WorkItem();
+            item.Title = $"at {hour}";
+            await app.Services.TrackActivity().Timeout(TimeSpan.FromSeconds(60)).ExecuteAndWaitAsync((Func<IMessageContext, Task>)(_ =>
+                state.PublishAsync(StateKinds.WorkItem, [item], EventSourceKind.GitHub, default)));
+        }
+        clock.Now = Day1.AddHours(12).AddMinutes(30);
+
+        var report = await app.Services.GetRequiredService<JournalRetentionService>().RunAsync(olderThanDays: null, default);
+
+        Assert.Equal("size", Assert.Single(report.Days).Reason);
+        Assert.Equal(Day1.AddHours(11).AddMinutes(30), (await app.Services.GetRequiredService<IJournalArchive>().ReadMetaAsync(default))!.ArchivedThrough);
+        // 10:00 is superseded by 11:00 before the boundary; 11:00 stays (newest before it) and 12:00 is in the kept hour.
+        Assert.Equal(2, await app.ScalarAsync("SELECT COUNT(*) FROM ObservedEvents WHERE SubjectType = 'work-item'"));
     }
 
     private static async Task<string> AnswerAsync(TwinQueryService queries, TwinTimeTravel timeTravel, DateTimeOffset at)
