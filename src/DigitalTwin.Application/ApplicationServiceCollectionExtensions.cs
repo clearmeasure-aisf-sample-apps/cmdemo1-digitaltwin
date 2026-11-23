@@ -33,6 +33,8 @@ public static class ApplicationServiceCollectionExtensions
         services.AddSingleton<IntakeEventApplier>();
         services.AddSingleton<IIntakeEventApplier>(sp => sp.GetRequiredService<IntakeEventApplier>());
         services.Configure<RetentionOptions>(configuration.GetSection("Twin:Retention"));
+        services.Configure<StorageOptions>(configuration.GetSection("Twin:Storage"));
+        services.AddSingleton<StorageReadout>();
         services.AddSingleton<MaintenanceLock>();
         services.AddSingleton<RawIntakeHistory>();
         services.AddSingleton<RawIntakeRetentionService>();

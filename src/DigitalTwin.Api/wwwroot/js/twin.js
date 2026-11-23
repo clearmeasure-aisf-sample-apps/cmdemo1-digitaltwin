@@ -114,6 +114,20 @@
     if (pill) pill.title = `${a.active} active (${a.critical} critical)${a.titles.length ? ': ' + a.titles.join('; ') : ''}. Webhook ${a.sinkEnabled ? 'configured' : 'off'}.`;
   }
 
+  async function fetchStorage() {
+    const res = await fetch('/api/storage', { cache: 'no-store' });
+    if (!res.ok) return;
+    const s = await res.json();
+    const db = s.database;
+    setPill('storage', `${Math.round(db.usedMb)}/${Math.round(db.maxMb)} MB`, !s.rebuild.withinBudget ? 'warn' : 'ok');
+    const pill = document.querySelector('[data-source="storage"]');
+    if (pill) {
+      pill.title = `Database ${db.usedMb} of ${db.maxMb} MB · raw intake ${s.rawIntake.sizeMb} MB (${s.rawIntake.rows} rows, budget ${s.rawIntake.budgetMb} MB, ${s.rawIntake.archiveDays} archived days)` +
+        ` · journal ${s.journal.sizeMb} MB (${s.journal.rows} events, ${s.journal.stateRows} state observations)` +
+        ` · rebuild peak ${s.rebuild.projectedPeakMb} of ${s.rebuild.budgetMb} MB budget`;
+    }
+  }
+
   async function fetchAccuracy() {
     const res = await fetch('/api/reconciliation/status', { cache: 'no-store' });
     if (!res.ok) return;
@@ -1120,6 +1134,8 @@
   setInterval(() => fetchIntake().catch(() => {}), 5000);
   setInterval(() => fetchAccuracy().catch(() => {}), 60000);
   setInterval(() => fetchAlerts().catch(() => {}), 60000);
+  setInterval(() => fetchStorage().catch(() => {}), 300000);
+  fetchStorage().catch(() => {});
   fetchAlerts().catch(() => {});
   fetchAccuracy().catch(() => {});
 
