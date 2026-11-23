@@ -25,6 +25,7 @@ public class TwinDbContext : DbContext
     public const string StateAsOfIndexName = "IX_ObservedEvents_StateAsOf";
     public const string ChainIndexName = "IX_ObservedEvents_ChainId";
     public const string RecentJournalIndexName = "IX_ObservedEvents_Recent";
+    public const string TypeTimeIndexName = "IX_ObservedEvents_TypeTime";
 
     /// <summary>
     /// "Newest journal events that are not state observations" (dashboard, /api/events) reads this small filtered index
@@ -70,6 +71,8 @@ public class TwinDbContext : DbContext
             e.HasIndex(x => new { x.Source, x.OccurredAt });
             e.HasIndex(x => new { x.EventType, x.SubjectType, x.SubjectId, x.OccurredAt }).HasDatabaseName(StateAsOfIndexName);
             e.HasIndex(x => x.ChainId).HasDatabaseName(ChainIndexName);
+            // Earliest state observation (the start of time travel) is a single seek instead of a scan of every observation.
+            e.HasIndex(x => new { x.EventType, x.OccurredAt }).HasDatabaseName(TypeTimeIndexName);
             e.Property(x => x.IdempotencyKey).HasMaxLength(256);
             e.Property(x => x.EventId).HasMaxLength(128);
             e.Property(x => x.SourceEventId).HasMaxLength(200);

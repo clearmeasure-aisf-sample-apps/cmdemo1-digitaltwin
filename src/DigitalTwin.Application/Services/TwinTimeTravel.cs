@@ -12,6 +12,8 @@ public sealed class TwinTimeTravel(ITwinStore store, TimeProvider timeProvider)
 {
     private const int MaxCachedModels = 16;
     private static readonly TimeSpan CacheLifetime = TimeSpan.FromMinutes(2);
+    private static readonly TimeSpan HistoryStartLifetime = TimeSpan.FromMinutes(5);
+    private (DateTimeOffset At, DateTimeOffset Start)? _historyStart;
     private readonly ConcurrentDictionary<long, (DateTimeOffset BuiltAt, Lazy<Task<PointInTimeReadModel>> Model)> _cache = new();
 
     public async Task<TwinReadScope> ResolveAsync(DateTimeOffset? asOf, CancellationToken ct)
@@ -26,7 +28,18 @@ public sealed class TwinTimeTravel(ITwinStore store, TimeProvider timeProvider)
         return new TwinReadScope(await GetModelAsync(at, now), at, at);
     }
 
-    public Task<DateTimeOffset?> GetHistoryStartAsync(CancellationToken ct) => store.GetStateHistoryStartAsync(ct);
+    /// <summary>The first state observation. Read on every dashboard load; it only moves with a rebuild, so it is cached briefly once known.</summary>
+    public async Task<DateTimeOffset?> GetHistoryStartAsync(CancellationToken ct)
+    {
+        var now = timeProvider.GetUtcNow();
+        if (_historyStart is { } cached && now - cached.At < HistoryStartLifetime)
+        {
+            return cached.Start;
+        }
+        var start = await store.GetStateHistoryStartAsync(ct);
+        _historyStart = start is { } known ? (now, known) : null;
+        return start;
+    }
 
     private Task<PointInTimeReadModel> GetModelAsync(DateTimeOffset at, DateTimeOffset now)
     {
