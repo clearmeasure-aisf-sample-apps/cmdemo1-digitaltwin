@@ -100,6 +100,9 @@ public interface ITwinStore : ITwinReadModel
     /// </summary>
     Task<JournalCompaction> CompactJournalAsync(DateTimeOffset from, DateTimeOffset until, JournalKeepRule keep, CancellationToken ct);
 
+    /// <summary>Refreshes the journal's optimizer statistics (after large compactions, so plans do not turn into scans).</summary>
+    Task RefreshJournalStatisticsAsync(CancellationToken ct);
+
     /// <summary>Days before <paramref name="before"/> still holding rows a compaction would remove (rows that arrived after their day was archived).</summary>
     Task<IReadOnlyList<DateOnly>> GetCompactableJournalDaysAsync(DateTimeOffset before, JournalKeepRule keep, CancellationToken ct);
 

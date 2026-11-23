@@ -190,6 +190,10 @@ public sealed class JournalRetentionService(
         }
 
         var compaction = await store.CompactJournalAsync(start, end, Keep, ct);
+        if (compaction.SupersededStateRows + compaction.LifecycleRows > 1000)
+        {
+            await store.RefreshJournalStatisticsAsync(ct);
+        }
         return new JournalRetentionDay(day, written, subjects, compaction.SupersededStateRows, compaction.LifecycleRows, reason);
     }
 

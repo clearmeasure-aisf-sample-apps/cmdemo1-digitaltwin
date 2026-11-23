@@ -22,11 +22,20 @@ public sealed partial class EfTwinStore
         }
 
         // RANK keeps every row tied at the newest instant; the fold breaks ties by idempotency key (ordinal).
+        // Two steps: the newest ids come from the state-as-of index alone, then rows are fetched in short chunks by
+        // clustered key. As one "WHERE Id IN (…)" statement the optimizer could scan the whole journal (stale statistics
+        // after large compactions) and outlive the timeout on the Basic tier.
         var table = JournalTable(db);
-        var sql = "SELECT e.* FROM " + table + " e WHERE e.Id IN (SELECT r.Id FROM (" +
-                  "SELECT Id, RANK() OVER (PARTITION BY SubjectType, SubjectId ORDER BY OccurredAt DESC) AS Rk FROM " + table +
-                  " WHERE EventType = {0} AND OccurredAt <= {1}) r WHERE r.Rk = 1)";
-        return await db.ObservedEvents.FromSqlRaw(sql, StateKinds.EventType, asOf).AsNoTracking().ToListAsync(ct);
+        var idsSql = "SELECT r.Id AS [Value] FROM (SELECT Id, RANK() OVER (PARTITION BY SubjectType, SubjectId ORDER BY OccurredAt DESC) AS Rk FROM " + table +
+                     " WHERE EventType = {0} AND OccurredAt <= {1}) r WHERE r.Rk = 1";
+        var ids = await db.Database.SqlQueryRaw<long>(idsSql, StateKinds.EventType, asOf).ToListAsync(ct);
+        var rowsSql = "SELECT e.* FROM " + table + " e JOIN OPENJSON({0}) WITH (Id bigint '$') j ON e.Id = j.Id";
+        var events = new List<ObservedEvent>(ids.Count);
+        foreach (var chunk in ids.Chunk(500))
+        {
+            events.AddRange(await db.ObservedEvents.FromSqlRaw(rowsSql, JsonSerializer.Serialize(chunk)).AsNoTracking().ToListAsync(ct));
+        }
+        return events;
     }
 
     public async Task<DateTimeOffset?> GetStateHistoryStartAsync(CancellationToken ct)
