@@ -5,6 +5,7 @@ using DigitalTwin.Application.Intake;
 using DigitalTwin.Core.Intake;
 using DigitalTwin.Core.Observation;
 using DigitalTwin.Core.Ports;
+using DigitalTwin.Messaging;
 using DigitalTwin.Tests.Infrastructure;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.DependencyInjection.Extensions;
@@ -101,6 +102,37 @@ public sealed class IntakeDurabilityTests(SqlServerFixture sql)
         var after = await processorClient.GetFromJsonAsync<IntakeQueueStatus>("/api/intake", JsonWeb);
         Assert.Equal(0, after!.Depth);
         Assert.Equal("SqlServer", after.Transport);
+    }
+
+    [Fact]
+    public async Task EventsLeftInAQueueTheTwinNoLongerListensToAreRecoveredOnce()
+    {
+        var db = await sql.CreateDatabaseAsync();
+
+        // Captured onto the SQL Server queue, then the twin switches transport: nothing listens to that queue any more.
+        await using (var before = new TwinAppFactory(db, new Dictionary<string, string?> { ["Twin:Messaging:Transport"] = "SqlServer", ["Twin:Messaging:ProcessorEnabled"] = "false" }))
+        {
+            using var client = before.CreateAuthedClient();
+            Assert.Equal(HttpStatusCode.OK, (await client.SendAsync(TwinAppFactory.GitHubWebhook("ping", "switch-1", PingPayload))).StatusCode);
+            Assert.Equal(HttpStatusCode.OK, (await client.SendAsync(TwinAppFactory.OctopusWebhook("Events-switch-2"))).StatusCode);
+            Assert.Equal(HttpStatusCode.OK, (await client.SendAsync(TwinAppFactory.AzureWebhook("az-switch-3"))).StatusCode);
+            Assert.Equal(3, await before.ScalarAsync("SELECT COUNT(*) FROM twin.raw_intake_events"));
+        }
+
+        await using var after = new TwinAppFactory(db);
+        using var afterClient = after.CreateAuthedClient();
+        var recovery = after.Services.GetRequiredService<StrandedIntakeRecovery>();
+        Assert.Equal(0, await recovery.RecoverAsync(TimeSpan.FromMinutes(10), default));
+        Assert.Equal(3, await after.ScalarAsync("UPDATE twin.raw_intake_events SET received_at = DATEADD(minute, -20, received_at); SELECT @@ROWCOUNT"));
+
+        Assert.Equal(3, await recovery.RecoverAsync(TimeSpan.FromMinutes(10), default));
+        await TwinAppFactory.WaitUntilAsync(
+            async () => await after.ScalarAsync("SELECT COUNT(*) FROM twin.raw_intake_events WHERE processed_at IS NULL") == 0,
+            ProcessingTimeout,
+            "the recovered events are applied");
+        Assert.Equal(3, await after.ScalarAsync(
+            "SELECT COUNT(*) FROM ObservedEvents WHERE IdempotencyKey IN ('github:switch-1', 'octopus:Events-switch-2', 'azure:az-switch-3')"));
+        Assert.Equal(0, await recovery.RecoverAsync(TimeSpan.FromMinutes(10), default));
     }
 
     [Fact]

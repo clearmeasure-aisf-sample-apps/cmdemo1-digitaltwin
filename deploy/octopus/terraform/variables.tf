@@ -94,6 +94,12 @@ variable "platform_file" {
   default     = ""
 }
 
+variable "intake_transport" {
+  description = "Intake queue override: SqlServer switches the twin back to the SQL Server transport (the Service Bus namespace stays). Empty keeps the Bicep default, AzureServiceBus."
+  type        = string
+  default     = ""
+}
+
 variable "resource_group" {
   description = "Azure resource group that hosts the twin."
   type        = string

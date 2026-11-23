@@ -324,3 +324,9 @@ Following the domain research in the prompt's prior-art references:
 - **Not platform changes**: the twin's deployments go through cmdemo1's environment names, so the summary, DORA and stage cards exclude observer-pipeline deliveries. The twin's own pipeline row still shows them.
 - **State**: Terraform state is in a private container of the twin's storage account, because it holds the sensitive project variables.
 
+## ADR-034: Intake on Azure Service Bus With a Shared Access Key, SQL Server as Fallback
+
+- **Decision**: `Microsoft.ServiceBus` is registered, so the Bicep now deploys `sb-cmdemo1-twin` (Standard, queue `twin-intake`) and the intake listens to it. Authentication is a Send+Listen shared access key passed as a Container App secret, because the deploy principal is Contributor and cannot create role assignments. Managed identity remains a Bicep option.
+- **Fallback**: SQL Server stays the documented fallback, set by one setting (`intakeTransport`, `TWIN_INTAKE_TRANSPORT` or `Twin.IntakeTransport`) without removing the namespace. Durability does not depend on the queue: raw rows, the outbox and inbox, and dead letters are in SQL.
+- **Stranded messages**: a transport switch leaves messages in the queue nobody listens to. `StrandedIntakeRecovery` re-sends raw events still unprocessed 10 minutes after capture; processing is idempotent, so a re-send is harmless.
+

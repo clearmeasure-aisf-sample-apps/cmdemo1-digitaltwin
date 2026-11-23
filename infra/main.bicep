@@ -39,22 +39,22 @@ param webhookSecret string
 @secure()
 param twinApiKey string
 
-@description('Wolverine intake transport: SqlServer (queue table in the twin database) or LocalDurable (in-process durable queue). Ignored when deployServiceBus is true.')
+@description('Intake queue: AzureServiceBus (needs deployServiceBus) or SqlServer, the fallback in the twin database. Set SqlServer to switch back without removing the namespace.')
 @allowed([
+  'AzureServiceBus'
   'SqlServer'
-  'LocalDurable'
 ])
-param intakeTransport string = 'SqlServer'
+param intakeTransport string = 'AzureServiceBus'
 
-@description('Deploy sb-cmdemo1-twin and switch the intake to Azure Service Bus with managed identity. Requires Microsoft.ServiceBus to be registered and roleAssignments/write; disabled until a subscription Owner enables it.')
-param deployServiceBus bool = false
+@description('Deploy the twin\'s Service Bus namespace (sb-<slug>-twin, Standard) with the twin-intake queue. Requires Microsoft.ServiceBus to be registered in the subscription.')
+param deployServiceBus bool = true
 
 @description('How the twin authenticates to Service Bus when deployServiceBus is true: ManagedIdentity (needs roleAssignments/write) or SharedAccessKey (Contributor-compatible).')
 @allowed([
   'ManagedIdentity'
   'SharedAccessKey'
 ])
-param serviceBusAuth string = 'ManagedIdentity'
+param serviceBusAuth string = 'SharedAccessKey'
 
 @description('Archive raw intake events older than the retention window as compressed daily files in a private Blob container.')
 param deployArchive bool = true
@@ -277,7 +277,8 @@ module serviceBus 'servicebus.bicep' = if (deployServiceBus) {
   }
 }
 
-var serviceBusUsesKey = deployServiceBus && serviceBusAuth == 'SharedAccessKey'
+var intakeOnServiceBus = deployServiceBus && intakeTransport == 'AzureServiceBus'
+var serviceBusUsesKey = intakeOnServiceBus && serviceBusAuth == 'SharedAccessKey'
 
 resource serviceBusAppRule 'Microsoft.ServiceBus/namespaces/authorizationRules@2024-01-01' existing = if (serviceBusUsesKey) {
   name: '${serviceBusNamespaceName}/twin-intake-app'
@@ -293,14 +294,14 @@ var intakeEnv = serviceBusUsesKey
       { name: 'Twin__Messaging__Transport', value: 'AzureServiceBus' }
       { name: 'Twin__Messaging__ServiceBusConnectionString', secretRef: 'servicebus-connection' }
     ]
-  : deployServiceBus
+  : intakeOnServiceBus
   ? [
       { name: 'Twin__Messaging__Transport', value: 'AzureServiceBus' }
       { name: 'Twin__Messaging__ServiceBusNamespace', value: serviceBus!.outputs.namespaceFqdn }
       { name: 'Twin__Messaging__ManagedIdentityClientId', value: serviceBus!.outputs.identityClientId }
     ]
   : [
-      { name: 'Twin__Messaging__Transport', value: intakeTransport }
+      { name: 'Twin__Messaging__Transport', value: 'SqlServer' }
     ]
 
 var twinPublicUrl = 'https://${appName}.${managedEnvironment.properties.defaultDomain}'
@@ -314,7 +315,7 @@ resource twinApp 'Microsoft.App/containerApps@2025-01-01' = {
     allowAzureServices
     archiveContainer
   ]
-  identity: deployServiceBus && !serviceBusUsesKey
+  identity: intakeOnServiceBus && serviceBusAuth == 'ManagedIdentity'
     ? {
         type: 'UserAssigned'
         userAssignedIdentities: {
@@ -420,4 +421,4 @@ output keyVaultName string = keyVault.name
 output sqlServerName string = sqlServer.name
 output sqlDatabaseName string = sqlDatabase.name
 output archiveAccountName string = deployArchive ? archiveAccountName : ''
-output intakeTransport string = deployServiceBus ? 'AzureServiceBus' : intakeTransport
+output intakeTransport string = intakeOnServiceBus ? 'AzureServiceBus' : 'SqlServer'

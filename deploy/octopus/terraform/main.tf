@@ -84,6 +84,7 @@ locals {
     "Twin.OctopusSpace"       = var.space_id
     "Twin.PlatformFile"       = var.platform_file
     "Twin.RolloutEnvironment" = var.rollout_environment
+    "Twin.IntakeTransport"    = var.intake_transport
   }
 
   sensitive_names = ["Azure.ClientId", "Azure.ClientSecret", "Azure.TenantId", "Azure.SubscriptionId", "Twin.OctopusApiKey", "Twin.GitHubPat", "Twin.WebhookSecret", "Twin.ApiKey"]

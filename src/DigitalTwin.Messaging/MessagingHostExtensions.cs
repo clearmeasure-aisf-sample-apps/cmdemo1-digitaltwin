@@ -32,6 +32,8 @@ public static class MessagingHostExtensions
         builder.Services.AddSingleton<WolverineIntakeQueueMonitor>();
         builder.Services.AddSingleton<IIntakeQueueMonitor>(sp => sp.GetRequiredService<WolverineIntakeQueueMonitor>());
         builder.Services.AddSingleton<IDeadLetterAdmin, WolverineDeadLetterAdmin>();
+        builder.Services.AddSingleton<StrandedIntakeRecovery>();
+        builder.Services.AddHostedService(sp => sp.GetRequiredService<StrandedIntakeRecovery>());
 
         builder.UseWolverine(opts =>
         {
@@ -82,17 +84,19 @@ public static class MessagingHostExtensions
                 opts.PersistMessagesWithSqlServer(wolverineConnection, messaging.WolverineSchema);
                 if (string.IsNullOrWhiteSpace(messaging.ServiceBusConnectionString))
                 {
-                    opts.UseAzureServiceBus(messaging.ServiceBusNamespace, CreateServiceBusCredential(messaging)).AutoProvision();
+                    opts.UseAzureServiceBus(messaging.ServiceBusNamespace, CreateServiceBusCredential(messaging)).AutoProvision().SystemQueuesAreEnabled(false);
                 }
                 else
                 {
                     // Shared access key (Bicep creates the queue) or emulator (queue in docker/servicebus-emulator/config.json): no provisioning.
-                    opts.UseAzureServiceBus(messaging.ServiceBusConnectionString);
+                    // A Send+Listen key cannot create queues: no response/retry/control system queues.
+                    opts.UseAzureServiceBus(messaging.ServiceBusConnectionString).SystemQueuesAreEnabled(false);
                 }
                 opts.PublishMessage<TwinIntakeCaptured>().ToAzureServiceBusQueue(messaging.QueueName).UseDurableOutbox();
                 if (messaging.ProcessorEnabled)
                 {
-                    opts.ListenToAzureServiceBusQueue(messaging.QueueName).Sequential().UseDurableInbox();
+                    // Dead letters go to Wolverine's SQL dead letter table, as with the other transports, so counts and replay are unchanged.
+                    opts.ListenToAzureServiceBusQueue(messaging.QueueName).Sequential().UseDurableInbox().DisableDeadLetterQueueing();
                 }
                 break;
 

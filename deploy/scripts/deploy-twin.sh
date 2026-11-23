@@ -96,6 +96,11 @@ jq -n \
       "platformJson": { "value": $platformJson }
     }
   }' > "$PARAMS_FILE"
+# TWIN_INTAKE_TRANSPORT=SqlServer is the fallback switch off Service Bus (the namespace stays); empty keeps the Bicep default.
+if [ -n "${TWIN_INTAKE_TRANSPORT:-}" ]; then
+  jq --arg t "$TWIN_INTAKE_TRANSPORT" '.parameters.intakeTransport = { value: $t }' "$PARAMS_FILE" > "${PARAMS_FILE}.tmp" && mv "${PARAMS_FILE}.tmp" "$PARAMS_FILE"
+  chmod 600 "$PARAMS_FILE"
+fi
 
 if [ "$WHAT_IF" = "true" ]; then
   echo "== Gate: Bicep what-if for ${VERSION}"

@@ -17,6 +17,7 @@ export ACR_NAME=$(get_octopusvariable "Twin.AcrName")
 export IMAGE=$(get_octopusvariable "Twin.Image")
 export VERSION=$(get_octopusvariable "Octopus.Release.Number")
 export TWIN_SYSTEM_SLUG=$(get_octopusvariable "Twin.SystemSlug")
+export TWIN_INTAKE_TRANSPORT=$(get_octopusvariable "Twin.IntakeTransport")
 PLATFORM_FILE=$(get_octopusvariable "Twin.PlatformFile")
 if [ -n "$PLATFORM_FILE" ]; then export TWIN_PLATFORM_FILE="$PKG/$PLATFORM_FILE"; fi
 export TWIN_OUTPUT_FILE=$(mktemp)
