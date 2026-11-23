@@ -244,7 +244,11 @@ The setup guide is [docs/setup/README.md](docs/setup/README.md). [docs/teaching/
 
 Each push to `main` builds a **release candidate**: the image `cmdemo1/digitaltwin:1.0.<run>` in ACR, plus the Octopus package `cmdemo1-digitaltwin.1.0.<run>.zip`. The package holds the compiled ARM template, the Bicep sources, `deploy/scripts/*` and `scripts/register-hooks.sh`, and is kept as a workflow artifact. GitHub Actions deploys it with `deploy/scripts/deploy-twin.sh`, then gates it with `deploy/scripts/verify-twin.sh`: Healthy at the release version, 0 dead letters, database under budget, MCP answering.
 
-The twin's Octopus project is defined in `deploy/octopus/terraform`: one `Platform Twin` environment, a single-phase lifecycle, project variables, and three Bash steps that run those same scripts from the package. CI only formats and validates it. It is **not applied**: cmdemo1's Octopus space belongs to its owner, so no project, credential or team was created and nothing was promoted. [docs/octopus-apply.md](docs/octopus-apply.md) lists exactly what to apply, and the two repository variables that hand deploys to Octopus: `TWIN_OCTOPUS_RELEASES` and `TWIN_DEPLOY_VIA_OCTOPUS`, both unset.
+The twin's Octopus project `cmdemo1-digitaltwin` (Spaces-355) is defined in `deploy/octopus/terraform` and applied by `.github/workflows/octopus-config.yml`. It has its own lifecycle (tdd, then uat, then prod, each automatic), project variables, and four steps that run the same scripts from the package:
+- In tdd and uat, a gate: the image is in ACR, a Bicep what-if deletes nothing, and the live twin is healthy.
+- In prod, the rollout: deploy, register hooks, then the health gate at the release version.
+
+Existing environments, feeds and the worker pool are looked up and never changed, and no other cmdemo1 project is touched. Details: [docs/octopus-apply.md](docs/octopus-apply.md).
 
 ## Local Development & Verification (no Azure needed)
 

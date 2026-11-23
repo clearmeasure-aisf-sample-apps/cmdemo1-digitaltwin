@@ -37,6 +37,7 @@ public sealed class TwinQueryService(
         var prs = await model.GetSourceChangesAsync(ct);
         var runs = await model.GetPipelineRunsAsync(200, ct);
         var deliveries = await model.GetDeliveriesAsync(300, ct);
+        var platformDeliveries = PlatformDeliveries(deliveries);
         var stages = await model.GetEnvironmentInstancesAsync(ct);
         var workloads = await model.GetWorkloadsAsync(ct);
         var probes = await model.GetHealthProbesAsync(ct);
@@ -88,14 +89,14 @@ public sealed class TwinQueryService(
             var inst = stages.FirstOrDefault(s => s.StageName.Equals(stageDef.Name, StringComparison.OrdinalIgnoreCase));
             var stageWorkloads = workloads.Where(w => w.StageName.Equals(stageDef.Name, StringComparison.OrdinalIgnoreCase)).ToList();
             var stageProbes = probes.Where(p => p.StageName.Equals(stageDef.Name, StringComparison.OrdinalIgnoreCase)).ToList();
-            var stageDeliveries = deliveries.Where(d => d.StageName.Equals(stageDef.Name, StringComparison.OrdinalIgnoreCase)).Take(12).ToList();
+            var stageDeliveries = platformDeliveries.Where(d => d.StageName.Equals(stageDef.Name, StringComparison.OrdinalIgnoreCase)).Take(12).ToList();
             var stageDrifts = drifts.Where(dr => dr.StageName.Equals(stageDef.Name, StringComparison.OrdinalIgnoreCase)).ToList();
             return new StageSummaryDto(stageDef, inst, stageWorkloads, stageProbes, stageDeliveries, stageDrifts);
         }).ToList();
 
         var workSummary = ComputeWorkSummary(workItems);
-        var dora7 = DoraMetricsCalculator.Calculate(deliveries, workSummary.ReworkRate, now, 7, PlatformCatalog.ProductionStage);
-        var dora28 = DoraMetricsCalculator.Calculate(deliveries, workSummary.ReworkRate, now, 28, PlatformCatalog.ProductionStage);
+        var dora7 = DoraMetricsCalculator.Calculate(platformDeliveries, workSummary.ReworkRate, now, 7, PlatformCatalog.ProductionStage);
+        var dora28 = DoraMetricsCalculator.Calculate(platformDeliveries, workSummary.ReworkRate, now, 28, PlatformCatalog.ProductionStage);
 
         var (costMtd, costYesterday) = ParseSystemCost(desired?.CostJson);
 
@@ -437,7 +438,14 @@ public sealed class TwinQueryService(
         var deliveries = await scope.Model.GetDeliveriesAsync(1000, ct);
         var workItems = await scope.Model.GetWorkItemsAsync(ct);
         var workSummary = ComputeWorkSummary(workItems);
-        return DoraMetricsCalculator.Calculate(deliveries, workSummary.ReworkRate, scope.Now, Math.Clamp(windowDays, 1, 90), stage);
+        return DoraMetricsCalculator.Calculate(PlatformDeliveries(deliveries), workSummary.ReworkRate, scope.Now, Math.Clamp(windowDays, 1, 90), stage);
+    }
+
+    /// <summary>The twin's own deployments (observer pipeline) go through the same Octopus environments but are not platform changes.</summary>
+    private static List<DeliveryExecutionSnapshot> PlatformDeliveries(IEnumerable<DeliveryExecutionSnapshot> deliveries)
+    {
+        var observers = PlatformCatalog.Pipelines.Where(p => p.IsTwinObserver).Select(p => p.Id).ToHashSet(StringComparer.OrdinalIgnoreCase);
+        return deliveries.Where(d => !observers.Contains(d.PipelineId)).ToList();
     }
 
     public async Task<CausalExplanationDto> ExplainItemAsync(string query, DateTimeOffset? asOf, CancellationToken ct)

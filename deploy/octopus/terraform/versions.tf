@@ -6,6 +6,11 @@ terraform {
       version = "~> 1.22"
     }
   }
+
+  # State lives in a private container of the twin's own storage account; the octopus-config workflow passes
+  # resource_group_name, storage_account_name, container_name and key with -backend-config. State holds the sensitive
+  # project variables, so the container is private and only the deploying principal can read it.
+  backend "azurerm" {}
 }
 
 provider "octopusdeploy" {
