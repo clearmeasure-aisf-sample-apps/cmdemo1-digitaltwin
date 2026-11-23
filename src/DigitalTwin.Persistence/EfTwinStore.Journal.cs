@@ -1,3 +1,4 @@
+using System.Text.Json;
 using System.Runtime.CompilerServices;
 using DigitalTwin.Core.Observation;
 using DigitalTwin.Core.Ports;
@@ -11,6 +12,7 @@ public sealed partial class EfTwinStore
 {
     // Small batches with low deadlock priority and a breather in between: live intake keeps writing the journal meanwhile.
     private const int CompactionBatch = 500;
+    private const int StreamChunk = 500;
     private static readonly TimeSpan CompactionPause = TimeSpan.FromMilliseconds(250);
 
     public async Task<IReadOnlyList<DateOnly>> GetJournalDaysAsync(DateTimeOffset from, DateTimeOffset before, CancellationToken ct)
@@ -54,10 +56,22 @@ public sealed partial class EfTwinStore
             }
             yield break;
         }
-        await foreach (var ev in db.ObservedEvents.AsNoTracking().Where(e => e.OccurredAt >= from && e.OccurredAt < until)
-                           .OrderBy(e => e.OccurredAt).ThenBy(e => e.Id).AsAsyncEnumerable().WithCancellation(ct))
+        // One long query (key lookups for every payload, in occurrence order) outlived any timeout on a busy Basic tier:
+        // read the ids from the narrow OccurredAt index first, then fetch rows in short chunks by clustered key.
+        db.Database.SetCommandTimeout(TimeSpan.FromMinutes(2));
+        var ids = await db.ObservedEvents.AsNoTracking().Where(e => e.OccurredAt >= from && e.OccurredAt < until)
+            .OrderBy(e => e.OccurredAt).ThenBy(e => e.Id).Select(e => e.Id).ToListAsync(ct);
+        var sql = "SELECT e.* FROM " + JournalTable(db) + " e JOIN OPENJSON({0}) WITH (Id bigint '$') j ON e.Id = j.Id";
+        foreach (var chunk in ids.Chunk(StreamChunk))
         {
-            yield return ev;
+            var rows = await db.ObservedEvents.FromSqlRaw(sql, JsonSerializer.Serialize(chunk)).AsNoTracking().ToDictionaryAsync(e => e.Id, ct);
+            foreach (var id in chunk)
+            {
+                if (rows.TryGetValue(id, out var ev))
+                {
+                    yield return ev;
+                }
+            }
         }
     }
 
