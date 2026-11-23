@@ -9,7 +9,16 @@ PROJECT="${PROJECT:-cmdemo1-digitaltwin}"
 ENVIRONMENTS="${ENVIRONMENTS:-tdd uat prod}"
 B="${OCTOPUS_URL%/}"
 H="X-Octopus-ApiKey: ${OCTOPUS_API_KEY}"
-api() { curl -fsS -H "$H" "$@"; }
+# Octopus Cloud answers 503 now and then; every call retries with backoff and shows the response body if it still fails.
+api() {
+  local out
+  if ! out=$(curl -sS --fail-with-body --retry 6 --retry-all-errors --retry-delay 20 -H "$H" "$@"); then
+    echo "Octopus call failed: ${*: -1}" >&2
+    echo "$out" | head -c 1000 >&2
+    return 1
+  fi
+  printf '%s' "$out"
+}
 
 echo "== Package $(basename "$PACKAGE_FILE")"
 api -X POST -F "file=@${PACKAGE_FILE}" "${B}/api/${SPACE}/packages/raw?overwriteMode=IgnoreIfExists" | jq -c '{PackageId, Version}'
