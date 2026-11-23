@@ -1,3 +1,4 @@
+using System.Text.Json;
 using DigitalTwin.Core.Ports;
 using DigitalTwin.Core.Observation;
 using DigitalTwin.Core.Projections;
@@ -60,7 +61,18 @@ public sealed partial class EfTwinStore
         await using var db = await factory.CreateDbContextAsync(ct);
         db.Database.SetCommandTimeout(TimeSpan.FromMinutes(2));
         var ids = chainIds.ToList();
-        var query = db.ObservedEvents.AsNoTracking().Where(e => e.ChainId != null && ids.Contains(e.ChainId) && e.EventType != StateKinds.EventType);
+        IQueryable<ObservedEvent> query;
+        if (db.Database.IsSqlServer())
+        {
+            // Hundreds of chain ids as one IN list made the optimizer scan the whole journal (payloads included) once its
+            // statistics changed; OPENJSON is estimated small, so the ChainId index is seeked instead.
+            var sql = "SELECT e.* FROM " + JournalTable(db) + " e JOIN OPENJSON({0}) WITH (Id nvarchar(200) '$') j ON e.ChainId = j.Id WHERE e.EventType <> {1}";
+            query = db.ObservedEvents.FromSqlRaw(sql, JsonSerializer.Serialize(ids), StateKinds.EventType).AsNoTracking();
+        }
+        else
+        {
+            query = db.ObservedEvents.AsNoTracking().Where(e => e.ChainId != null && ids.Contains(e.ChainId) && e.EventType != StateKinds.EventType);
+        }
         if (eventTypes is { Count: > 0 })
         {
             var types = eventTypes.ToList();
