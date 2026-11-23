@@ -24,6 +24,17 @@ public class TwinDbContext : DbContext
 
     public const string StateAsOfIndexName = "IX_ObservedEvents_StateAsOf";
     public const string ChainIndexName = "IX_ObservedEvents_ChainId";
+    public const string RecentJournalIndexName = "IX_ObservedEvents_Recent";
+
+    /// <summary>
+    /// "Newest journal events that are not state observations" (dashboard, /api/events) reads this small filtered index
+    /// instead of walking past the state observations that make up most of the journal. Raw DDL because the filter needs
+    /// SQL Server syntax that matches the query's literal; the model stays provider-neutral for SQLite tests.
+    /// </summary>
+    public static string RecentJournalIndexDdl(string schema) => $"""
+        IF NOT EXISTS (SELECT 1 FROM sys.indexes WHERE name = '{RecentJournalIndexName}' AND object_id = OBJECT_ID('[{schema}].[ObservedEvents]'))
+        CREATE INDEX [{RecentJournalIndexName}] ON [{schema}].[ObservedEvents] ([OccurredAt] DESC, [Id] DESC) WHERE [EventType] <> N'twin.state.observed';
+        """;
 
     public DbSet<ObservedEvent> ObservedEvents => Set<ObservedEvent>();
     public DbSet<IngestionCursor> IngestionCursors => Set<IngestionCursor>();

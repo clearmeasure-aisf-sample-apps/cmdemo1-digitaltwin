@@ -36,6 +36,7 @@ public sealed class ShadowRebuildTarget(IDbContextFactory<TwinDbContext> live, I
         {
             await db.Database.ExecuteSqlRawAsync(batch, ct);
         }
+        await db.Database.ExecuteSqlRawAsync(TwinDbContext.RecentJournalIndexDdl(ShadowTwinDbContext.SchemaName), ct);
         return new EfTwinStore(new AsTwinContextFactory(shadow));
     }
 
@@ -61,6 +62,16 @@ public sealed class ShadowRebuildTarget(IDbContextFactory<TwinDbContext> live, I
                 await promote.ExecuteNonQueryAsync(ct);
             }
             await tx.CommitAsync(ct);
+        }
+        try
+        {
+            // The promoted tables are freshly loaded: refresh the journal's statistics before the first queries plan against it.
+            await using var stats = new SqlCommand("UPDATE STATISTICS [dbo].[ObservedEvents]", conn) { CommandTimeout = CommandTimeoutSeconds };
+            await stats.ExecuteNonQueryAsync(ct);
+        }
+        catch (SqlException)
+        {
+            // Best effort: SQL Server refreshes statistics on its own; the swap itself is committed.
         }
         await DropTablesAsync(db, RetiredSchema, ct);
         await DropTablesAsync(db, ShadowTwinDbContext.SchemaName, ct);
