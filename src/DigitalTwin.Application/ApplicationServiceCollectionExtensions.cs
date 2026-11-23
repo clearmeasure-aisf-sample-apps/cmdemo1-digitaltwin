@@ -28,6 +28,7 @@ public static class ApplicationServiceCollectionExtensions
         services.Configure<AlertRuleOptions>(configuration.GetSection("Twin:Alerts"));
         services.AddSingleton<AlertService>();
         services.AddHostedService<AlertHostedService>();
+        services.AddHostedService<StorageReadoutHostedService>();
         services.AddSingleton<TwinQueryService>();
 
         services.AddSingleton<IntakeEventApplier>();
