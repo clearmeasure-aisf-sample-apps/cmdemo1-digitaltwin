@@ -142,7 +142,7 @@ public sealed class TimeTravelTests(SqlServerFixture sql)
         var live = app.Services.GetRequiredService<ITwinStore>();
         var pointInTime = await timeTravel.ResolveAsync(clock.Now.AddTicks(-1), default);
         Assert.NotNull(pointInTime.AsOf);
-        Assert.Equal(await DumpAsync(live), await DumpAsync(pointInTime.Model));
+        Assert.Equal(await ReadModelDump.DumpAsync(live), await ReadModelDump.DumpAsync(pointInTime.Model));
     }
 
     private static WorkItemSnapshot WithColumn(WorkItemSnapshot item, string column, string state)
@@ -180,27 +180,4 @@ public sealed class TimeTravelTests(SqlServerFixture sql)
     private static async Task Track(TwinAppFactory app, Func<Task> action)
         => await app.Services.TrackActivity().Timeout(Timeout).ExecuteAndWaitAsync((Func<IMessageContext, Task>)(_ => action()));
 
-    private static async Task<Dictionary<string, string>> DumpAsync(ITwinReadModel model)
-    {
-        string J<T>(IEnumerable<T> rows) => JsonSerializer.Serialize(rows, IntakeJson.Options);
-        return new Dictionary<string, string>
-        {
-            ["repositories"] = J(await model.GetRepositoriesAsync(default)),
-            ["sourceChanges"] = J(await model.GetSourceChangesAsync(default)),
-            ["runs"] = J(await model.GetPipelineRunsAsync(int.MaxValue, default)),
-            ["artifacts"] = J(await model.GetArtifactsAsync(default)),
-            ["workItems"] = J(await model.GetWorkItemsAsync(default)),
-            ["releases"] = J(await model.GetReleasesAsync(int.MaxValue, default)),
-            ["deliveries"] = J(await model.GetDeliveriesAsync(int.MaxValue, default)),
-            ["runbooks"] = J(await model.GetRunbooksAsync(int.MaxValue, default)),
-            ["freezes"] = J(await model.GetFreezesAsync(default)),
-            ["desired"] = JsonSerializer.Serialize(await model.GetDesiredConfigAsync(default), IntakeJson.Options),
-            ["environments"] = J(await model.GetEnvironmentInstancesAsync(default)),
-            ["workloads"] = J(await model.GetWorkloadsAsync(default)),
-            ["azure"] = J(await model.GetAzureResourcesAsync(default)),
-            ["probes"] = J(await model.GetHealthProbesAsync(default)),
-            ["drift"] = J(await model.GetDriftFindingsAsync(includeResolved: true, default)),
-            ["webhooks"] = J(await model.GetWebhookStatusesAsync(default))
-        };
-    }
 }

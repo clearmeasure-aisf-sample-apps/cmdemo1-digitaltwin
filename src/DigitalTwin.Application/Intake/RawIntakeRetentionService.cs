@@ -14,7 +14,7 @@ public sealed class RetentionOptions
     /// Size budget for the raw table: while it is larger, the oldest complete days move to the archive even inside the
     /// retention window, keeping the Basic tier database well under its cap.
     /// </summary>
-    public double MaxRawMb { get; set; } = 500;
+    public double MaxRawMb { get; set; } = 350;
     public TimeSpan Interval { get; set; } = TimeSpan.FromHours(24);
 }
 

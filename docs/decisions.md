@@ -330,3 +330,19 @@ Following the domain research in the prompt's prior-art references:
 - **Fallback**: SQL Server stays the documented fallback, set by one setting (`intakeTransport`, `TWIN_INTAKE_TRANSPORT` or `Twin.IntakeTransport`) without removing the namespace. Durability does not depend on the queue: raw rows, the outbox and inbox, and dead letters are in SQL.
 - **Stranded messages**: a transport switch leaves messages in the queue nobody listens to. `StrandedIntakeRecovery` re-sends raw events still unprocessed 10 minutes after capture; processing is idempotent, so a re-send is harmless.
 
+## ADR-035: Archive and Compact the Event Journal, Keep History Complete
+
+- **Context**: on the Basic tier (2 GB) the journal reached 620 MB in about 2.5 days: 112,855 events. Payload by kind: work items 155 MB (mostly a flapping bug, fixed separately), Azure resource sets 96.5 MB, desired config 34 MB, lifecycle events about 40 MB, plus about 2.4 KB per row of keys and indexes. A rebuild recreates every table beside the live ones, so its peak was the live database plus the whole journal again: 1,473 MB on Nov 23.
+- **Decision**: once a day, after raw retention, whole UTC days (of occurrence) of the journal move to the archive. That is the same private container as the raw archive, holding one gzip JSON-lines file per day, merged with any earlier file and read back before anything is removed. Each archived day also gets a **checkpoint**: every subject's newest state observation at the end of that day, the exact input a point-in-time fold needs. SQL is then compacted:
+  - State observations superseded by a newer observation of the same subject before the end of the archived day are removed. Ties are kept, and **drift history stays whole**, because its fold needs every observation.
+  - Lifecycle events leave SQL unless change chains, DORA or config views read them: reviews, interventions, guided failures and failed deployments with a chain id; failed builds and jobs with a chain id; config changes.
+- **Window**: `Twin:JournalRetention:Days = 14`, two weeks of every event for investigations. It is paired with a size budget, `MaxJournalMb = 250`, that archives the oldest complete days early (never today). At current volume the budget, not the window, decides, as with raw intake. Raw intake's budget drops to 350 MB, so the database targets about 650 MB and a rebuild peak well under 1,500 MB.
+- **History stays complete**:
+  - **`asOf` at or after the archive boundary** folds SQL alone. The removed rows are each superseded by a kept one, so the newest observation per subject at any later instant is unchanged.
+  - **`asOf` inside an archived day** folds the checkpoint of the day before, that day's file, and SQL.
+  - **Every other view** (change chains, DORA, before/after, state-at, MCP) is built on those folds plus the lifecycle events SQL keeps.
+  - **History start** is recorded in the archive (`journal-meta.json`), because compaction can remove the very first observations.
+  - **Raw journal browsing** of archived days (every webhook or poll event, not only the kept ones) reads the day files. `/api/events` answers from SQL.
+- **Late rows**: lifecycle events can arrive with old timestamps (backfills). A run finds archived days that still hold removable rows, merges them into the day's file and compacts again.
+- **Verified by** `JournalArchiveTests`. It records three days of observations, lifecycle events and drift, archives two, and requires identical state-at answers and read-model dumps at six instants before and after, plus "as of now" equal to the live tables. It fails if archived days are not read.
+

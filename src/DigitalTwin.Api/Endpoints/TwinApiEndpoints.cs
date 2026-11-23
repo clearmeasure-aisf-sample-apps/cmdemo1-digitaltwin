@@ -171,6 +171,13 @@ public static class TwinApiEndpoints
             return wait == false ? Results.Accepted("/api/admin/storage", new { running = retention.Running }) : Results.Ok(await running);
         });
 
+        // Journal retention: archive whole days (age or size budget), checkpoint them, compact SQL (ADR-035).
+        protectedApi.MapPost("/admin/journal-retention/run", async (double? olderThanDays, bool? wait, JournalRetentionService journal) =>
+        {
+            var running = journal.StartOrJoin(olderThanDays is null ? null : Math.Max(0, olderThanDays.Value));
+            return wait == false ? Results.Accepted("/api/admin/storage", new { running = journal.Running }) : Results.Ok(await running);
+        });
+
         protectedApi.MapGet("/admin/storage", async (bool? detail, RawIntakeRetentionService retention, IRawIntakeArchive archive, IRawIntakeStore rawStore, ITwinStore store, StorageReadout readout, CancellationToken ct) =>
         {
             var days = await archive.ListDaysAsync(ct);
@@ -296,6 +303,7 @@ public static class TwinApiEndpoints
             - POST {{baseUrl}}/api/admin/deadletters/replay — Replay dead letters (all, or ids in the JSON body) [X-Twin-Key]
             - POST {{baseUrl}}/api/admin/rebuild[?force=true&wait=false] — Rebuild the journal and ALL read models from the raw history into shadow tables without pausing intake; swaps them in atomically only when the read models match live (or force); reports fingerprints [X-Twin-Key]
             - POST {{baseUrl}}/api/admin/retention/run[?olderThanDays=&wait=false] — Archive whole days of processed raw events to Blob Storage, then prune them from SQL [X-Twin-Key]
+            - POST {{baseUrl}}/api/admin/journal-retention/run[?olderThanDays=&wait=false] — Archive whole journal days to Blob with end-of-day state checkpoints, then compact SQL [X-Twin-Key]
             - GET {{baseUrl}}/api/storage — Database MB against its cap, raw intake and journal sizes, archive days, and the projected rebuild peak against its budget (public)
             - GET {{baseUrl}}/api/admin/storage[?detail=true] — Database usage, raw intake counts, journal composition (detail: payload MB per kind), archive days, last retention run [X-Twin-Key]
             - POST {{baseUrl}}/api/admin/rebuild/cancel — Stop a running rebuild; its shadow tables are discarded and live state is untouched [X-Twin-Key]

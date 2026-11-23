@@ -75,7 +75,13 @@ param alertFormat string = 'Slack'
 param retentionDays int = 30
 
 @description('Size budget for the raw intake table in SQL (MB): above it, the oldest complete days are archived early.')
-param retentionMaxRawMb int = 500
+param retentionMaxRawMb int = 350
+
+@description('Days of event journal kept whole in SQL; older days move to the archive with end-of-day state checkpoints (ADR-035).')
+param journalRetentionDays int = 14
+
+@description('Size budget for the event journal in SQL (MB): above it, the oldest complete days are archived early.')
+param journalMaxMb int = 250
 
 @description('Short name of the observed system; names every twin resource (log-<slug>-twin, ca-<slug>-twin, ...). Changing it on an existing deployment creates new resources.')
 param systemSlug string = 'cmdemo1'
@@ -254,6 +260,8 @@ var archiveEnv = deployArchive
       { name: 'Twin__Archive__ConnectionString', secretRef: 'archive-connection' }
       { name: 'Twin__Retention__Days', value: string(retentionDays) }
       { name: 'Twin__Retention__MaxRawMb', value: string(retentionMaxRawMb) }
+      { name: 'Twin__JournalRetention__Days', value: string(journalRetentionDays) }
+      { name: 'Twin__JournalRetention__MaxJournalMb', value: string(journalMaxMb) }
     ]
   : [
       { name: 'Twin__Archive__Provider', value: 'None' }
