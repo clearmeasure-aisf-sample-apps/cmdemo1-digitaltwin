@@ -91,8 +91,11 @@ public interface ITwinStore : ITwinReadModel
     /// <summary>UTC days (of occurrence) that hold journal rows, from <paramref name="from"/> up to, not including, <paramref name="before"/>.</summary>
     Task<IReadOnlyList<DateOnly>> GetJournalDaysAsync(DateTimeOffset from, DateTimeOffset before, CancellationToken ct);
 
-    /// <summary>Journal rows that occurred in [<paramref name="from"/>, <paramref name="until"/>), oldest first, streamed.</summary>
-    IAsyncEnumerable<ObservedEvent> StreamJournalAsync(DateTimeOffset from, DateTimeOffset until, CancellationToken ct);
+    /// <summary>
+    /// Journal rows that occurred in [<paramref name="from"/>, <paramref name="until"/>), oldest first, streamed; rows whose
+    /// id is in <paramref name="skip"/> (already archived) are never fetched.
+    /// </summary>
+    IAsyncEnumerable<ObservedEvent> StreamJournalAsync(DateTimeOffset from, DateTimeOffset until, IReadOnlySet<long>? skip, CancellationToken ct);
 
     /// <summary>
     /// After [<paramref name="from"/>, <paramref name="until"/>) is archived: removes state observations (drift excepted)

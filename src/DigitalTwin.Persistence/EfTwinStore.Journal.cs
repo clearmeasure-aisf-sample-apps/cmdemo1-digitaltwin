@@ -43,14 +43,15 @@ public sealed partial class EfTwinStore
         return days;
     }
 
-    public async IAsyncEnumerable<ObservedEvent> StreamJournalAsync(DateTimeOffset from, DateTimeOffset until, [EnumeratorCancellation] CancellationToken ct)
+    public async IAsyncEnumerable<ObservedEvent> StreamJournalAsync(DateTimeOffset from, DateTimeOffset until, IReadOnlySet<long>? skip,
+        [EnumeratorCancellation] CancellationToken ct)
     {
         await using var db = await factory.CreateDbContextAsync(ct);
         db.Database.SetCommandTimeout(TimeSpan.FromMinutes(10));
         if (db.Database.IsSqlite())
         {
             var all = await db.ObservedEvents.AsNoTracking().ToListAsync(ct);
-            foreach (var ev in all.Where(e => e.OccurredAt >= from && e.OccurredAt < until).OrderBy(e => e.OccurredAt).ThenBy(e => e.Id))
+            foreach (var ev in all.Where(e => e.OccurredAt >= from && e.OccurredAt < until && skip?.Contains(e.Id) != true).OrderBy(e => e.OccurredAt).ThenBy(e => e.Id))
             {
                 yield return ev;
             }
@@ -61,6 +62,10 @@ public sealed partial class EfTwinStore
         db.Database.SetCommandTimeout(TimeSpan.FromMinutes(2));
         var ids = await db.ObservedEvents.AsNoTracking().Where(e => e.OccurredAt >= from && e.OccurredAt < until)
             .OrderBy(e => e.OccurredAt).ThenBy(e => e.Id).Select(e => e.Id).ToListAsync(ct);
+        if (skip is { Count: > 0 })
+        {
+            ids = ids.Where(id => !skip.Contains(id)).ToList();
+        }
         var sql = "SELECT e.* FROM " + JournalTable(db) + " e JOIN OPENJSON({0}) WITH (Id bigint '$') j ON e.Id = j.Id";
         foreach (var chunk in ids.Chunk(StreamChunk))
         {
@@ -91,19 +96,20 @@ public sealed partial class EfTwinStore
         await db.Database.ExecuteSqlRawAsync("SET DEADLOCK_PRIORITY LOW", ct);
         // Superseded: a newer observation of the same subject before the end of the day exists, so no fold at or after
         // the end of the day can pick this row (ties at the newest instant are all kept; the fold breaks them by key).
-        var stateSql =
-            "DELETE TOP (" + CompactionBatch + ") e FROM " + table + " e WHERE e.EventType = {0} AND e.SubjectType <> {1} AND e.OccurredAt < {2} " +
-            "AND EXISTS (SELECT 1 FROM " + table + " n WHERE n.EventType = {0} AND n.SubjectType = e.SubjectType AND n.SubjectId = e.SubjectId " +
-            "AND n.OccurredAt > e.OccurredAt AND n.OccurredAt < {2})";
+        // A DELETE TOP with that EXISTS scanned the whole clustered index (payloads in-row) once per batch on a Basic
+        // tier: pick the ids from the narrow (EventType, SubjectType, SubjectId, OccurredAt) index, then delete by key.
+        var supersededSql =
+            "SELECT x.Id AS [Value] FROM (SELECT Id, OccurredAt, MAX(OccurredAt) OVER (PARTITION BY SubjectType, SubjectId) AS Newest " +
+            "FROM " + table + " WHERE EventType = {0} AND SubjectType <> {1} AND OccurredAt < {2}) x WHERE x.OccurredAt < x.Newest";
+        var supersededIds = await db.Database.SqlQueryRaw<long>(supersededSql, StateKinds.EventType, StateKinds.Drift.Name, end).ToListAsync(ct);
+        var deleteSql = "DELETE e FROM " + table + " e JOIN OPENJSON({0}) WITH (Id bigint '$') j ON e.Id = j.Id OPTION (LOOP JOIN)";
         var superseded = 0;
-        int deleted;
-        do
+        foreach (var chunk in supersededIds.Chunk(CompactionBatch))
         {
-            deleted = await db.Database.ExecuteSqlRawAsync(stateSql, [StateKinds.EventType, StateKinds.Drift.Name, end], ct);
-            superseded += deleted;
+            superseded += await db.Database.ExecuteSqlRawAsync(deleteSql, [JsonSerializer.Serialize(chunk)], ct);
             await Task.Delay(CompactionPause, ct);
         }
-        while (deleted > 0);
+        int deleted;
 
         var parameters = new List<object> { StateKinds.EventType, start, end, (int)EventOutcome.Failure };
         string In(IReadOnlyList<string> values)
@@ -133,7 +139,7 @@ public sealed partial class EfTwinStore
     public async Task<IReadOnlyList<DateOnly>> GetCompactableJournalDaysAsync(DateTimeOffset before, JournalKeepRule keep, CancellationToken ct)
     {
         await using var db = await factory.CreateDbContextAsync(ct);
-        db.Database.SetCommandTimeout(TimeSpan.FromMinutes(2));
+        db.Database.SetCommandTimeout(TimeSpan.FromMinutes(5));
         var lifecycle = db.ObservedEvents.AsNoTracking().Where(e => e.EventType != StateKinds.EventType);
         if (db.Database.IsSqlite())
         {

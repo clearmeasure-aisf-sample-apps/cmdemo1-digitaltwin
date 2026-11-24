@@ -131,6 +131,8 @@ public sealed class JournalArchiveTests(SqlServerFixture sql) : IDisposable
         var late = await retention.RunAsync(olderThanDays: 0.01, default);
         var lateDay = Assert.Single(late.Days);
         Assert.Equal(("late", 1), (lateDay.Reason, lateDay.LifecycleRemoved));
+        // Only the late row is read out of SQL; what the day file already holds is not fetched again.
+        Assert.Equal(1, lateDay.FetchedFromSql);
         var day1File = await archive.ReadDayAsync(DateOnly.FromDateTime(Day1.UtcDateTime), default).Select(e => e.IdempotencyKey).ToListAsync();
         Assert.Contains("test:late", day1File);
         Assert.Contains("test:push", day1File);
