@@ -158,8 +158,21 @@ public static class TwinApiEndpoints
 
         // Full rebuild of the journal and every read model from the raw intake store.
         // Refuses (Aborted) when the raw store cannot reproduce every live row, unless force=true.
-        protectedApi.MapPost("/admin/rebuild", async (bool? wait, bool? force, IntakeRebuildService rebuild) =>
+        protectedApi.MapPost("/admin/rebuild", async (bool? wait, bool? force, IntakeRebuildService rebuild, StorageReadout storage) =>
         {
+            // Budget guard: a rebuild builds a shadow copy beside the live tables; refuse when that would not fit (force overrides).
+            if (force != true && !rebuild.IsRunning)
+            {
+                var readout = await storage.Refresh();
+                if (!readout.Rebuild.WithinBudget)
+                {
+                    return Results.Conflict(new
+                    {
+                        error = $"A rebuild would peak at {readout.Rebuild.ProjectedPeakMb} MB, over the {readout.Rebuild.BudgetMb} MB budget. Archive the journal first (POST /api/admin/journal-retention/run) or pass force=true.",
+                        readout.Rebuild
+                    });
+                }
+            }
             var running = rebuild.StartOrJoin(force ?? false);
             return wait == false ? Results.Accepted("/api/admin/rebuild/status", rebuild.GetStatus()) : Results.Ok(await running);
         });
@@ -180,7 +193,7 @@ public static class TwinApiEndpoints
                 : Results.Ok(await running);
         });
 
-        protectedApi.MapGet("/admin/storage", async (bool? detail, RawIntakeRetentionService retention, IRawIntakeArchive archive, IRawIntakeStore rawStore, ITwinStore store, StorageReadout readout, CancellationToken ct) =>
+        protectedApi.MapGet("/admin/storage", async (bool? detail, RawIntakeRetentionService retention, JournalRetentionService journalRetention, IRawIntakeArchive archive, IRawIntakeStore rawStore, ITwinStore store, StorageReadout readout, CancellationToken ct) =>
         {
             var days = await archive.ListDaysAsync(ct);
             // The health gate reads this right after a deploy: journal figures come from the background readout, never awaited here.
@@ -198,7 +211,8 @@ public static class TwinApiEndpoints
                 readoutAt = storage?.At,
                 readoutTimingsMs = storage?.TimingsMs,
                 archive = new { enabled = archive.IsEnabled, location = archive.Location, days = days.Count, oldestDay = days.Count > 0 ? days[0] : (DateOnly?)null, newestDay = days.Count > 0 ? days[^1] : (DateOnly?)null },
-                retention = new { running = retention.Running, lastReport = retention.LastReport, lastError = retention.LastError }
+                retention = new { running = retention.Running, lastReport = retention.LastReport, lastError = retention.LastError },
+                journalRetention = new { running = journalRetention.Running, lastReport = journalRetention.LastReport, lastError = journalRetention.LastError }
             });
         });
 
@@ -303,7 +317,7 @@ public static class TwinApiEndpoints
             - GET {{baseUrl}}/api/intake — Durable intake queue: depth, oldest pending age, dead letters, transport [X-Twin-Key]
             - GET {{baseUrl}}/api/admin/deadletters — Dead-lettered intake messages [X-Twin-Key]
             - POST {{baseUrl}}/api/admin/deadletters/replay — Replay dead letters (all, or ids in the JSON body) [X-Twin-Key]
-            - POST {{baseUrl}}/api/admin/rebuild[?force=true&wait=false] — Rebuild the journal and ALL read models from the raw history into shadow tables without pausing intake; swaps them in atomically only when the read models match live (or force); reports fingerprints [X-Twin-Key]
+            - POST {{baseUrl}}/api/admin/rebuild[?force=true&wait=false] — Rebuild the journal and ALL read models from the raw history into shadow tables without pausing intake (the shadow journal is compacted to the archive boundary); swaps them in atomically only when the read models match live (or force); refuses with 409 when the projected peak exceeds Twin:Storage:RebuildPeakBudgetMb (force overrides) [X-Twin-Key]
             - POST {{baseUrl}}/api/admin/retention/run[?olderThanDays=&wait=false] — Archive whole days of processed raw events to Blob Storage, then prune them from SQL [X-Twin-Key]
             - POST {{baseUrl}}/api/admin/journal-retention/run[?olderThanDays=&wait=false] — Archive whole journal days to Blob with end-of-day state checkpoints, then compact SQL [X-Twin-Key]
             - GET {{baseUrl}}/api/storage — Database MB against its cap, raw intake and journal sizes, archive days, and the projected rebuild peak against its budget (public)

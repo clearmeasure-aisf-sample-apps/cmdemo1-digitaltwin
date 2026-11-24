@@ -60,7 +60,11 @@ public interface ITwinStore : ITwinReadModel
     Task<int> ApplyStateObservationsAsync(IReadOnlyList<ObservedEvent> stateEvents, CancellationToken ct);
     Task ClearReadModelsAsync(CancellationToken ct);
     Task<int> CountProjectionVersionsAsync(CancellationToken ct);
-    Task<IReadOnlyDictionary<string, string>> GetReadModelFingerprintAsync(CancellationToken ct);
+    /// <summary>Fingerprint per read model; <paramref name="includeJournal"/> adds the whole journal under "journal".</summary>
+    Task<IReadOnlyDictionary<string, string>> GetReadModelFingerprintAsync(CancellationToken ct, bool includeJournal = true);
+
+    /// <summary>Fingerprint of the journal rows that occurred before <paramref name="before"/> ("count:checksum").</summary>
+    Task<string> GetJournalFingerprintAsync(DateTimeOffset before, CancellationToken ct);
 
     // Time travel: the journal's state observations as they stood at a point in time.
     /// <summary>The newest state observation per (kind, subject) that occurred at or before <paramref name="asOf"/>.</summary>

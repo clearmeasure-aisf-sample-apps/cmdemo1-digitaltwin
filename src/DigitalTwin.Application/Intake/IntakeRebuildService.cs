@@ -1,5 +1,6 @@
 using DigitalTwin.Core.Intake;
 using DigitalTwin.Core.Ports;
+using DigitalTwin.Core.Projections;
 
 namespace DigitalTwin.Application.Intake;
 
@@ -21,7 +22,9 @@ public sealed record IntakeRebuildReport(
     bool Swapped = false,
     int CatchUpEventsReplayed = 0,
     double LivePausedMilliseconds = 0,
-    IReadOnlyDictionary<string, double>? StepSeconds = null);
+    IReadOnlyDictionary<string, double>? StepSeconds = null,
+    DateTimeOffset? JournalArchivedThrough = null,
+    JournalCompaction? ShadowCompaction = null);
 
 public sealed record IntakeRebuildStatus(
     bool Running,
@@ -33,10 +36,11 @@ public sealed record IntakeRebuildStatus(
 
 /// <summary>
 /// Rebuilds ALL twin state (event journal and every read model) from the raw intake history (archive + SQL) into shadow
-/// tables while live intake keeps running. Events processed live meanwhile are caught up; the last round runs under the
-/// projection gate (a pause of seconds), where shadow and live fingerprints are compared. The shadow replaces live state
-/// atomically only if its read models are identical (or <c>force</c>); otherwise it is discarded. Interrupted at any
-/// point before the swap, live state is untouched.
+/// tables while live intake keeps running. The shadow journal is compacted to the journal archive boundary as the replay
+/// goes (ADR-036), so the shadow never holds what the live journal has already archived. Events processed live meanwhile
+/// are caught up; the journals are compared before the last round, which runs under the projection gate and compares only
+/// the read models (a pause of seconds). The shadow replaces live state atomically only if its read models are identical
+/// (or <c>force</c>); otherwise it is discarded. Interrupted at any point before the swap, live state is untouched.
 /// </summary>
 public sealed class IntakeRebuildService(
     RawIntakeHistory history,
@@ -47,9 +51,13 @@ public sealed class IntakeRebuildService(
     IntakeEventApplier applier,
     ProjectionGate gate,
     IRealtimeEventPublisher realtime,
+    IJournalArchive journalArchive,
     TimeProvider timeProvider) : IDisposable
 {
     private const int PageSize = 200;
+    private const int CompactEveryPages = 50;
+    // Journal rows this recent can still be in flight between live and shadow when the journals are compared.
+    private static readonly TimeSpan JournalComparisonLag = TimeSpan.FromMinutes(15);
     private const int MaxCatchUpRounds = 5;
     private const int SmallCatchUp = 50;
     // The journal can legitimately differ after a normalization change; read models must not.
@@ -152,11 +160,28 @@ public sealed class IntakeRebuildService(
             var run = new ReplayRun(shadow);
             Step("prepare");
 
+            var boundary = await JournalBoundaryAsync(ct);
+            var compacted = new JournalCompaction(0, 0);
+            async Task CompactShadowAsync()
+            {
+                if (boundary is { } through)
+                {
+                    var c = await shadow.CompactJournalAsync(DateTimeOffset.MinValue, through, JournalRetentionService.Keep, ct);
+                    compacted = new JournalCompaction(compacted.SupersededStateRows + c.SupersededStateRows, compacted.LifecycleRows + c.LifecycleRows);
+                }
+            }
+
             _phase = "replaying history";
+            var pages = 0;
             await foreach (var page in history.ReadPagesAsync(PageSize, ct))
             {
                 await ReplayAsync(run, page, ct);
+                if (++pages % CompactEveryPages == 0)
+                {
+                    await CompactShadowAsync();
+                }
             }
+            await CompactShadowAsync();
 
             Step("replay");
             _phase = "catching up";
@@ -172,6 +197,16 @@ public sealed class IntakeRebuildService(
             }
 
             Step("catchUp");
+            _phase = "comparing journals";
+            var journalBefore = timeProvider.GetUtcNow() - JournalComparisonLag;
+            var liveJournalTask = store.GetJournalFingerprintAsync(journalBefore, ct);
+            var shadowJournalTask = shadow.GetJournalFingerprintAsync(journalBefore, ct);
+            await Task.WhenAll(liveJournalTask, shadowJournalTask);
+            var liveJournal = await liveJournalTask;
+            var shadowJournal = await shadowJournalTask;
+            var liveJournalRows = (int)(await store.GetJournalUsageAsync(detail: false, ct)).Rows;
+            Step("journalFingerprints");
+
             _phase = "final catch-up and swap";
             IReadOnlyDictionary<string, string> live;
             IReadOnlyDictionary<string, string> rebuilt;
@@ -186,18 +221,18 @@ public sealed class IntakeRebuildService(
                 catchUp += await CatchUpAsync(run, ct);
                 Step("finalCatchUp");
                 // In parallel: each reads only its own schema, and this is the part of the swap that holds the gate.
-                var liveTask = store.GetReadModelFingerprintAsync(ct);
-                var shadowTask = shadow.GetReadModelFingerprintAsync(ct);
+                var liveTask = store.GetReadModelFingerprintAsync(ct, includeJournal: false);
+                var shadowTask = shadow.GetReadModelFingerprintAsync(ct, includeJournal: false);
                 await Task.WhenAll(liveTask, shadowTask);
-                live = await liveTask;
-                rebuilt = await shadowTask;
+                live = WithJournal(await liveTask, liveJournal);
+                rebuilt = WithJournal(await shadowTask, shadowJournal);
                 Step("fingerprints");
                 differences = live.Keys.Union(rebuilt.Keys)
                     .Where(k => !string.Equals(live.GetValueOrDefault(k), rebuilt.GetValueOrDefault(k), StringComparison.Ordinal))
                     .Select(k => $"{k}: {live.GetValueOrDefault(k) ?? "-"} -> {rebuilt.GetValueOrDefault(k) ?? "-"}")
                     .ToList();
                 readModelsIdentical = differences.All(d => d.StartsWith(JournalFingerprintKey + ":", StringComparison.Ordinal));
-                journalReplaced = JournalCount(live);
+                journalReplaced = liveJournalRows;
                 if (readModelsIdentical || force)
                 {
                     await target.SwapAsync(ct);
@@ -215,7 +250,8 @@ public sealed class IntakeRebuildService(
             return new IntakeRebuildReport(
                 startedAt, finishedAt, journalReplaced, run.Replayed, run.Failures.Count, run.Appended,
                 differences.Count == 0, readModelsIdentical, live, rebuilt, differences, run.Failures.Take(20).ToList(),
-                Aborted: !swapped, Swapped: swapped, CatchUpEventsReplayed: catchUp, LivePausedMilliseconds: Math.Round(pausedMs), StepSeconds: steps);
+                Aborted: !swapped, Swapped: swapped, CatchUpEventsReplayed: catchUp, LivePausedMilliseconds: Math.Round(pausedMs), StepSeconds: steps,
+                JournalArchivedThrough: boundary, ShadowCompaction: compacted);
         }
         finally
         {
@@ -224,6 +260,32 @@ public sealed class IntakeRebuildService(
                 await target.DiscardAsync(CancellationToken.None);
             }
         }
+    }
+
+    private static SortedDictionary<string, string> WithJournal(IReadOnlyDictionary<string, string> readModels, string journal)
+    {
+        var all = new SortedDictionary<string, string>(StringComparer.Ordinal) { [JournalFingerprintKey] = journal };
+        foreach (var (key, value) in readModels)
+        {
+            all[key] = value;
+        }
+        return all;
+    }
+
+    /// <summary>Where the live journal is archived through; the shadow is compacted to the same instant.</summary>
+    private async Task<DateTimeOffset?> JournalBoundaryAsync(CancellationToken ct)
+    {
+        if (!journalArchive.IsEnabled)
+        {
+            return null;
+        }
+        var meta = await journalArchive.ReadMetaAsync(ct);
+        if (meta?.ArchivedThrough is { } through)
+        {
+            return through;
+        }
+        var days = await journalArchive.ListDaysAsync(ct);
+        return days.Count > 0 ? JournalArchiveFormat.StartOf(days[^1].AddDays(1)) : null;
     }
 
     private sealed class ReplayRun(ITwinStore shadow)
@@ -295,6 +357,4 @@ public sealed class IntakeRebuildService(
         return run.Replayed - before;
     }
 
-    private static int JournalCount(IReadOnlyDictionary<string, string> fingerprint)
-        => fingerprint.TryGetValue(JournalFingerprintKey, out var value) && int.TryParse(value.Split(':')[0], out var count) ? count : 0;
 }

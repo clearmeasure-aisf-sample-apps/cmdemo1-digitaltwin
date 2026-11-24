@@ -224,7 +224,7 @@ public sealed partial class EfTwinStore
     }
 
     /// <summary>Per read model "count:hash" over every row (journal excludes its surrogate Id).</summary>
-    public async Task<IReadOnlyDictionary<string, string>> GetReadModelFingerprintAsync(CancellationToken ct)
+    public async Task<IReadOnlyDictionary<string, string>> GetReadModelFingerprintAsync(CancellationToken ct, bool includeJournal = true)
     {
         await using var db = await factory.CreateDbContextAsync(ct);
         db.Database.SetCommandTimeout(TimeSpan.FromMinutes(5));
@@ -249,8 +249,17 @@ public sealed partial class EfTwinStore
             ["projection-version"] = await Fingerprint(db.ProjectionVersions, r => $"{r.Kind}|{r.Key}", ct)
         };
 
-        result["journal"] = db.Database.IsSqlServer() ? await JournalFingerprintSqlServerAsync(db, ct) : await JournalFingerprintStreamedAsync(db, ct);
+        if (includeJournal)
+        {
+            result["journal"] = db.Database.IsSqlServer() ? await JournalFingerprintSqlServerAsync(db, null, ct) : await JournalFingerprintStreamedAsync(db, null, ct);
+        }
         return result;
+    }
+
+    public async Task<string> GetJournalFingerprintAsync(DateTimeOffset before, CancellationToken ct)
+    {
+        await using var db = await factory.CreateDbContextAsync(ct);
+        return db.Database.IsSqlServer() ? await JournalFingerprintSqlServerAsync(db, before, ct) : await JournalFingerprintStreamedAsync(db, before, ct);
     }
 
     /// <summary>
@@ -259,23 +268,29 @@ public sealed partial class EfTwinStore
     /// observation keys embed their content hash; type, subject and time cover the rest. Read models are fingerprinted
     /// in full separately. BINARY_CHECKSUM is case-sensitive; CHECKSUM_AGG is order-independent.
     /// </summary>
-    private static async Task<string> JournalFingerprintSqlServerAsync(TwinDbContext db, CancellationToken ct)
+    private static async Task<string> JournalFingerprintSqlServerAsync(TwinDbContext db, DateTimeOffset? before, CancellationToken ct)
     {
         db.Database.SetCommandTimeout(TimeSpan.FromMinutes(5));
         var table = JournalTable(db);
-        var keysSql = "SELECT COUNT_BIG(*) AS [Count], ISNULL(CHECKSUM_AGG(BINARY_CHECKSUM(IdempotencyKey)), 0) AS [Checksum] FROM " + table;
-        var shapeSql = "SELECT COUNT_BIG(*) AS [Count], ISNULL(CHECKSUM_AGG(BINARY_CHECKSUM(EventType, SubjectType, SubjectId, OccurredAt)), 0) AS [Checksum] FROM " + table;
-        var keys = await db.Database.SqlQueryRaw<JournalChecksum>(keysSql).SingleAsync(ct);
-        var shape = await db.Database.SqlQueryRaw<JournalChecksum>(shapeSql).SingleAsync(ct);
+        var where = before is null ? "" : " WHERE OccurredAt < {0}";
+        object[] parameters = before is null ? [] : [before.Value];
+        var keysSql = "SELECT COUNT_BIG(*) AS [Count], ISNULL(CHECKSUM_AGG(BINARY_CHECKSUM(IdempotencyKey)), 0) AS [Checksum] FROM " + table + where;
+        var shapeSql = "SELECT COUNT_BIG(*) AS [Count], ISNULL(CHECKSUM_AGG(BINARY_CHECKSUM(EventType, SubjectType, SubjectId, OccurredAt)), 0) AS [Checksum] FROM " + table + where;
+        var keys = await db.Database.SqlQueryRaw<JournalChecksum>(keysSql, parameters).SingleAsync(ct);
+        var shape = await db.Database.SqlQueryRaw<JournalChecksum>(shapeSql, parameters).SingleAsync(ct);
         return $"{keys.Count}:{keys.Checksum:x8}{shape.Checksum:x8}";
     }
 
-    private static async Task<string> JournalFingerprintStreamedAsync(TwinDbContext db, CancellationToken ct)
+    private static async Task<string> JournalFingerprintStreamedAsync(TwinDbContext db, DateTimeOffset? before, CancellationToken ct)
     {
         using var hash = IncrementalHash.CreateHash(HashAlgorithmName.SHA256);
         var count = 0;
         await foreach (var e in db.ObservedEvents.AsNoTracking().OrderBy(e => e.IdempotencyKey).AsAsyncEnumerable().WithCancellation(ct))
         {
+            if (before is not null && e.OccurredAt >= before)
+            {
+                continue;
+            }
             e.Id = 0;
             hash.AppendData(Encoding.UTF8.GetBytes(JsonSerializer.Serialize(e, IntakeJson.Options)));
             count++;
