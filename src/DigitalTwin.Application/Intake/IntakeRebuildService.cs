@@ -199,8 +199,9 @@ public sealed class IntakeRebuildService(
             Step("catchUp");
             _phase = "comparing journals";
             var journalBefore = timeProvider.GetUtcNow() - JournalComparisonLag;
-            var liveJournalTask = store.GetJournalFingerprintAsync(journalBefore, ct);
-            var shadowJournalTask = shadow.GetJournalFingerprintAsync(journalBefore, ct);
+            var compactedScope = boundary is { } b ? new JournalCompactionScope(b, JournalRetentionService.Keep) : null;
+            var liveJournalTask = store.GetJournalFingerprintAsync(journalBefore, compactedScope, ct);
+            var shadowJournalTask = shadow.GetJournalFingerprintAsync(journalBefore, compactedScope, ct);
             await Task.WhenAll(liveJournalTask, shadowJournalTask);
             var liveJournal = await liveJournalTask;
             var shadowJournal = await shadowJournalTask;
