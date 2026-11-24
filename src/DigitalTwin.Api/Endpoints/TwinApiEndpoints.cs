@@ -188,7 +188,9 @@ public static class TwinApiEndpoints
         protectedApi.MapPost("/admin/journal-retention/run", async (double? olderThanDays, bool? wait, JournalRetentionService journal) =>
         {
             var running = journal.StartOrJoin(olderThanDays is null ? null : Math.Max(0, olderThanDays.Value));
-            return wait == false ? Results.Accepted("/api/admin/storage", new { running = journal.Running }) : Results.Ok(await running);
+            return wait == false
+                ? Results.Accepted("/api/admin/storage", new { running = journal.Running, progress = journal.Progress, lastReport = journal.LastReport, lastError = journal.LastError })
+                : Results.Ok(await running);
         });
 
         protectedApi.MapGet("/admin/storage", async (bool? detail, RawIntakeRetentionService retention, JournalRetentionService journalRetention, IRawIntakeArchive archive, IRawIntakeStore rawStore, ITwinStore store, StorageReadout readout, CancellationToken ct) =>

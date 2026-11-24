@@ -1,3 +1,5 @@
+using System.Runtime.CompilerServices;
+using System.Text.Json;
 using DigitalTwin.Core.Ports;
 using DigitalTwin.Core.Observation;
 using DigitalTwin.Core.Projections;
@@ -20,12 +22,60 @@ public sealed partial class EfTwinStore
             return all.Where(e => e.OccurredAt <= asOf).ToList();
         }
 
-        // RANK keeps every row tied at the newest instant; the fold breaks ties by idempotency key (ordinal).
+        // Every row tied at the newest instant is kept; the fold breaks ties by idempotency key (ordinal).
+        // Two steps: the newest ids come from the state-as-of index alone, then rows are fetched in short chunks by
+        // clustered key. As one "WHERE Id IN (…)" statement the optimizer could scan the whole journal (stale statistics
+        // after large compactions) and outlive the timeout on the Basic tier.
         var table = JournalTable(db);
-        var sql = "SELECT e.* FROM " + table + " e WHERE e.Id IN (SELECT r.Id FROM (" +
-                  "SELECT Id, RANK() OVER (PARTITION BY SubjectType, SubjectId ORDER BY OccurredAt DESC) AS Rk FROM " + table +
-                  " WHERE EventType = {0} AND OccurredAt <= {1}) r WHERE r.Rk = 1)";
-        return await db.ObservedEvents.FromSqlRaw(sql, StateKinds.EventType, asOf).AsNoTracking().ToListAsync(ct);
+        var ids = new List<long>();
+        await foreach (var subject in StateSubjectsAsync(db, asOf, inclusive: true, ct))
+        {
+            var newest = subject[^1].OccurredAt;
+            ids.AddRange(subject.Where(k => k.OccurredAt == newest).Select(k => k.Id));
+        }
+        var rowsSql = "SELECT e.* FROM " + table + " e JOIN OPENJSON({0}) WITH (Id bigint '$') j ON e.Id = j.Id";
+        var events = new List<ObservedEvent>(ids.Count);
+        foreach (var chunk in ids.Chunk(500))
+        {
+            events.AddRange(await db.ObservedEvents.FromSqlRaw(rowsSql, JsonSerializer.Serialize(chunk)).AsNoTracking().ToListAsync(ct));
+        }
+        return events;
+    }
+
+    private sealed class StateKey
+    {
+        public long Id { get; set; }
+        public string SubjectType { get; set; } = string.Empty;
+        public string SubjectId { get; set; } = string.Empty;
+        public DateTimeOffset OccurredAt { get; set; }
+    }
+
+    /// <summary>
+    /// State observations before <paramref name="until"/> (or at it, when <paramref name="inclusive"/>), one subject at a time, oldest first within a subject. Streamed
+    /// in the state-as-of index's own order: a window function over it sorted or spooled in tempdb, and on the Basic tier's
+    /// IO budget that single statement outlived its timeout whenever the index was not cached.
+    /// </summary>
+    private static async IAsyncEnumerable<List<StateKey>> StateSubjectsAsync(TwinDbContext db, DateTimeOffset until, bool inclusive,
+        [EnumeratorCancellation] CancellationToken ct)
+    {
+        var sql = "SELECT Id, SubjectType, SubjectId, OccurredAt FROM " + JournalTable(db) +
+                  " WHERE EventType = {0} AND OccurredAt " + (inclusive ? "<=" : "<") + " {1} ORDER BY SubjectType, SubjectId, OccurredAt";
+        var subject = new List<StateKey>();
+        await foreach (var key in db.Database.SqlQueryRaw<StateKey>(sql, StateKinds.EventType, until).AsAsyncEnumerable().WithCancellation(ct))
+        {
+            // The database collation is case-insensitive, so one subject's rows arrive together whatever their casing.
+            if (subject.Count > 0 && !(string.Equals(subject[0].SubjectType, key.SubjectType, StringComparison.OrdinalIgnoreCase)
+                                       && string.Equals(subject[0].SubjectId, key.SubjectId, StringComparison.OrdinalIgnoreCase)))
+            {
+                yield return subject;
+                subject = [];
+            }
+            subject.Add(key);
+        }
+        if (subject.Count > 0)
+        {
+            yield return subject;
+        }
     }
 
     public async Task<DateTimeOffset?> GetStateHistoryStartAsync(CancellationToken ct)
@@ -60,7 +110,18 @@ public sealed partial class EfTwinStore
         await using var db = await factory.CreateDbContextAsync(ct);
         db.Database.SetCommandTimeout(TimeSpan.FromMinutes(2));
         var ids = chainIds.ToList();
-        var query = db.ObservedEvents.AsNoTracking().Where(e => e.ChainId != null && ids.Contains(e.ChainId) && e.EventType != StateKinds.EventType);
+        IQueryable<ObservedEvent> query;
+        if (db.Database.IsSqlServer())
+        {
+            // Hundreds of chain ids as one IN list made the optimizer scan the whole journal (payloads included) once its
+            // statistics changed; OPENJSON is estimated small, so the ChainId index is seeked instead.
+            var sql = "SELECT e.* FROM " + JournalTable(db) + " e JOIN OPENJSON({0}) WITH (Id nvarchar(200) '$') j ON e.ChainId = j.Id WHERE e.EventType <> {1}";
+            query = db.ObservedEvents.FromSqlRaw(sql, JsonSerializer.Serialize(ids), StateKinds.EventType).AsNoTracking();
+        }
+        else
+        {
+            query = db.ObservedEvents.AsNoTracking().Where(e => e.ChainId != null && ids.Contains(e.ChainId) && e.EventType != StateKinds.EventType);
+        }
         if (eventTypes is { Count: > 0 })
         {
             var types = eventTypes.ToList();

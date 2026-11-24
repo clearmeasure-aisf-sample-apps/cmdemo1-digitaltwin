@@ -22,7 +22,8 @@ public sealed class JournalRetentionOptions
     public double MaxJournalMb { get; set; } = 250;
 }
 
-public sealed record JournalRetentionDay(DateOnly Day, int Archived, int CheckpointSubjects, int SupersededStateRemoved, int LifecycleRemoved, string Reason);
+/// <summary><paramref name="FetchedFromSql"/>: rows read out of SQL for the day file (rows already in it are not read again).</summary>
+public sealed record JournalRetentionDay(DateOnly Day, int Archived, int FetchedFromSql, int CheckpointSubjects, int SupersededStateRemoved, int LifecycleRemoved, string Reason);
 
 public sealed record JournalRetentionReport(
     DateTimeOffset StartedAt,
@@ -61,6 +62,9 @@ public sealed class JournalRetentionService(
     public string? LastError { get; private set; }
 
     public bool Running => _current is { IsCompleted: false };
+
+    /// <summary>What the running pass is doing (day and step), so a long run on a busy tier can be followed.</summary>
+    public string? Progress { get; private set; }
 
     /// <summary>Starts a run (or joins the running one), detached from callers: an HTTP timeout never cancels it.</summary>
     public Task<JournalRetentionReport> StartOrJoin(double? olderThanDays)
@@ -114,6 +118,7 @@ public sealed class JournalRetentionService(
             var through = meta.ArchivedThrough ?? (archived.Count > 0 ? JournalArchiveFormat.StartOf(archived.Max().AddDays(1)) : DateTimeOffset.MinValue);
 
             // Rows that arrived after their day was archived (backfilled lifecycle events with old timestamps).
+            Progress = "looking for rows that arrived after their day was archived";
             foreach (var day in await store.GetCompactableJournalDaysAsync(through, Keep, ct))
             {
                 results.Add(await ArchiveAsync(day, through, archived.Contains(day), "late", ct));
@@ -151,6 +156,7 @@ public sealed class JournalRetentionService(
         }
         finally
         {
+            Progress = null;
             timeTravel.InvalidateArchive();
         }
         return Done(null, results, await JournalMbAsync(ct));
@@ -169,8 +175,10 @@ public sealed class JournalRetentionService(
             end = until;
         }
 
+        var label = $"{day:yyyy-MM-dd} ({reason})";
         var fromSql = new HashSet<long>();
-        var written = await archive.WriteDayAsync(day, MergedAsync(day, alreadyArchived, start, end, fromSql, ct), ct);
+        var written = await archive.WriteDayAsync(day, MergedAsync(day, alreadyArchived, start, end, fromSql, label, ct), ct);
+        Progress = $"{label}: verifying the day file";
         var check = new HashSet<long>();
         await foreach (var ev in archive.ReadDayAsync(day, ct))
         {
@@ -182,6 +190,7 @@ public sealed class JournalRetentionService(
         }
 
         // The fold input for "as of the end of what is archived": SQL still holds every subject's newest observation before it.
+        Progress = $"{label}: writing the checkpoint";
         var checkpoint = await store.GetLatestStateEventsAsync(end.AddTicks(-1), ct);
         var subjects = await archive.WriteCheckpointAsync(day, checkpoint.ToAsyncEnumerable(), ct);
         if (subjects != checkpoint.Count)
@@ -189,13 +198,20 @@ public sealed class JournalRetentionService(
             throw new InvalidOperationException($"Journal checkpoint verification failed for {day:yyyy-MM-dd}: wrote {subjects} of {checkpoint.Count}.");
         }
 
+        Progress = $"{label}: compacting SQL";
         var compaction = await store.CompactJournalAsync(start, end, Keep, ct);
-        return new JournalRetentionDay(day, written, subjects, compaction.SupersededStateRows, compaction.LifecycleRows, reason);
+        if (compaction.SupersededStateRows + compaction.LifecycleRows > 1000)
+        {
+            Progress = $"{label}: refreshing statistics";
+            await store.RefreshJournalStatisticsAsync(ct);
+        }
+        return new JournalRetentionDay(day, written, fromSql.Count, subjects, compaction.SupersededStateRows, compaction.LifecycleRows, reason);
     }
 
     private async IAsyncEnumerable<ObservedEvent> MergedAsync(DateOnly day, bool alreadyArchived, DateTimeOffset start, DateTimeOffset end,
-        HashSet<long> fromSql, [EnumeratorCancellation] CancellationToken ct)
+        HashSet<long> fromSql, string label, [EnumeratorCancellation] CancellationToken ct)
     {
+        Progress = $"{label}: writing the day file";
         var seen = new HashSet<long>();
         if (alreadyArchived)
         {
@@ -205,9 +221,14 @@ public sealed class JournalRetentionService(
                 yield return ev;
             }
         }
-        await foreach (var ev in store.StreamJournalAsync(start, end, ct))
+        // A day archived before (a late row, or a run interrupted before compaction finished) is not read out of SQL again.
+        await foreach (var ev in store.StreamJournalAsync(start, end, seen, ct))
         {
             fromSql.Add(ev.Id);
+            if (fromSql.Count % 1000 == 0)
+            {
+                Progress = $"{label}: writing the day file, {fromSql.Count} rows read from SQL";
+            }
             if (seen.Add(ev.Id))
             {
                 yield return ev;

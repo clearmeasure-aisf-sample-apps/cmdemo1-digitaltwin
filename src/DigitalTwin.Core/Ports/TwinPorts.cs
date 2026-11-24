@@ -95,14 +95,20 @@ public interface ITwinStore : ITwinReadModel
     /// <summary>UTC days (of occurrence) that hold journal rows, from <paramref name="from"/> up to, not including, <paramref name="before"/>.</summary>
     Task<IReadOnlyList<DateOnly>> GetJournalDaysAsync(DateTimeOffset from, DateTimeOffset before, CancellationToken ct);
 
-    /// <summary>Journal rows that occurred in [<paramref name="from"/>, <paramref name="until"/>), oldest first, streamed.</summary>
-    IAsyncEnumerable<ObservedEvent> StreamJournalAsync(DateTimeOffset from, DateTimeOffset until, CancellationToken ct);
+    /// <summary>
+    /// Journal rows that occurred in [<paramref name="from"/>, <paramref name="until"/>), oldest first, streamed; rows whose
+    /// id is in <paramref name="skip"/> (already archived) are never fetched.
+    /// </summary>
+    IAsyncEnumerable<ObservedEvent> StreamJournalAsync(DateTimeOffset from, DateTimeOffset until, IReadOnlySet<long>? skip, CancellationToken ct);
 
     /// <summary>
     /// After [<paramref name="from"/>, <paramref name="until"/>) is archived: removes state observations (drift excepted)
     /// superseded before <paramref name="until"/>, and lifecycle events of that range <paramref name="keep"/> does not keep.
     /// </summary>
     Task<JournalCompaction> CompactJournalAsync(DateTimeOffset from, DateTimeOffset until, JournalKeepRule keep, CancellationToken ct);
+
+    /// <summary>Refreshes the journal's optimizer statistics (after large compactions, so plans do not turn into scans).</summary>
+    Task RefreshJournalStatisticsAsync(CancellationToken ct);
 
     /// <summary>Days before <paramref name="before"/> still holding rows a compaction would remove (rows that arrived after their day was archived).</summary>
     Task<IReadOnlyList<DateOnly>> GetCompactableJournalDaysAsync(DateTimeOffset before, JournalKeepRule keep, CancellationToken ct);
