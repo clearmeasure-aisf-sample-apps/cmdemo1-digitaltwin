@@ -98,10 +98,17 @@ public sealed partial class EfTwinStore
         // the end of the day can pick this row (ties at the newest instant are all kept; the fold breaks them by key).
         // A DELETE TOP with that EXISTS scanned the whole clustered index (payloads in-row) once per batch on a Basic
         // tier: pick the ids from the narrow (EventType, SubjectType, SubjectId, OccurredAt) index, then delete by key.
-        var supersededSql =
-            "SELECT x.Id AS [Value] FROM (SELECT Id, OccurredAt, MAX(OccurredAt) OVER (PARTITION BY SubjectType, SubjectId) AS Newest " +
-            "FROM " + table + " WHERE EventType = {0} AND SubjectType <> {1} AND OccurredAt < {2}) x WHERE x.OccurredAt < x.Newest";
-        var supersededIds = await db.Database.SqlQueryRaw<long>(supersededSql, StateKinds.EventType, StateKinds.Drift.Name, end).ToListAsync(ct);
+        db.Database.SetCommandTimeout(TimeSpan.FromMinutes(10));
+        var supersededIds = new List<long>();
+        await foreach (var subject in StateSubjectsAsync(db, end, inclusive: false, ct))
+        {
+            if (!string.Equals(subject[0].SubjectType, StateKinds.Drift.Name, StringComparison.OrdinalIgnoreCase))
+            {
+                var newest = subject[^1].OccurredAt;
+                supersededIds.AddRange(subject.Where(k => k.OccurredAt < newest).Select(k => k.Id));
+            }
+        }
+        db.Database.SetCommandTimeout(TimeSpan.FromMinutes(5));
         var deleteSql = "DELETE e FROM " + table + " e JOIN OPENJSON({0}) WITH (Id bigint '$') j ON e.Id = j.Id OPTION (LOOP JOIN)";
         var superseded = 0;
         foreach (var chunk in supersededIds.Chunk(CompactionBatch))
