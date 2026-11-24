@@ -35,6 +35,7 @@ public sealed class TwinAppFactory(
             ["Twin:Messaging:Transport"] = "LocalDurable",
             ["Twin:Messaging:DurabilityMode"] = "Solo",
             ["Twin:Messaging:RetryDelays"] = "50,100,150",
+            ["Twin:Messaging:TransientRetryDelays"] = "50,100,150,200,250",
             // Integration tests never call GitHub, even where the environment carries a token.
             ["GH_PAT"] = "",
             ["GITHUB_TOKEN"] = "",
