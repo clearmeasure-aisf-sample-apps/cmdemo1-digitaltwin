@@ -44,6 +44,7 @@ public static class MessagingHostExtensions
             opts.Durability.Mode = Enum.Parse<DurabilityMode>(messaging.DurabilityMode, ignoreCase: true);
             // Evaluated first: deferral (rebuild in progress) is not a failure and never dead-letters.
             opts.Policies.OnException<IntakeApplyDeferredException>().ScheduleRetryIndefinitely(TimeSpan.FromSeconds(5), TimeSpan.FromSeconds(15), TimeSpan.FromSeconds(30));
+            opts.Policies.OnException(TransientDatabaseFailure.Matches).ScheduleRetry([.. messaging.TransientRetryDelaySchedule]).Then.MoveToErrorQueue();
             opts.Policies.OnAnyException().RetryWithCooldown([.. messaging.RetryDelaySchedule]).Then.MoveToErrorQueue();
 
         });

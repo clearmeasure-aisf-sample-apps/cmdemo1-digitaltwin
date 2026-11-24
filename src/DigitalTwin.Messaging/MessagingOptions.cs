@@ -40,14 +40,24 @@ public sealed class MessagingOptions
     /// <summary>Comma-separated backoff (ms) between retries; after the last retry fails the message is dead-lettered.</summary>
     public string RetryDelays { get; set; } = "1000,5000,15000";
 
+    /// <summary>
+    /// Backoff (ms) for transient database failures (timeouts, deadlocks, throttling). On the Basic tier a maintenance
+    /// pass can hold IO at its cap for minutes, far longer than <see cref="RetryDelays"/>: about 18 minutes in all.
+    /// </summary>
+    public string TransientRetryDelays { get; set; } = "30000,60000,120000,300000,600000";
+
     /// <summary>Raw events still unprocessed this many minutes after capture are re-sent (0 turns recovery off).</summary>
     public int RecoverStrandedAfterMinutes { get; set; } = 10;
 
     /// <summary>Wolverine durability mode: Balanced (multi-node safe, default) or Solo (single node, faster recovery; tests).</summary>
     public string DurabilityMode { get; set; } = "Balanced";
 
-    public IReadOnlyList<TimeSpan> RetryDelaySchedule
-        => RetryDelays.Split(',', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries)
+    public IReadOnlyList<TimeSpan> RetryDelaySchedule => Schedule(RetryDelays);
+
+    public IReadOnlyList<TimeSpan> TransientRetryDelaySchedule => Schedule(TransientRetryDelays);
+
+    private static List<TimeSpan> Schedule(string delays)
+        => delays.Split(',', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries)
             .Select(ms => TimeSpan.FromMilliseconds(int.Parse(ms, System.Globalization.CultureInfo.InvariantCulture)))
             .ToList();
 

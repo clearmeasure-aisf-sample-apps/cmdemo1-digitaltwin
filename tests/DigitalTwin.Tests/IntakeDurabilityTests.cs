@@ -181,6 +181,26 @@ public sealed class IntakeDurabilityTests(SqlServerFixture sql)
     }
 
     [Fact]
+    public async Task DatabaseTimeoutsAreWaitedOutLongerThanOrdinaryFailures()
+    {
+        // Five timeouts in a row: one more than the ordinary schedule (first try + 3 retries) would allow.
+        var faults = new FaultInjector { Key = "github:busy-1", FailuresLeft = 5, Failure = () => new InvalidOperationException("query failed", new TimeoutException("busy")) };
+        await using var app = new TwinAppFactory(
+            await sql.CreateDatabaseAsync(),
+            configureServices: services => services.AddSingleton<IIntakeApplyInterceptor>(faults));
+        using var client = app.CreateAuthedClient();
+
+        Assert.Equal(HttpStatusCode.OK, (await client.SendAsync(TwinAppFactory.GitHubWebhook("ping", "busy-1", PingPayload))).StatusCode);
+
+        await TwinAppFactory.WaitUntilAsync(
+            async () => await app.ScalarAsync("SELECT COUNT(*) FROM ObservedEvents WHERE IdempotencyKey = 'github:busy-1'") == 1,
+            ProcessingTimeout,
+            "the event is applied once the database answers again");
+        Assert.Equal(6, faults.Attempts);
+        Assert.Equal(0, (await client.GetFromJsonAsync<IntakeQueueStatus>("/api/intake", JsonWeb))!.DeadLetterCount);
+    }
+
+    [Fact]
     public async Task RebuildFromRawEventsYieldsIdenticalJournal()
     {
         await using var app = new TwinAppFactory(await sql.CreateDatabaseAsync());
@@ -282,14 +302,20 @@ public sealed class IntakeDurabilityTests(SqlServerFixture sql)
     {
         private int _attempts;
         public bool Enabled { get; set; } = true;
+        public string Key { get; init; } = "github:poison-1";
+        public int FailuresLeft { get; set; } = int.MaxValue;
+        public Func<Exception> Failure { get; init; } = () => new InvalidOperationException("injected processing failure");
         public int Attempts => _attempts;
 
         public ValueTask BeforeApplyAsync(RawIntakeEvent rawEvent, CancellationToken ct)
         {
-            if (Enabled && rawEvent.DedupeKey == "github:poison-1")
+            if (Enabled && rawEvent.DedupeKey == Key)
             {
                 Interlocked.Increment(ref _attempts);
-                throw new InvalidOperationException("injected processing failure");
+                if (FailuresLeft-- > 0)
+                {
+                    throw Failure();
+                }
             }
             return ValueTask.CompletedTask;
         }
