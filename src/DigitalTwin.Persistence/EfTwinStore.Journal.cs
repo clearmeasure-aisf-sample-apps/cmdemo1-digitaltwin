@@ -118,20 +118,10 @@ public sealed partial class EfTwinStore
         }
         int deleted;
 
-        var parameters = new List<object> { StateKinds.EventType, start, end, (int)EventOutcome.Failure };
-        string In(IReadOnlyList<string> values)
-        {
-            if (values.Count == 0)
-            {
-                return "(NULL)";
-            }
-            var names = values.Select(v => { parameters.Add(v); return "{" + (parameters.Count - 1) + "}"; });
-            return "(" + string.Join(", ", names) + ")";
-        }
+        var parameters = new List<object> { StateKinds.EventType, start, end };
         var lifecycleSql =
             "DELETE TOP (" + CompactionBatch + ") FROM " + table + " WHERE EventType <> {0} AND OccurredAt >= {1} AND OccurredAt < {2} " +
-            "AND NOT ((ChainId IS NOT NULL AND (EventType IN " + In(keep.Always) + " OR (EventType IN " + In(keep.FailuresOnly) + " AND Outcome = {3}))) " +
-            "OR EventType IN " + In(keep.Unconditional) + ")";
+            "AND NOT " + KeptLifecycleSql(keep, parameters);
         var lifecycle = 0;
         do
         {
@@ -141,6 +131,19 @@ public sealed partial class EfTwinStore
         }
         while (deleted > 0);
         return new JournalCompaction(superseded, lifecycle);
+    }
+
+    /// <summary>"<paramref name="keep"/> keeps this lifecycle row" as SQL; its values are appended to <paramref name="parameters"/>.</summary>
+    private static string KeptLifecycleSql(JournalKeepRule keep, List<object> parameters)
+    {
+        string Value(object value)
+        {
+            parameters.Add(value);
+            return "{" + (parameters.Count - 1) + "}";
+        }
+        string In(IReadOnlyList<string> values) => values.Count == 0 ? "(NULL)" : "(" + string.Join(", ", values.Select(Value)) + ")";
+        return "((ChainId IS NOT NULL AND (EventType IN " + In(keep.Always) + " OR (EventType IN " + In(keep.FailuresOnly) + " AND Outcome = " +
+               Value((int)EventOutcome.Failure) + "))) OR EventType IN " + In(keep.Unconditional) + ")";
     }
 
     public async Task<IReadOnlyList<DateOnly>> GetCompactableJournalDaysAsync(DateTimeOffset before, JournalKeepRule keep, CancellationToken ct)

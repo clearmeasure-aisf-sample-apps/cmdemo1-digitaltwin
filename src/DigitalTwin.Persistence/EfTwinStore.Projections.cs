@@ -4,6 +4,7 @@ using System.Text.Json;
 using DigitalTwin.Core.BuildAndArtifact;
 using DigitalTwin.Core.Intake;
 using DigitalTwin.Core.Observation;
+using DigitalTwin.Core.Ports;
 using DigitalTwin.Core.Projections;
 using DigitalTwin.Core.ReleaseAndDelivery;
 using DigitalTwin.Core.ReliabilityAndDrift;
@@ -251,15 +252,15 @@ public sealed partial class EfTwinStore
 
         if (includeJournal)
         {
-            result["journal"] = db.Database.IsSqlServer() ? await JournalFingerprintSqlServerAsync(db, null, ct) : await JournalFingerprintStreamedAsync(db, null, ct);
+            result["journal"] = db.Database.IsSqlServer() ? await JournalFingerprintSqlServerAsync(db, null, null, ct) : await JournalFingerprintStreamedAsync(db, null, null, ct);
         }
         return result;
     }
 
-    public async Task<string> GetJournalFingerprintAsync(DateTimeOffset before, CancellationToken ct)
+    public async Task<string> GetJournalFingerprintAsync(DateTimeOffset before, JournalCompactionScope? compacted, CancellationToken ct)
     {
         await using var db = await factory.CreateDbContextAsync(ct);
-        return db.Database.IsSqlServer() ? await JournalFingerprintSqlServerAsync(db, before, ct) : await JournalFingerprintStreamedAsync(db, before, ct);
+        return db.Database.IsSqlServer() ? await JournalFingerprintSqlServerAsync(db, before, compacted, ct) : await JournalFingerprintStreamedAsync(db, before, compacted, ct);
     }
 
     /// <summary>
@@ -268,26 +269,39 @@ public sealed partial class EfTwinStore
     /// observation keys embed their content hash; type, subject and time cover the rest. Read models are fingerprinted
     /// in full separately. BINARY_CHECKSUM is case-sensitive; CHECKSUM_AGG is order-independent.
     /// </summary>
-    private static async Task<string> JournalFingerprintSqlServerAsync(TwinDbContext db, DateTimeOffset? before, CancellationToken ct)
+    private static async Task<string> JournalFingerprintSqlServerAsync(TwinDbContext db, DateTimeOffset? before, JournalCompactionScope? compacted, CancellationToken ct)
     {
         db.Database.SetCommandTimeout(TimeSpan.FromMinutes(5));
         var table = JournalTable(db);
-        var where = before is null ? "" : " WHERE OccurredAt < {0}";
-        object[] parameters = before is null ? [] : [before.Value];
+        var parameters = new List<object>();
+        var conditions = new List<string>();
+        if (before is not null)
+        {
+            parameters.Add(before.Value);
+            conditions.Add("OccurredAt < {0}");
+        }
+        if (compacted is not null)
+        {
+            parameters.Add(StateKinds.EventType);
+            parameters.Add(compacted.Through);
+            var (type, through) = (parameters.Count - 2, parameters.Count - 1);
+            conditions.Add("NOT (EventType <> {" + type + "} AND OccurredAt < {" + through + "} AND NOT " + KeptLifecycleSql(compacted.Keep, parameters) + ")");
+        }
+        var where = conditions.Count == 0 ? "" : " WHERE " + string.Join(" AND ", conditions);
         var keysSql = "SELECT COUNT_BIG(*) AS [Count], ISNULL(CHECKSUM_AGG(BINARY_CHECKSUM(IdempotencyKey)), 0) AS [Checksum] FROM " + table + where;
         var shapeSql = "SELECT COUNT_BIG(*) AS [Count], ISNULL(CHECKSUM_AGG(BINARY_CHECKSUM(EventType, SubjectType, SubjectId, OccurredAt)), 0) AS [Checksum] FROM " + table + where;
-        var keys = await db.Database.SqlQueryRaw<JournalChecksum>(keysSql, parameters).SingleAsync(ct);
-        var shape = await db.Database.SqlQueryRaw<JournalChecksum>(shapeSql, parameters).SingleAsync(ct);
+        var keys = await db.Database.SqlQueryRaw<JournalChecksum>(keysSql, [.. parameters]).SingleAsync(ct);
+        var shape = await db.Database.SqlQueryRaw<JournalChecksum>(shapeSql, [.. parameters]).SingleAsync(ct);
         return $"{keys.Count}:{keys.Checksum:x8}{shape.Checksum:x8}";
     }
 
-    private static async Task<string> JournalFingerprintStreamedAsync(TwinDbContext db, DateTimeOffset? before, CancellationToken ct)
+    private static async Task<string> JournalFingerprintStreamedAsync(TwinDbContext db, DateTimeOffset? before, JournalCompactionScope? compacted, CancellationToken ct)
     {
         using var hash = IncrementalHash.CreateHash(HashAlgorithmName.SHA256);
         var count = 0;
         await foreach (var e in db.ObservedEvents.AsNoTracking().OrderBy(e => e.IdempotencyKey).AsAsyncEnumerable().WithCancellation(ct))
         {
-            if (before is not null && e.OccurredAt >= before)
+            if ((before is not null && e.OccurredAt >= before) || compacted?.Removes(e) == true)
             {
                 continue;
             }

@@ -136,6 +136,20 @@ public sealed class JournalArchiveTests(SqlServerFixture sql) : IDisposable
         var day1File = await archive.ReadDayAsync(DateOnly.FromDateTime(Day1.UtcDateTime), default).Select(e => e.IdempotencyKey).ToListAsync();
         Assert.Contains("test:late", day1File);
         Assert.Contains("test:push", day1File);
+
+        // A poll re-delivers an event compaction removed: SQL takes it in again as a new row. The day file keeps one entry
+        // per key, and a journal fingerprint scoped to what compaction keeps does not see the re-delivery.
+        var scope = new JournalCompactionScope((await archive.ReadMetaAsync(default))!.ArchivedThrough!.Value, JournalRetentionService.Keep);
+        var scopedBefore = await store.GetJournalFingerprintAsync(clock.Now, scope, default);
+        var wholeBefore = await store.GetJournalFingerprintAsync(clock.Now, null, default);
+        await store.AppendEventsIfNewAsync([Lifecycle("push", "dev.cdevents.change.merged", Day1.AddHours(13), null, EventOutcome.Success)], default);
+        Assert.Equal(1, await app.ScalarAsync("SELECT COUNT(*) FROM ObservedEvents WHERE IdempotencyKey = 'test:push'"));
+        Assert.Equal(scopedBefore, await store.GetJournalFingerprintAsync(clock.Now, scope, default));
+        Assert.NotEqual(wholeBefore, await store.GetJournalFingerprintAsync(clock.Now, null, default));
+
+        var redelivered = Assert.Single((await retention.RunAsync(olderThanDays: 0.01, default)).Days);
+        Assert.Equal(("late", 1), (redelivered.Reason, redelivered.LifecycleRemoved));
+        Assert.Single(await archive.ReadDayAsync(DateOnly.FromDateTime(Day1.UtcDateTime), default).Where(e => e.IdempotencyKey == "test:push").ToListAsync());
     }
 
     [Fact]

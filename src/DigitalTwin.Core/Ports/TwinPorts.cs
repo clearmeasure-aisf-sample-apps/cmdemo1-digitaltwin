@@ -63,8 +63,12 @@ public interface ITwinStore : ITwinReadModel
     /// <summary>Fingerprint per read model; <paramref name="includeJournal"/> adds the whole journal under "journal".</summary>
     Task<IReadOnlyDictionary<string, string>> GetReadModelFingerprintAsync(CancellationToken ct, bool includeJournal = true);
 
-    /// <summary>Fingerprint of the journal rows that occurred before <paramref name="before"/> ("count:checksum").</summary>
-    Task<string> GetJournalFingerprintAsync(DateTimeOffset before, CancellationToken ct);
+    /// <summary>
+    /// Fingerprint of the journal rows that occurred before <paramref name="before"/> ("count:checksum"). With
+    /// <paramref name="compacted"/>, lifecycle rows compaction removes before its boundary are left out: polls re-deliver
+    /// archived events, so how many of those sit in SQL until the next compaction says nothing about the journal.
+    /// </summary>
+    Task<string> GetJournalFingerprintAsync(DateTimeOffset before, JournalCompactionScope? compacted, CancellationToken ct);
 
     // Time travel: the journal's state observations as they stood at a point in time.
     /// <summary>The newest state observation per (kind, subject) that occurred at or before <paramref name="asOf"/>.</summary>
@@ -154,6 +158,12 @@ public sealed record JournalKeepRule(IReadOnlyList<string> Always, IReadOnlyList
     public bool Keeps(ObservedEvent e)
         => (e.ChainId is not null && (Always.Contains(e.EventType) || (FailuresOnly.Contains(e.EventType) && e.Outcome == EventOutcome.Failure)))
            || Unconditional.Contains(e.EventType);
+}
+
+/// <summary>Lifecycle rows that occurred before <paramref name="Through"/> are compacted unless <paramref name="Keep"/> keeps them.</summary>
+public sealed record JournalCompactionScope(DateTimeOffset Through, JournalKeepRule Keep)
+{
+    public bool Removes(ObservedEvent e) => e.EventType != StateKinds.EventType && e.OccurredAt < Through && !Keep.Keeps(e);
 }
 
 /// <summary>What one compaction removed from SQL.</summary>

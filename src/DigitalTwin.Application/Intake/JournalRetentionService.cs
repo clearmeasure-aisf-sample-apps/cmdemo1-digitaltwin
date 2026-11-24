@@ -176,13 +176,13 @@ public sealed class JournalRetentionService(
         }
 
         var label = $"{day:yyyy-MM-dd} ({reason})";
-        var fromSql = new HashSet<long>();
+        var fromSql = new HashSet<string>(StringComparer.Ordinal);
         var written = await archive.WriteDayAsync(day, MergedAsync(day, alreadyArchived, start, end, fromSql, label, ct), ct);
         Progress = $"{label}: verifying the day file";
-        var check = new HashSet<long>();
+        var check = new HashSet<string>(StringComparer.Ordinal);
         await foreach (var ev in archive.ReadDayAsync(day, ct))
         {
-            check.Add(ev.Id);
+            check.Add(ev.IdempotencyKey);
         }
         if (check.Count != written || !fromSql.IsSubsetOf(check))
         {
@@ -209,27 +209,32 @@ public sealed class JournalRetentionService(
     }
 
     private async IAsyncEnumerable<ObservedEvent> MergedAsync(DateOnly day, bool alreadyArchived, DateTimeOffset start, DateTimeOffset end,
-        HashSet<long> fromSql, string label, [EnumeratorCancellation] CancellationToken ct)
+        HashSet<string> fromSql, string label, [EnumeratorCancellation] CancellationToken ct)
     {
         Progress = $"{label}: writing the day file";
-        var seen = new HashSet<long>();
+        var archivedIds = new HashSet<long>();
+        var keys = new HashSet<string>(StringComparer.Ordinal);
         if (alreadyArchived)
         {
             await foreach (var ev in archive.ReadDayAsync(day, ct))
             {
-                seen.Add(ev.Id);
-                yield return ev;
+                archivedIds.Add(ev.Id);
+                if (keys.Add(ev.IdempotencyKey))
+                {
+                    yield return ev;
+                }
             }
         }
         // A day archived before (a late row, or a run interrupted before compaction finished) is not read out of SQL again.
-        await foreach (var ev in store.StreamJournalAsync(start, end, seen, ct))
+        // One entry per idempotency key: polls re-deliver events compaction removed, and SQL takes them in again as new rows.
+        await foreach (var ev in store.StreamJournalAsync(start, end, archivedIds, ct))
         {
-            fromSql.Add(ev.Id);
+            fromSql.Add(ev.IdempotencyKey);
             if (fromSql.Count % 1000 == 0)
             {
                 Progress = $"{label}: writing the day file, {fromSql.Count} rows read from SQL";
             }
-            if (seen.Add(ev.Id))
+            if (keys.Add(ev.IdempotencyKey))
             {
                 yield return ev;
             }
